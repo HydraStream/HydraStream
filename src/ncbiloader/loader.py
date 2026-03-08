@@ -9,10 +9,7 @@ import random
 import signal
 from collections.abc import AsyncGenerator, Iterable
 from types import TracebackType
-from typing import Self
-
-import httpx
-from aiolimiter import AsyncLimiter
+from typing import Any, Self
 
 from .models import Chunk, File
 from .monitor import ProgressMonitor
@@ -39,27 +36,23 @@ class NCBILoader:
         silent: bool = False,
         output_dir: str = "download",
         stream_buffer_size: int | None = None,
-        timeout: int | float = 10.0,
-        chunk_timeout: int | float = 60,
-        follow_redirects: bool = True,
-        http2: bool = False,
-        verify: bool = False,
+        chunk_timeout: int = 120,
+        client_kwargs: dict[str, Any] | None = None,
     ) -> None:
+
         self._monitor = ProgressMonitor(silent=silent, log_file=f"{output_dir}/session.log")
-        self.network = NetworkClient(threads=threads, http2=http2, monitor=self._monitor)
+        self.network = NetworkClient(threads=threads, monitor=self._monitor, client_kwargs=client_kwargs)
         self.storage = StorageManager(output_dir=output_dir)
         self.ncbi = NCBIProvider(network=self.network)
         self.providers = NCBIProvider(self.network)
 
         self._max_conns = threads
+        self.chunk_timeout = chunk_timeout
         self._stream = None
         self._stream_buffer_size = stream_buffer_size
         self.stream_chunk_size = 5 * 1024 * 1024
         self.MIN_CHUNK = 1024 * 1024
-        self.chunk_timeout = chunk_timeout
-        self._limiter = AsyncLimiter(threads * 2, 1)
         self._semaphore = asyncio.Semaphore(threads)
-        self._timeout = httpx.Timeout(timeout, read=5.0)
 
         self._queue = asyncio.PriorityQueue()
         maxsize = stream_buffer_size // self.MIN_CHUNK if stream_buffer_size else 0
@@ -237,7 +230,7 @@ class NCBILoader:
             buffer = bytearray()
             try:
                 async with self.network.stream_chunk(
-                    self.files[chunk.filename].url, headers=headers, timeout=60
+                    self.files[chunk.filename].url, headers=headers, chunk_timeout=self.chunk_timeout
                 ) as r:
                     if not self._stream:
                         fd = self.files[chunk.filename].fd

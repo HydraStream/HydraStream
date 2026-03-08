@@ -6,10 +6,11 @@ import contextlib
 import email.utils
 import math
 import random
+import ssl
 import time
 import typing
 from collections.abc import AsyncIterator
-from typing import TypedDict, Unpack
+from typing import Any, TypedDict, Unpack, cast
 
 import httpx
 from aiolimiter import AsyncLimiter
@@ -18,6 +19,7 @@ from httpx._types import (
     AuthTypes,
     CookieTypes,
     HeaderTypes,
+    ProxyTypes,
     QueryParamTypes,
     RequestContent,
     RequestData,
@@ -27,6 +29,25 @@ from httpx._types import (
 )
 
 from ncbiloader.monitor import ProgressMonitor
+
+
+class HttpxClientOptions(TypedDict, total=False):
+    headers: HeaderTypes | None
+    cookies: CookieTypes | None
+    auth: AuthTypes | None
+    proxy: ProxyTypes | None
+    timeout: TimeoutTypes
+    verify: ssl.SSLContext | str | bool
+    follow_redirects: bool
+    http2: bool
+    http1: bool
+
+
+DEFAULT_OPTIONS: HttpxClientOptions = {
+    "timeout": httpx.Timeout(10.0, read=5.0),
+    "http2": True,
+    "follow_redirects": True,
+}
 
 
 class RequestOptions(TypedDict, total=False):
@@ -156,20 +177,28 @@ class NetworkClient:
     """
 
     def __init__(
-        self, threads: int, monitor: ProgressMonitor, timeout: float = 10.0, http2: bool = True
+        self,
+        threads: int,
+        monitor: ProgressMonitor,
+        client_kwargs: dict[str, Any] | None,
     ) -> None:
-        self.monitor = monitor
-        # +10% buffer for max_connections to prevent TIME_WAIT bottlenecks
-        limits = httpx.Limits(max_connections=math.ceil(threads * 1.1), max_keepalive_connections=threads)
 
+        self.monitor = monitor
         self.rate_limiter = DynamicRateLimiter(threads * 2)
-        self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, read=5.0),
-            limits=limits,
-            http2=http2,
-            follow_redirects=True,
-            headers={"Accept-Encoding": "identity", "User-Agent": "NCBILoader/1.0"},
+
+        options = cast(dict[str, Any], {**DEFAULT_OPTIONS, **(client_kwargs or {})})
+
+        user_headers = options.pop("headers", None)
+        headers_obj = httpx.Headers(user_headers)
+        headers_obj.setdefault("Accept-Encoding", "identity")
+        headers_obj.setdefault("User-Agent", "NCBILoader/1.0")
+
+        calc_limits = httpx.Limits(
+            max_connections=math.ceil(threads * 1.1), max_keepalive_connections=threads, keepalive_expiry=4.5
         )
+        final_limits = options.pop("limits", calc_limits)
+
+        self.client = httpx.AsyncClient(headers=headers_obj, limits=final_limits, **options)
 
     async def _evaluate_failure(
         self, url: str, attempt: int, response: httpx.Response | None, exc: Exception | None
@@ -194,7 +223,7 @@ class NetworkClient:
             return delay
 
         if exc is not None:
-            if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
+            if isinstance(exc, (httpx.RequestError, TimeoutError, asyncio.TimeoutError)):
                 delay = random.uniform(0, 2**attempt)
                 self.monitor.log(
                     f"Network issue ({type(exc).__name__}) on {url}. Retrying in {delay:.2f}s...",
@@ -245,7 +274,7 @@ class NetworkClient:
 
     @contextlib.asynccontextmanager
     async def stream_chunk(
-        self, url: str, headers: dict[str, str], timeout: int
+        self, url: str, headers: dict[str, str], chunk_timeout: int
     ) -> AsyncIterator[httpx.Response]:
         """
         Context manager for streaming large file chunks asynchronously.
@@ -262,11 +291,12 @@ class NetworkClient:
             httpx.HTTPStatusError: If server responds with 400+ status code.
             TimeoutError: If the chunk download exceeds the specified absolute timeout.
         """
+
         for attempt in range(1, 4):
             response = None
             async with self.rate_limiter.acquire():
                 try:
-                    async with asyncio.timeout(timeout):
+                    async with asyncio.timeout(chunk_timeout):
                         async with self.client.stream("GET", url, headers=headers) as response:
                             if response.status_code < 400:
                                 yield response
