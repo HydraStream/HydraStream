@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import pytest
+
 from hydrastream.models import File
 from hydrastream.storage import StorageManager
 
@@ -52,9 +53,7 @@ def test_save_and_load_state(tmp_path: Path) -> None:
     """We check that StorageManager is correctly searching for and loading .state.json"""
     storage = StorageManager(output_dir=str(tmp_path))
 
-    file_obj = File(
-        filename="data.tar", url="http://", content_length=1000, chunk_size=500
-    )
+    file_obj = File(filename="data.tar", url="http://", content_length=1000, chunk_size=500)
     (tmp_path / "data.tar").touch()
 
     storage.save_state(file_obj)

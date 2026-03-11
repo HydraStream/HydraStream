@@ -1,6 +1,4 @@
-# .pre-commit-config.yaml
 repos:
-  # Standard out-of-the-box hooks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
@@ -9,13 +7,29 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: check-added-large-files
+      - id: debug-statements
+      - id: check-merge-conflict
 
-  # Ruff: Linter & Formatter
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.9.9
     hooks:
-      # Run the linter and automatically fix safe issues
       - id: ruff
-        args: [ --fix ]
-      # Run the formatter
+        args: [ --fix, --exit-non-zero-on-fix ]
       - id: ruff-format
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.8.3
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml"]
+        additional_dependencies: ["bandit[toml]"]
+
+  - repo: local
+    hooks:
+      - id: pyright
+        name: pyright
+        entry: pyright
+        language: system
+        types: [python]
+        pass_filenames: false

@@ -46,7 +46,6 @@ def test_chunk_is_finished() -> None:
 
 
 def test_to_json_in_json() -> None:
-
     total_size = 105
     chunk_size = 50
 

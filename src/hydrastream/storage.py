@@ -30,7 +30,6 @@ class StorageManager:
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def get_unique_path(self, file_path: Path) -> Path:
-
         if not file_path.is_file():
             return file_path
 
