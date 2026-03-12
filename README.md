@@ -1,5 +1,6 @@
 # 🐉 HydraStream
 
+[![PyPI version](https://badge.fury.io/py/hydrastream.svg)](https://pypi.org/project/hydrastream/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tests](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml/badge.svg)](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml)
@@ -37,15 +38,21 @@ A high-performance, fault-tolerant, and streaming-capable downloader for Big Dat
 
 ## 🛠 Installation
 
-Requires Python 3.11+. Install globally using `uv` (recommended) or `pipx`:
+Requires Python 3.11+. The easiest way to use HydraStream as a CLI app is to install it globally via `uv` (recommended) or `pipx`:
 
 ```bash
-uv tool install git+https://github.com/Zhukovetski/HydraStream.git
+uv tool install hydrastream
 ```
 ```bash
-pipx install git+https://github.com/Zhukovetski/HydraStream.git
+pipx install hydrastream
 ```
-
+To use it as a Python library in your own projects:
+```bash
+uv add hydrastream
+```
+```bash
+pip install hydrastream
+```
 
 You can use hydrastream, hstream, or simply hs to run the tool from anywhere in your system:
 ```bash

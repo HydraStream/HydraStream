@@ -293,7 +293,7 @@ http2 = [
 
 [[package]]
 name = "hydrastream"
-version = "1.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiolimiter" },
