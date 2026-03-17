@@ -7,7 +7,11 @@ import httpx
 import pytest
 import respx
 
-from hydrastream.loader import HydraStream
+# ПРАВИЛЬНЫЕ ИМПОРТЫ:
+from hydrastream.models import (
+    HydraStream,  # Импортируем твой главный датакласс-контейнер
+)
+from hydrastream.producer import chunk_producer  # Импортируем чистую функцию
 
 
 @pytest.mark.asyncio
@@ -17,20 +21,34 @@ async def test_add_task_producer(tmp_path: Path) -> None:
 
     url = "https://fake-ncbi.com/genome.gz"
 
-    respx.head(url).mock(return_value=httpx.Response(200, headers={"Content-Length": "500"}))
-    loader = HydraStream(output_dir=str(tmp_path), quiet=True)
+    # 1. Имитируем ответ сервера
+    respx.head(url).mock(
+        return_value=httpx.Response(200, headers={"Content-Length": "500"})
+    )
 
-    await loader._add_task_producer([url], expected_checksums=None)
-    assert "genome.gz" in loader.files
+    # 2. Создаем наш глобальный контекст (Завод)
+    # tmp_path автоматически создаст временную папку для теста
+    engine = HydraStream(output_dir=str(tmp_path), quiet=True)
 
-    file_obj = loader.files["genome.gz"]
-    assert file_obj.content_length == 500
+    # 3. Вызываем функцию Продюсера.
+    # ВАЖНО: передаем engine.producer (это ProducerState) первым аргументом!
+    await chunk_producer(engine.producer, [url], expected_checksums=None)
 
-    file_path = loader.storage.out_dir / "genome.gz"
+    # 4. ПРОВЕРКИ (Asserts)
+    # Так как Продюсер пишет данные в общие словари (которые лежат в engine),
+    # мы проверяем именно их!
+    assert "genome.gz" in engine.files
+
+    file_obj = engine.files["genome.gz"]
+    assert file_obj.meta.content_length == 500
+
+    # Проверяем физический диск (storage_state)
+    file_path = engine.storage.out_dir / "genome.gz"
     assert file_path.exists()
     assert file_path.stat().st_size == 500
 
-    assert not loader._queue.empty()
+    # Проверяем, что чанки упали в очередь
+    assert not engine.chunk_queue.empty()
 
 
 @pytest.mark.asyncio
@@ -40,12 +58,12 @@ async def test_loader_handles_404_gracefully(tmp_path: Path) -> None:
 
     respx.head(url).mock(return_value=httpx.Response(404))
 
-    loader = HydraStream(output_dir=str(tmp_path), quiet=True)
+    engine = HydraStream(output_dir=str(tmp_path), quiet=True)
 
-    await loader.run(url)
+    await engine.run(url)
 
     filename = "missing_genome.gz"
-    assert filename not in loader.files
+    assert filename not in engine.files
     assert not (tmp_path / filename).exists()
 
 
@@ -54,7 +72,9 @@ async def test_loader_handles_404_gracefully(tmp_path: Path) -> None:
 async def test_graceful_shutdown_prevents_hang_run(tmp_path: Path) -> None:
     url = "https://fake-ncbi.com/huge_file.gz"
 
-    respx.head(url).mock(return_value=httpx.Response(200, headers={"Content-Length": "100000000000"}))
+    respx.head(url).mock(
+        return_value=httpx.Response(200, headers={"Content-Length": "100000000000"})
+    )
 
     async def slow_stream() -> AsyncGenerator[Literal[b"12345"]]:
         while True:
@@ -72,9 +92,11 @@ async def test_graceful_shutdown_prevents_hang_run(tmp_path: Path) -> None:
     try:
         await asyncio.wait_for(run_task, timeout=2.0)
     except TimeoutError:
-        pytest.fail("CRITICAL ERROR: The program freezes when stopped! Dedlock is in line!")
+        pytest.fail(
+            "CRITICAL ERROR: The program freezes when stopped! Dedlock is in line!"
+        )
 
-    assert loader.is_running is False
+    assert loader.ctx.is_running is False
 
 
 @pytest.mark.asyncio
@@ -82,7 +104,9 @@ async def test_graceful_shutdown_prevents_hang_run(tmp_path: Path) -> None:
 async def test_graceful_shutdown_prevents_hang_stream(tmp_path: Path) -> None:
     url = "https://fake-ncbi.com/huge_stream_file.gz"
 
-    respx.head(url).mock(return_value=httpx.Response(200, headers={"Content-Length": "100000000000"}))
+    respx.head(url).mock(
+        return_value=httpx.Response(200, headers={"Content-Length": "100000000000"})
+    )
 
     async def slow_stream() -> AsyncGenerator[Literal[b"12345"]]:
         while True:
@@ -106,6 +130,8 @@ async def test_graceful_shutdown_prevents_hang_stream(tmp_path: Path) -> None:
     try:
         await asyncio.wait_for(run_task, timeout=2.0)
     except TimeoutError:
-        pytest.fail("CRITICAL ERROR: stream_all freezes when stopped! Dedlock is in line!")
+        pytest.fail(
+            "CRITICAL ERROR: stream_all freezes when stopped! Dedlock is in line!"
+        )
 
-    assert loader.is_running is False
+    assert loader.ctx.is_running is False

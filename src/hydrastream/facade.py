@@ -10,11 +10,6 @@ from hydrastream.models import HydraConfig, HydraContext
 
 
 class HydraClient:
-    """
-    Тот самый Фасад (как httpx.AsyncClient).
-    Он не качает файлы сам, он просто управляет ресурсами и контекстом.
-    """
-
     def __init__(
         self,
         threads: int = 1,

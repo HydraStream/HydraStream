@@ -135,7 +135,6 @@ async def _prepare_file_object(
             status="WARNING",
         )
         filename = new_filename
-    print(filename)
     return File(
         meta=FileMeta(
             filename=filename, url=url, content_length=total_size, expected_md5=md5_val

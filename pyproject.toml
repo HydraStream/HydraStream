@@ -71,7 +71,7 @@ hydrastream = { workspace = true }
 [tool.ruff]
 # Specify the source directory for correct import sorting
 src = ["src"]
-line-length = 110
+line-length = 88
 target-version = "py311"
 
 [tool.ruff.lint]
@@ -125,23 +125,25 @@ convention = "google"
 max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*" = ["ANN"]
+#"tests/**/*" = ["ANN"]
 
 [tool.pyright]
 include = ["src"]
-ignore = ["test"]
+#ignore = ["tests"]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "strict"
 
 executionEnvironments =[
-    { root = "src/test", reportPrivateUsage = "none" },
+    { root = "src/tests", reportPrivateUsage = "none" },
     { root = "src" }
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+addopts = "--cov=src --cov-report=term-missing --cov-fail-under=80"
+pythonpath = ["src"]
 
 [tool.bandit]
 exclude_dirs = ["tests", "features"]

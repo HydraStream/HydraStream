@@ -32,9 +32,9 @@ async def test_write_chunk_data_out_of_order(tmp_path: Path) -> None:
     fd = storage.open_file(filename)
 
     try:
-        await storage.write_chunk_data(fd, b"B", 5)
-        await storage.write_chunk_data(fd, b"A", 0)
-        await storage.write_chunk_data(fd, b"C", 9)
+        await storage.write_chunk_data(fd, bytearray(b"B"), 5)
+        await storage.write_chunk_data(fd, bytearray(b"A"), 0)
+        await storage.write_chunk_data(fd, bytearray(b"C"), 9)
     finally:
         os.close(fd)
 
@@ -53,7 +53,9 @@ def test_save_and_load_state(tmp_path: Path) -> None:
     """We check that StorageManager is correctly searching for and loading .state.json"""
     storage = StorageManager(output_dir=str(tmp_path))
 
-    file_obj = File(filename="data.tar", url="http://", content_length=1000, chunk_size=500)
+    file_obj = File(
+        filename="data.tar", url="http://", content_length=1000, chunk_size=500
+    )
     (tmp_path / "data.tar").touch()
 
     storage.save_state(file_obj)
@@ -94,5 +96,5 @@ def test_verify_file_hash(tmp_path: Path) -> None:
         expected_md5="1234567890abcdef",
     )
 
-    with pytest.raises(ValueError, match="Hash mismatch for fox.txt"):
+    with pytest.raises(ValueError, match=r"Hash mismatch for fox\.txt"):
         storage.verify_file_hash(bad_file)
