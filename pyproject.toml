@@ -87,10 +87,13 @@ select =[
     "RET",
     "RUF",
     "N",
+    "C90",
+    "PL"
 ]
+
 fixable =["ALL"]
 
-
+ignore =["PLR2004"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -105,8 +108,15 @@ convention = "google"
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
+[tool.ruff.lint.pylint]
+max-args = 6
+max-statements = 50
+max-branches = 12
+
 [tool.ruff.lint.per-file-ignores]
 #"tests/**/*" = ["ANN"]
+"src/hydrastream/main.py" = ["PLR0913"]
+"src/hydrastream/facade.py" = ["PLR0913"]
 
 [tool.pyright]
 include = ["src"]
@@ -123,7 +133,7 @@ executionEnvironments =[
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "--cov=src --cov-report=term-missing --cov-fail-under=80"
+addopts = "--cov=src --cov-report=term-missing --cov-fail-under=90"
 pythonpath = ["src"]
 
 [tool.bandit]

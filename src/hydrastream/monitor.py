@@ -27,7 +27,7 @@ from rich.rule import Rule
 from rich.table import Column, Table
 from rich.text import Text
 
-from hydrastream.models import StorageState, UIState
+from hydrastream.models import UIState
 
 STATUS = Literal["SUCCESS", "INFO", "WARNING", "ERROR", "CRITICAL", "INTERRUPT"]
 
@@ -65,7 +65,7 @@ class GradientPercent(ProgressColumn):
         return Text(f"{p:>5.1f}%", style=f"bold {color}")
 
 
-def write_log(ctx: StorageState, msg: str) -> None:
+def write_log(ctx: UIState, msg: str) -> None:
     if not ctx.log_file:
         return
 
@@ -84,6 +84,35 @@ async def date_print(ctx: UIState) -> None:
     if not (ctx.no_ui or ctx.quiet):
         ctx.console.print(Rule(date_header))
     await log(ctx, f"--- {current_date} ---")
+
+
+def formatting_log(
+    message: str | Rule, formatted_msg: str, status: STATUS = "INFO"
+) -> Panel | str | Rule:
+    match status.upper():
+        case "CRITICAL" | "INTERRUPT":
+            renderable = Panel(
+                f"[bold red]{message}[/]\n[dim white]Partial data may have been saved.",
+                title="[bold red]Interrupted",
+                border_style="red",
+                expand=False,
+            )
+        case "ERROR":
+            renderable = Panel(
+                f"[bold red]{message}[/]",
+                title="Error",
+                border_style="red",
+                padding=(0, 1),
+            )
+        case "WARNING":
+            renderable = f"[yellow]{formatted_msg}[/]"
+        case "INFO":
+            renderable = f"[white]{formatted_msg}[/]"
+        case "SUCCESS":
+            renderable = f"[green]{formatted_msg}[/]"
+        case _:
+            renderable = message
+    return renderable
 
 
 async def log(
@@ -106,38 +135,14 @@ async def log(
     formatted_msg = f"{timestamp} {message}"
 
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, write_log, ctx.storage, formatted_msg)
+    await loop.run_in_executor(None, write_log, ctx, formatted_msg)
     renderable = formatted_msg
 
     if ctx.quiet:
         return
 
     if ctx.progress:
-        match status.upper():
-            case "CRITICAL" | "INTERRUPT":
-                renderable = Panel(
-                    f"[bold red]{message}[/]\n[dim white]"
-                    f"Partial data may have been saved.",
-                    title="[bold red]Interrupted",
-                    border_style="red",
-                    expand=False,
-                )
-            case "ERROR":
-                renderable = Panel(
-                    f"[bold red]{message}[/]",
-                    title="Error",
-                    border_style="red",
-                    padding=(0, 1),
-                )
-            case "WARNING":
-                renderable = f"[yellow]{formatted_msg}[/]"
-            case "INFO":
-                renderable = f"[white]{formatted_msg}[/]"
-            case "SUCCESS":
-                renderable = f"[green]{formatted_msg}[/]"
-            case _:
-                renderable = message
-
+        renderable = formatting_log(message, renderable, status)
         if progress or status in ["WARNING", "ERROR", "CRITICAL", "INTERRUPT"]:
             ctx.progress.console.print(renderable)
     else:
@@ -216,10 +221,9 @@ async def done(ctx: UIState, filename: str) -> None:
             update_panel_title(ctx)
             await log(ctx, f"Done: {filename}", status="SUCCESS", progress=True)
 
-    else:
-        if ctx.buffer.get(filename, 0):
-            ctx.files_completed += 1
-            await log(ctx, f"Done: {filename}", status="SUCCESS", progress=True)
+    elif ctx.buffer.get(filename, 0):
+        ctx.files_completed += 1
+        await log(ctx, f"Done: {filename}", status="SUCCESS", progress=True)
 
 
 def make_panel(ctx: UIState) -> Panel | str:
@@ -365,10 +369,10 @@ async def ui_start(ctx: UIState) -> None:
         ctx.live.start()
         ctx.refresh = asyncio.create_task(refresh_loop(ctx))
     ctx.start_time = time.monotonic()
-    write_log(ctx.storage, "--- Session Started ---")
+    write_log(ctx, "--- Session Started ---")
     await date_print(ctx)
 
 
 async def ui_stop(ctx: UIState) -> None:
     await handle_exit(ctx)
-    write_log(ctx.storage, "--- Session Finished ---")
+    write_log(ctx, "--- Session Finished ---")

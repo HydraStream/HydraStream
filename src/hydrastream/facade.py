@@ -24,7 +24,7 @@ class HydraClient:
             threads=threads,
             no_ui=no_ui,
             quiet=quiet,
-            output_dir=output_dir,
+            out_dir=output_dir,
             chunk_timeout=chunk_timeout,
             stream_buffer_size=stream_buffer_size,
             client_kwargs=client_kwargs,

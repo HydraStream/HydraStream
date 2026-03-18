@@ -171,30 +171,14 @@ class File:
 
 
 @entity
-class StorageState:
-    out_dir: Path
-    is_running: bool = True
-    files: dict[str, File] = field(default_factory=dict[str, File])
-    state_dir: Path = field(init=False)
-    log_file: Path = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.out_dir = Path(self.out_dir).expanduser().resolve()
-        self.state_dir = self.out_dir / ".states"
-        self.log_file = self.out_dir / "download.log"
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-
-
-@entity
 class UIState:
     no_ui: bool = False
     quiet: bool = False
+    log_file: Path
 
     is_running: bool = True
     console = Console(stderr=True)
     progress = None
-    storage: StorageState
 
     start_time: float = 0.0
     total_bytes: int = 0
@@ -219,6 +203,22 @@ class UIState:
 
     def __post_init__(self) -> None:
         self.renewal_rate = 1 / self.refresh_per_second
+
+
+@entity
+class StorageState:
+    out_dir: Path
+    ui: UIState
+    is_running: bool = True
+    files: dict[str, File] = field(default_factory=dict[str, File])
+    state_dir: Path = field(init=False)
+    log_file: Path = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.out_dir = Path(self.out_dir).expanduser().resolve()
+        self.state_dir = self.out_dir / ".states"
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
 
 
 @entity
@@ -285,7 +285,7 @@ class HydraConfig:
     threads: int = 1
     no_ui: bool = False
     quiet: bool = False
-    output_dir: str = "download"
+    out_dir: str = "download"
     chunk_timeout: int = 120
     stream_buffer_size: int | None = None
     client_kwargs: dict[str, Any] | None = None
@@ -337,12 +337,14 @@ class HydraContext:
         )
         self.heap_size = maxsize
 
-        self.fs = StorageState(out_dir=Path(self.config.output_dir), files=self.files)
+        self.fs = StorageState(
+            ui=self.ui, out_dir=Path(self.config.out_dir), files=self.files
+        )
         self.ui = UIState(
             is_running=self.is_running,
             no_ui=self.config.no_ui,
             quiet=self.config.quiet,
-            storage=self.fs,
+            log_file=Path(self.config.out_dir) / "download.log",
         )
         self.net = NetworkState(
             threads=self.config.threads,

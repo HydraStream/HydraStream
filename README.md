@@ -3,11 +3,11 @@
 ....................../´¯/)
 ....................,/¯../
 .................../..../
-............./´¯/'...'/´¯¯`·¸
-........../'/.../..../......./¨¯\
+............./´¯/'...'/´¯¯¯/
+........../'/.../..../....././¨¯\
 ........('(...´...´.... ¯~/'...')
-.........\.................'...../
-..........''...\.......... _.·´
+.........\.................'.../
+..........''................./
 ............\..............(
 ..............\.............\...
 ```
@@ -60,11 +60,15 @@ Download concurrently and pipe directly into a decompressor:
 ```bash
 hs "https://ftp.ncbi.nlm.nih.gov/.../genome.fna.gz" -t 20 --stream -q | zcat | wc -l
 ```
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Zhukovetski/HydraStream/main/assets/Pipeline-Streaming-Demo.gif" alt="Pipeline Streaming Demo" width="800">
+</p>
+
 
 ### 3. Python API
 ```python
 import asyncio
-from hydrastream.facade import HydraClient
+from hydrastream import HydraClient
 
 async def main():
     urls =["https://example.com/file1.gz"]

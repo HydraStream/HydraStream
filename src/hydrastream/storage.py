@@ -60,7 +60,6 @@ def create_sparse_file(ctx: StorageState, filename: str, size: int) -> str | Non
 def open_file(ctx: StorageState, filename: str) -> int:
 
     filepath = ctx.out_dir / filename
-    # os.pwrite is atomic and thread-safe for offset-based writing
     return os.open(filepath, os.O_RDWR)
 
 
@@ -105,7 +104,6 @@ def save_all_states(ctx: StorageState, files: dict[str, File]) -> None:
 
     files_snapshot = deepcopy(files)
     for file in files_snapshot.values():
-        # Only save state if at least one chunk is not completely finished
         if not all(c.current_pos > c.end for c in (file.chunks or [])):
             save_state(ctx, file)
 
@@ -169,33 +167,50 @@ def verify_size(ctx: StorageState, file: File) -> None:
             raise ValueError(err_msg)
 
 
-def verify_file_hash(ctx: StorageState, file: File) -> None:
-
-    if not file or not file.meta.expected_md5:
+async def verify_file_hash(ctx: StorageState, file: File) -> None:
+    if not file.is_complete or not file.meta.expected_md5 or file.verified:
         return
 
-    filepath = ctx.out_dir / file.meta.filename
-    if not filepath.exists():
-        return
+    file.verified = True
+    await log(
+        ctx.ui,
+        f"Verifying MD5 checksum for {file.meta.filename}...",
+        status="INFO",
+    )
 
-    # Compute MD5 by reading in 4MB chunks to conserve RAM
-    hash_md5 = hashlib.md5()
-    with filepath.open("rb") as f:
-        for chunk in iter(lambda: f.read(4096 * 1024), b""):
-            hash_md5.update(chunk)
+    def _compute_hash() -> str:
+        filepath = ctx.out_dir / file.meta.filename
+        if not filepath.exists():
+            raise OSError(f"File: {file.meta.filename} not found")
+        hash_md5 = hashlib.md5()
+        with filepath.open("rb") as f:
+            for chunk in iter(lambda: f.read(4096 * 1024), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
 
-    calculated = hash_md5.hexdigest()
+    try:
+        loop = asyncio.get_running_loop()
+        calculated = await loop.run_in_executor(None, _compute_hash)
 
-    if calculated != file.meta.expected_md5:
-        err_msg = (
-            f"CRITICAL: Hash mismatch for {file.meta.filename}!\n"
-            f"Expected: {file.meta.expected_md5}\n"
-            f"Got:      {calculated}"
+        if calculated != file.meta.expected_md5:
+            filepath = ctx.out_dir / file.meta.filename
+            err_msg = (
+                f"CRITICAL: Hash mismatch for {file.meta.filename}!\n"
+                f"Expected: {file.meta.expected_md5}\n"
+                f"Got:      {calculated}"
+            )
+
+            filepath.unlink(missing_ok=True)
+
+            raise ValueError(err_msg)
+        await log(
+            ctx.ui,
+            f"Integrity confirmed: {file.meta.filename}",
+            status="SUCCESS",
         )
 
-        filepath.unlink(missing_ok=True)
-
-        raise ValueError(err_msg)
+    except (ValueError, OSError) as ve:
+        await log(ctx.ui, str(ve), status="ERROR")
 
 
 def verify_stream(

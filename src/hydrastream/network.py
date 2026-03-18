@@ -270,7 +270,8 @@ def extract_filename(url: str, headers: httpx.Headers) -> str:
             filename = unquote(match_std.group(1))
 
     if not filename:
-        clean_url = url.split("?")[0].split("#")[0].rstrip("/")
+        clean_url = url.rstrip("/")
+        clean_url = clean_url.split("?")[0].split("#")[0]
         filename = unquote(clean_url.rsplit("/", 1)[-1])
 
     if not filename or filename in [".", ""]:
