@@ -28,6 +28,8 @@ from rich.progress import (
     TaskID,
 )
 
+from hydrastream.constants import MIN_CHUNK
+
 
 class HttpxClientOptions(TypedDict, total=False):
     headers: HeaderTypes | None
@@ -111,7 +113,6 @@ class File:
     is_failed: bool = False
 
     def __post_init__(self) -> None:
-
         if self.chunks:
             return
         if self.chunk_size <= 0:
@@ -300,8 +301,6 @@ class HydraContext:
     ui: UIState = field(init=False)
     fs: StorageState = field(init=False)
 
-    MIN_CHUNK: int = 1 * 1024**2
-    STREAM_CHUNK_SIZE: int = 5 * 1024**2
     heap_size: int = field(init=False)
 
     files: dict[str, File] = field(default_factory=dict[str, File])
@@ -325,7 +324,7 @@ class HydraContext:
         self.condition = asyncio.Condition()
 
         maxsize = (
-            self.config.stream_buffer_size // self.MIN_CHUNK
+            self.config.stream_buffer_size // MIN_CHUNK
             if self.config.stream_buffer_size
             else 0
         )

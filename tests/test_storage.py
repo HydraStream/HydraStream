@@ -36,7 +36,6 @@ from hydrastream.storage import (
 
 
 async def test_loader_creates_directories(tmp_path: str) -> None:
-
     config = HydraConfig(out_dir=str(tmp_path), quiet=True)
     state = HydraContext(config=config)
     await run_downloads(state, "")
@@ -48,7 +47,6 @@ async def test_loader_creates_directories(tmp_path: str) -> None:
 
 
 def test_storage_creates_directories(tmp_path: Path) -> None:
-
     storage = StorageState(out_dir=tmp_path, ui=UIState(log_file=tmp_path / "log"))
 
     assert storage.out_dir.exists()
@@ -58,7 +56,6 @@ def test_storage_creates_directories(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_write_chunk_data_out_of_order(tmp_path: Path) -> None:
-
     storage = StorageState(out_dir=tmp_path, ui=UIState(log_file=tmp_path / "log"))
     filename = "genome_test.bin"
     file_size = 10
@@ -86,7 +83,6 @@ async def test_write_chunk_data_out_of_order(tmp_path: Path) -> None:
 
 
 def test_save_and_load_state(tmp_path: Path) -> None:
-
     storage = StorageState(out_dir=tmp_path, ui=UIState(log_file=tmp_path / "log"))
 
     meta = FileMeta(

@@ -37,7 +37,6 @@ def get_unique_path(file_path: Path) -> Path:
 
 
 def create_sparse_file(ctx: StorageState, filename: str, size: int) -> str | None:
-
     free_space = shutil.disk_usage(ctx.out_dir).free
     if free_space < size:
         raise OSError(
@@ -59,13 +58,11 @@ def create_sparse_file(ctx: StorageState, filename: str, size: int) -> str | Non
 
 
 def open_file(ctx: StorageState, filename: str) -> int:
-
     filepath = ctx.out_dir / filename
     return os.open(filepath, os.O_RDWR)
 
 
 async def write_chunk_data(fd: int, data: bytearray, offset: int) -> None:
-
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, os.pwrite, fd, data, offset)
 
@@ -76,7 +73,6 @@ def get_state_path(ctx: StorageState, filename: str) -> Path:
 
 
 def save_state(ctx: StorageState, file_obj: File) -> None:
-
     path = Path(get_state_path(ctx, file_obj.meta.filename))
     temp_dir = path.parent
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -102,7 +98,6 @@ def save_state(ctx: StorageState, file_obj: File) -> None:
 
 
 def save_all_states(ctx: StorageState, files: dict[str, File]) -> None:
-
     files_snapshot = deepcopy(files)
     for file in files_snapshot.values():
         if not all(c.current_pos > c.end for c in (file.chunks or [])):
@@ -122,7 +117,6 @@ async def autosave(ctx: HydraContext, interval: float) -> None:
 
 
 def load_state(ctx: StorageState, filename: str) -> tuple[File | None, int]:
-
     p = Path(filename)
     main_name = p.stem  # "GCF_..._genomic.fna"
     last_ext = p.suffix  # ".gz"
@@ -166,12 +160,10 @@ def load_state(ctx: StorageState, filename: str) -> tuple[File | None, int]:
 
 
 def delete_state(ctx: StorageState, filename: str) -> None:
-
     get_state_path(ctx, filename).unlink(missing_ok=True)
 
 
 def verify_size(ctx: StorageState, file: File) -> None:
-
     file_path = ctx.out_dir / file.meta.filename
 
     if file_path.is_file():
@@ -240,7 +232,6 @@ async def verify_file_hash(ctx: StorageState, file: File) -> bool | None:
 def verify_stream(
     md5_hasher: HASH, expected_checksum: str, next_offset: int, total_size: int
 ) -> None:
-
     calculated = md5_hasher.hexdigest()
     if calculated != expected_checksum:
         err_msg = (

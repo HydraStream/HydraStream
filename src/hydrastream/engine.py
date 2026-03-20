@@ -17,7 +17,6 @@ from hydrastream.storage import autosave, save_all_states, verify_stream
 
 
 async def stop(ctx: HydraContext, complete: bool = False) -> None:
-
     if not ctx.is_running:
         return
 
@@ -89,7 +88,6 @@ async def _teardown_engine(
 
 
 async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]:
-
     ctx.current_file = filename
 
     async with ctx.condition:
@@ -162,7 +160,6 @@ async def stream_all(
     links: str | Iterable[str],
     expected_checksums: dict[str, str] | None = None,
 ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
-
     await ui_start(ctx.ui)
     ctx.stream = True
     if isinstance(links, str):
@@ -212,7 +209,6 @@ async def run_downloads(
     links: str | Iterable[str],
     expected_checksums: dict[str, str] | None = None,
 ) -> None:
-
     await ui_start(ctx.ui)
     ctx.stream = False
     if isinstance(links, str):

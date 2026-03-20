@@ -27,7 +27,7 @@ from rich.rule import Rule
 from rich.table import Column, Table
 from rich.text import Text
 
-from hydrastream.constants import COLOR_PIVOT_PERCENT, MINUTES_PER_HOUR
+from hydrastream.constants import COLOR_PIVOT_PERCENT, MINUTES_PER_HOUR, ONE_GIBIBYTE
 from hydrastream.models import UIState
 
 STATUS = Literal["SUCCESS", "INFO", "WARNING", "ERROR", "CRITICAL", "INTERRUPT"]
@@ -124,7 +124,6 @@ async def log(
     throttle_key: str | None = None,
     throttle_sec: float = 10.0,
 ) -> None:
-
     if throttle_key:
         now = time.monotonic()
         last_time = ctx.log_throttle.get(throttle_key, 0.0)
@@ -170,13 +169,11 @@ def add_file(ctx: UIState, filename: str, total_size: int | None = None) -> None
 
 
 def update(ctx: UIState, filename: str, advance_bytes: int) -> None:
-
     ctx.buffer[filename] += advance_bytes
     ctx.download_bytes += advance_bytes
 
 
 async def refresh_loop(ctx: UIState) -> None:
-
     if ctx.progress:
         while ctx.is_running:
             try:
@@ -228,7 +225,6 @@ async def done(ctx: UIState, filename: str) -> None:
 
 
 def make_panel(ctx: UIState) -> Panel | str:
-
     if not ctx.progress:
         return ""
 
@@ -257,7 +253,7 @@ def make_panel(ctx: UIState) -> Panel | str:
         r_hours, r_mins = divmod(r_mins, 60)
     remain_time_str = f"{r_hours:02d}:{r_mins:02d}:{r_secs:02d}"
 
-    if ctx.total_bytes < 1_073_741_824:
+    if ctx.total_bytes < ONE_GIBIBYTE:
         size_str = (
             f"{ctx.download_bytes / (1024**2):.2f}/{ctx.total_bytes / (1024**2):.2f} MB"
         )
@@ -309,7 +305,7 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
     elapsed = time.monotonic() - ctx.start_time
     avg_speed = (ctx.download_bytes / elapsed) / (1024**2) if elapsed > 0 else 0
 
-    if ctx.total_bytes < 1_073_741_824:
+    if ctx.total_bytes < ONE_GIBIBYTE:
         size_str = (
             f"{ctx.download_bytes / (1024**2):.2f}/{ctx.total_bytes / (1024**2):.2f} MB"
         )

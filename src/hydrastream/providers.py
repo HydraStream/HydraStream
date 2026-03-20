@@ -12,7 +12,6 @@ from hydrastream.network import safe_request
 async def ncbi_get_expected_hash(
     ctx: NetworkState, url: str, filename: str
 ) -> str | None:
-
     base_url = url.rstrip("/").rsplit("/", 1)[0]
     checksum_url = f"{base_url}/md5checksums.txt"
 
@@ -28,7 +27,6 @@ async def ncbi_get_expected_hash(
 
 
 async def get_expected_hash(ctx: NetworkState, url: str) -> str | None:
-
     resp = await safe_request(ctx, "HEAD", url)
     if not resp:
         return None

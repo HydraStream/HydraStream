@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Iterable
 
+from hydrastream.constants import MIN_CHUNK, STREAM_CHUNK_SIZE
 from hydrastream.models import File, FileMeta, HydraContext
 from hydrastream.monitor import add_file, done, log, update
 from hydrastream.network import extract_filename, safe_request
@@ -68,7 +69,6 @@ async def _fetch_metadata(ctx: HydraContext, url: str) -> tuple[str, int] | None
 async def _resolve_md5(
     ctx: HydraContext, url: str, filename: str, predefined_md5: str | None
 ) -> str | None:
-
     if predefined_md5:
         return predefined_md5
 
@@ -85,11 +85,10 @@ async def _resolve_md5(
 async def _prepare_file_object(
     ctx: HydraContext, url: str, filename: str, total_size: int, md5_val: str | None
 ) -> File:
-
     parts = ctx.config.threads
-    chunk_size = max(total_size // parts, ctx.MIN_CHUNK)
-    if ctx.stream and chunk_size > ctx.STREAM_CHUNK_SIZE:
-        chunk_size = ctx.STREAM_CHUNK_SIZE
+    chunk_size = max(total_size // parts, MIN_CHUNK)
+    if ctx.stream and chunk_size > STREAM_CHUNK_SIZE:
+        chunk_size = STREAM_CHUNK_SIZE
 
     if ctx.stream:
         return File(
@@ -130,7 +129,6 @@ async def _prepare_file_object(
 async def _register_and_dispatch(
     ctx: HydraContext, file_obj: File, priority_index: int
 ) -> None:
-
     filename = file_obj.meta.filename
     ctx.files[filename] = file_obj
     chunks = file_obj.chunks or []

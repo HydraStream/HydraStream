@@ -61,7 +61,6 @@ async def test_cloud_provider_s3_etag(
 async def test_cloud_provider_goog_hash(
     network_client: NetworkState,
 ) -> None:
-
     url = "https://storage.googleapis.com/bucket/data.bin"
 
     raw_md5 = b"1234567890abcdef"
@@ -81,5 +80,4 @@ async def test_cloud_provider_goog_hash(
 async def test_provider_router_delegation(
     network_client: NetworkState,
 ) -> None:
-
     assert await resolve_hash(network_client, "https://google.com/file", "file") is None

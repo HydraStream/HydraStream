@@ -82,7 +82,6 @@ async def report_429(ctx: AMIDState, retry_after: float | None = None) -> None:
 
 
 async def try_scale_up(ctx: AMIDState) -> bool:
-
     async with ctx.lock:
         if time.time() - ctx.last_429_time < ctx.cooldown_seconds:
             return False
@@ -171,7 +170,6 @@ async def _evaluate_failure(
 async def safe_request(
     ctx: NetworkState, method: str, url: str, **kwargs: Unpack[RequestOptions]
 ) -> httpx.Response | None:
-
     for attempt in range(1, ctx.max_retries + 1):
         async with acquire(ctx.rate_limiter):
             try:
@@ -200,7 +198,6 @@ async def safe_request(
 async def stream_chunk(
     ctx: NetworkState, url: str, headers: dict[str, str], chunk_timeout: float
 ) -> AsyncIterator[httpx.Response]:
-
     for attempt in range(1, ctx.max_retries + 1):
         response = None
         yielded = False
@@ -261,7 +258,6 @@ def _get_retry_after(response: httpx.Response) -> float | None:
 
 
 def extract_filename(url: str, headers: httpx.Headers) -> str:
-
     filename = None
     cd = headers.get("Content-Disposition", "")
 

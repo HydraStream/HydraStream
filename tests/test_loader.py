@@ -15,7 +15,6 @@ from hydrastream.producer import chunk_producer
 @pytest.mark.asyncio
 @respx.mock
 async def test_add_task_producer(tmp_path: Path) -> None:
-
     url = "https://fake-ncbi.com/genome.gz"
 
     respx.head(url).mock(

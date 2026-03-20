@@ -143,7 +143,7 @@ async def test_async_main_stream_mode(
 
 def test_cli_no_args() -> None:
     """Проверка, что Typer падает с ошибкой, если нет ссылок"""
-    result = runner.invoke(app, [])
+    result = runner.invoke(app, [], env={"NO_COLOR": "1"})
     assert result.exit_code == 2  # Typer возвращает 2 при ошибке парсинга аргументов
     assert "Usage: cli [OPTIONS] LINKS..." in result.stderr
 

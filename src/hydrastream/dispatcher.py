@@ -50,7 +50,6 @@ async def get_chunk(ctx: HydraContext) -> Chunk | None:
 
 
 async def run_dispatch_loop(ctx: HydraContext) -> None:
-
     while ctx.is_running:
         chunk = None
         try:
