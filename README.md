@@ -28,7 +28,7 @@ This project bridges the gap: it fetches chunks concurrently via `httpx` and `uv
 * **POSIX Compliance**: In stream mode or `--quiet` mode, logs are routed to `stderr` and data to `stdout`.
   
 ## Benchmarks (Python vs C++)
-*Tested on GitHub Actions Ubuntu Runners (Gigabit Network) downloading a 1.0GB genomic archive.*
+Tested on GitHub Actions Ubuntu Runners (Gigabit Network) downloading a 1.0GB genomic archive.
 
 | Tool | Real Time | Language |
 |------|-----------|----------|
@@ -36,7 +36,8 @@ This project bridges the gap: it fetches chunks concurrently via `httpx` and `uv
 | `wget` | 10.46s | C |
 | `aria2c` (-x 10 -s 10) | 11.08s | C++ |
 
-*HydraStream outperforms established C/C++ utilities by minimizing disk I/O bottlenecks using atomic `os.pwrite` operations and highly optimized event-loop orchestration.*
+HydraStream outperforms established C/C++ utilities by minimizing disk I/O bottlenecks using atomic `os.pwrite` operations and highly optimized event-loop orchestration.
+
 ## Installation
 
 Requires Python 3.11+.
