@@ -37,8 +37,6 @@ Despite the CPU overhead of pure Python, HydraStream outperforms optimized C/C++
 | **wget** | 1 | 10.464s | 0.853s | 1.764s |
 | **aria2c** | 10 | 11.081s | 0.986s | 1.850s |
 
-HydraStream outperforms established C/C++ utilities by minimizing disk I/O bottlenecks using atomic `os.pwrite` operations and highly optimized event-loop orchestration.
-
 ## Installation
 
 Requires Python 3.11+.
