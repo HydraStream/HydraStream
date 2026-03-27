@@ -8,7 +8,7 @@ from types import TracebackType
 from typing import Any, Self
 
 from hydrastream.engine import run_downloads, stream_all, teardown_engine
-from hydrastream.models import HydraConfig, HydraContext
+from hydrastream.models import HydraConfig, HydraContext, TypeHash
 
 
 class HydraClient:
@@ -46,13 +46,17 @@ class HydraClient:
         await teardown_engine(self.state, loop)
 
     async def run(
-        self, links: list[str] | str, expected_checksums: dict[str, str] | None = None
+        self,
+        links: list[str] | str,
+        expected_checksums: dict[str, tuple[TypeHash, str]] | None = None,
     ) -> None:
         self.state = HydraContext(config=self.config)
         await run_downloads(self.state, links, expected_checksums)
 
     def stream(
-        self, links: list[str], expected_checksums: dict[str, str] | None = None
+        self,
+        links: list[str],
+        expected_checksums: dict[str, tuple[TypeHash, str]] | None = None,
     ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
         self.state = HydraContext(config=self.config)
         return stream_all(self.state, links, expected_checksums)

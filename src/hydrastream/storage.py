@@ -12,7 +12,7 @@ from pathlib import Path
 
 from hydrastream.monitor import log
 
-from .models import File, HydraContext, StorageState
+from .models import File, HydraContext, StorageState, TypeHash
 
 
 def get_unique_path(file_path: Path) -> Path:
@@ -182,7 +182,7 @@ async def verify_file_hash(ctx: StorageState, file: File) -> bool | None:
 
     file.verified = True
 
-    if not file.meta.expected_md5:
+    if not file.meta.expected_checksum:
         return True
 
     await log(
@@ -191,25 +191,26 @@ async def verify_file_hash(ctx: StorageState, file: File) -> bool | None:
         status="INFO",
     )
 
-    def _compute_hash() -> str:
+    def _compute_hash(algorithm: TypeHash) -> str:
         filepath = ctx.out_dir / file.meta.filename
         if not filepath.exists():
             raise OSError(f"File: {file.meta.filename} not found")
-        hash_md5 = hashlib.md5()
         with filepath.open("rb") as f:
-            for chunk in iter(lambda: f.read(4096 * 1024), b""):
-                hash_md5.update(chunk)
-        return hash_md5.hexdigest()
+            digest = hashlib.file_digest(f, algorithm)
+            return digest.hexdigest()
 
     try:
         loop = asyncio.get_running_loop()
-        calculated = await loop.run_in_executor(None, _compute_hash)
+        calculated = await loop.run_in_executor(
+            None, _compute_hash, file.meta.expected_checksum.algorithm
+        )
 
-        if calculated != file.meta.expected_md5:
+        if calculated != file.meta.expected_checksum.value:
             filepath = ctx.out_dir / file.meta.filename
             err_msg = (
                 f"CRITICAL: Hash mismatch for {file.meta.filename}!\n"
-                f"Expected: {file.meta.expected_md5}\n"
+                f"Expected: {file.meta.expected_checksum.algorithm} "
+                f"{file.meta.expected_checksum}\n"
                 f"Got:      {calculated}"
             )
 

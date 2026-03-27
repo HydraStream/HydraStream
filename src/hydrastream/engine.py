@@ -5,15 +5,21 @@ import asyncio
 import contextlib
 import hashlib
 import heapq
+import random
 import signal
 from collections.abc import AsyncGenerator, Iterable
 
-from hydrastream.dispatcher import run_dispatch_loop
-from hydrastream.models import HydraContext
+from hydrastream.dispatcher import download_worker
+from hydrastream.models import HydraContext, TypeHash
 from hydrastream.monitor import done, log, ui_start, ui_stop
 from hydrastream.network import close
 from hydrastream.producer import chunk_producer
 from hydrastream.storage import autosave, save_all_states, verify_stream
+
+
+async def delayed_worker(ctx: HydraContext, delay: float) -> None:
+    await asyncio.sleep(delay)
+    await download_worker(ctx)
 
 
 async def stop(ctx: HydraContext, complete: bool = False) -> None:
@@ -33,6 +39,8 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
         ctx.task_creator.cancel()
     if ctx.autosave_task:
         ctx.autosave_task.cancel()
+
+    await close(ctx.net)
     if ctx.workers:
         for worker in ctx.workers:
             if worker and not worker.done():
@@ -59,9 +67,7 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
             status="SUCCESS",
             progress=True,
         )
-
     await stop(ctx, complete=True)
-
     # Гасим задачи
     tasks_to_cancel = [
         t
@@ -79,7 +85,6 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
         for file_obj in ctx.files.values():
             file_obj.close_fd()
 
-    await close(ctx.net)
     await ui_stop(ctx.ui)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -94,57 +99,57 @@ async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]
 
     file_obj = ctx.files[filename]
     total_size = file_obj.meta.content_length
-    expected_checksum = file_obj.meta.expected_md5
-    md5_hasher = hashlib.md5() if expected_checksum else None
 
-    next_offset = 0
+    checksum = file_obj.meta.expected_checksum
+    hasher = hashlib.new(checksum.algorithm) if checksum else None
+
+    ctx.next_offset = 0
     await log(ctx.ui, f"Streaming: {filename}", status="INFO")
     try:
-        while next_offset < total_size:
+        while ctx.next_offset < total_size:
             if not ctx.is_running:
                 break
 
-            if ctx.heap and ctx.heap[0][0] == next_offset:
+            if ctx.heap and ctx.heap[0][0] == ctx.next_offset:
                 _, chunk_data = heapq.heappop(ctx.heap)
                 chunk_bytes = bytes(chunk_data)
 
                 async with ctx.condition:
                     ctx.condition.notify_all()
 
-                if md5_hasher:
-                    md5_hasher.update(chunk_bytes)
+                if hasher:
+                    hasher.update(chunk_bytes)
 
                 yield chunk_bytes
 
                 length = len(chunk_bytes)
-                next_offset += length
+                ctx.next_offset += length
                 continue
 
             chunk_start, chunk_data = await ctx.stream_queue.get()
             if chunk_start == -1:
                 break
 
-            if chunk_start == next_offset:
+            if chunk_start == ctx.next_offset:
                 chunk_bytes = bytes(chunk_data)
 
-                if md5_hasher:
-                    md5_hasher.update(chunk_bytes)
+                if hasher:
+                    hasher.update(chunk_bytes)
 
                 yield chunk_bytes
 
                 length = len(chunk_bytes)
-                next_offset += length
+                ctx.next_offset += length
+
             else:
                 heapq.heappush(ctx.heap, (chunk_start, chunk_data))
         else:
             await done(ctx.ui, filename)
 
-            if md5_hasher and expected_checksum:
+            if hasher and checksum:
                 try:
-                    verify_stream(
-                        md5_hasher, expected_checksum, next_offset, total_size
-                    )
-                    await log(ctx.ui, "MD5 Verified", status="SUCCESS", progress=True)
+                    verify_stream(hasher, checksum.value, ctx.next_offset, total_size)
+                    await log(ctx.ui, "Hash Verified", status="SUCCESS", progress=True)
                 except Exception as e:
                     await log(ctx.ui, str(e), status="ERROR")
                     raise
@@ -157,7 +162,7 @@ async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]
 async def stream_all(
     ctx: HydraContext,
     links: str | Iterable[str],
-    expected_checksums: dict[str, str] | None = None,
+    expected_checksums: dict[str, tuple[TypeHash, str]] | None,
 ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
     await ui_start(ctx.ui)
     ctx.stream = True
@@ -167,10 +172,13 @@ async def stream_all(
         loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
 
     ctx.task_creator = asyncio.create_task(
-        chunk_producer(ctx, links, expected_checksums)
+        chunk_producer(ctx, links, expected_checksums), name="Task creator"
     )
     ctx.workers = [
-        asyncio.create_task(run_dispatch_loop(ctx)) for _ in range(ctx.config.threads)
+        asyncio.create_task(
+            delayed_worker(ctx, random.uniform(0, 0.5)), name=f"Worker: {i}"
+        )
+        for i in range(ctx.config.threads)
     ]
 
     try:
@@ -205,7 +213,7 @@ async def stream_all(
 async def run_downloads(
     ctx: HydraContext,
     links: str | Iterable[str],
-    expected_checksums: dict[str, str] | None = None,
+    expected_checksums: dict[str, tuple[TypeHash, str]] | None,
 ) -> None:
     await ui_start(ctx.ui)
     ctx.stream = False
@@ -216,18 +224,22 @@ async def run_downloads(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
     ctx.task_creator = asyncio.create_task(
-        chunk_producer(ctx, links, expected_checksums)
+        chunk_producer(ctx, links, expected_checksums), name="Task creator"
     )
-    ctx.autosave_task = asyncio.create_task(autosave(ctx, interval=60))
+    ctx.autosave_task = asyncio.create_task(
+        autosave(ctx, interval=60), name="Autosaver"
+    )
     ctx.workers = [
-        asyncio.create_task(run_dispatch_loop(ctx)) for _ in range(ctx.config.threads)
+        asyncio.create_task(
+            delayed_worker(ctx, random.uniform(0, 0.5)), name=f"Worker: {i}"
+        )
+        for i in range(ctx.config.threads)
     ]
 
     try:
         await ctx.task_creator
         async with ctx.condition:
             await ctx.condition.wait_for(lambda: not (ctx.files and ctx.is_running))
-
     except asyncio.CancelledError:
         pass
 

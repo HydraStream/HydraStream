@@ -172,7 +172,7 @@ def cli(
     try:
         if sys.platform != "win32":
             try:
-                import uvloop
+                import uvloop  # noqa
 
                 uvloop.install()
             except ImportError:

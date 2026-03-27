@@ -8,26 +8,15 @@ import mimetypes
 import random
 import re
 import time
-import typing
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import TypedDict, Unpack
+from typing import Unpack
 from urllib.parse import unquote
 
-import httpx
 from aiolimiter import AsyncLimiter
-from httpx._client import UseClientDefault
-from httpx._types import (
-    AuthTypes,
-    CookieTypes,
-    HeaderTypes,
-    QueryParamTypes,
-    RequestContent,
-    RequestData,
-    RequestExtensions,
-    RequestFiles,
-    TimeoutTypes,
-)
+from curl_cffi import CurlError, Headers, Response
+from curl_cffi.requests import RequestsError
+from curl_cffi.requests.session import HttpMethod, RequestParams
 
 from hydrastream.constants import (
     HTTP_BAD_REQUEST_THRESHOLD,
@@ -36,20 +25,6 @@ from hydrastream.constants import (
 )
 from hydrastream.models import AMIDState, NetworkState
 from hydrastream.monitor import log
-
-
-class RequestOptions(TypedDict, total=False):
-    content: RequestContent | None
-    data: RequestData | None
-    files: RequestFiles | None
-    json: typing.Any | None
-    params: QueryParamTypes | None
-    headers: HeaderTypes | None
-    cookies: CookieTypes | None
-    auth: AuthTypes | UseClientDefault | None
-    follow_redirects: bool | UseClientDefault
-    timeout: TimeoutTypes | UseClientDefault
-    extensions: RequestExtensions | None
 
 
 async def report_429(ctx: AMIDState, retry_after: float | None = None) -> None:
@@ -118,7 +93,7 @@ async def _evaluate_failure(
     ctx: NetworkState,
     url: str,
     attempt: int,
-    response: httpx.Response | None,
+    response: Response | None,
     exc: Exception | None,
 ) -> float | None:
     retry_codes = {408, 429, 500, 502, 503, 504}
@@ -149,12 +124,17 @@ async def _evaluate_failure(
         return delay
 
     if exc is not None:
-        if isinstance(exc, httpx.RequestError | TimeoutError | asyncio.TimeoutError):
+        if isinstance(
+            exc, RequestsError | CurlError | TimeoutError | asyncio.TimeoutError
+        ):
+            err_name = type(exc).__name__
+            if isinstance(exc, CurlError):
+                err_name = f"CurlError({exc.code})"
+
             delay = random.uniform(0, 2**attempt)
             await log(
                 ctx.monitor,
-                f"Network issue ({type(exc).__name__}) on {url}. "
-                f"Retrying in {delay:.2f}s...",
+                f"Network issue ({err_name}) on {url}. Retrying in {delay:.2f}s...",
                 status="WARNING",
                 throttle_key="net_drop",
             )
@@ -169,12 +149,12 @@ async def _evaluate_failure(
 
 
 async def safe_request(
-    ctx: NetworkState, method: str, url: str, **kwargs: Unpack[RequestOptions]
-) -> httpx.Response | None:
+    ctx: NetworkState, method: HttpMethod, url: str, **kwargs: Unpack[RequestParams]
+) -> Response | None:
     for attempt in range(1, ctx.max_retries + 1):
         async with acquire(ctx.rate_limiter):
             try:
-                resp = await ctx.client.request(method, url, **kwargs)
+                resp = await ctx.client.request(method, url, **kwargs)  # type: ignore
                 if resp.status_code < HTTP_BAD_REQUEST_THRESHOLD:
                     if random.random() < SCALE_UP_PROBABILITY:
                         await try_scale_up(ctx.rate_limiter)
@@ -197,8 +177,11 @@ async def safe_request(
 
 @contextlib.asynccontextmanager
 async def stream_chunk(
-    ctx: NetworkState, url: str, headers: dict[str, str], chunk_timeout: float
-) -> AsyncIterator[httpx.Response]:
+    ctx: NetworkState,
+    url: str,
+    chunk_timeout: float | None,
+    headers: dict[str, str] | None = None,
+) -> AsyncIterator[Response]:
     for attempt in range(1, ctx.max_retries + 1):
         response = None
         yielded = False
@@ -215,9 +198,9 @@ async def stream_chunk(
                             yield response
                             return
 
-                        delay = await _evaluate_failure(
-                            ctx, url, attempt, response=response, exc=None
-                        )
+                    delay = await _evaluate_failure(
+                        ctx, url, attempt, response=response, exc=None
+                    )
 
             except Exception as exc:
                 if yielded:
@@ -229,23 +212,23 @@ async def stream_chunk(
 
         if delay is None:
             if response is not None:
-                raise httpx.HTTPStatusError(
+                raise RequestsError(
                     f"Stream failed on {url}",
                     request=response.request,
                     response=response,
                 )
             else:
-                raise httpx.RequestError(
+                raise RequestsError(
                     f"Stream failed on {url} before response was received"
                 )
         await asyncio.sleep(delay)
 
-    raise httpx.RequestError(
+    raise RequestsError(
         f"Failed to establish stream for {url} after {ctx.max_retries} attempts."
     )
 
 
-def _get_retry_after(response: httpx.Response) -> float | None:
+def _get_retry_after(response: Response) -> float | None:
     header = response.headers.get("Retry-After")
     if not header:
         return None
@@ -260,7 +243,7 @@ def _get_retry_after(response: httpx.Response) -> float | None:
     return None
 
 
-def extract_filename(url: str, headers: httpx.Headers) -> str:
+def extract_filename(url: str, headers: Headers) -> str:
     filename = None
     cd = headers.get("Content-Disposition", "")
 
@@ -298,4 +281,6 @@ def extract_filename(url: str, headers: httpx.Headers) -> str:
 
 
 async def close(ctx: NetworkState) -> None:
-    await ctx.client.aclose()
+    if hasattr(ctx, "client"):
+        with contextlib.suppress(TypeError, AttributeError):
+            await ctx.client.close()

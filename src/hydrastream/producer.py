@@ -4,18 +4,20 @@
 import asyncio
 from collections.abc import Iterable
 
+from curl_cffi import Headers
+
 from hydrastream.constants import MIN_CHUNK, STREAM_CHUNK_SIZE
-from hydrastream.models import File, FileMeta, HydraContext
+from hydrastream.models import Checksum, File, FileMeta, HydraContext, TypeHash
 from hydrastream.monitor import add_file, done, log, update
-from hydrastream.network import extract_filename, safe_request
-from hydrastream.providers import resolve_hash
+from hydrastream.network import extract_filename, safe_request, stream_chunk
+from hydrastream.providers import ProviderRouter
 from hydrastream.storage import create_sparse_file, load_state, open_file
 
 
 async def chunk_producer(
     ctx: HydraContext,
     links: Iterable[str],
-    expected_checksums: dict[str, str] | None = None,
+    expected_checksums: dict[str, tuple[TypeHash, str]] | None = None,
 ) -> None:
     checksums_map = expected_checksums or {}
 
@@ -28,10 +30,15 @@ async def chunk_producer(
             if not meta:
                 await ctx.file_discovery_queue.put(None)
                 continue
-            filename, total_size = meta
-            md5_val = await _resolve_md5(ctx, url, filename, checksums_map.get(url))
+            filename, total_size, supports_ranges = meta
+            checksum = await _resolve_md5(ctx, url, filename, checksums_map.get(url))
             file_obj = await _prepare_file_object(
-                ctx, url, filename, total_size, md5_val
+                ctx,
+                url=url,
+                filename=filename,
+                total_size=total_size,
+                supports_ranges=supports_ranges,
+                checksum=checksum,
             )
             if not ctx.stream:
                 file_obj.fd = open_file(ctx.fs, filename=file_obj.meta.filename)
@@ -49,44 +56,59 @@ async def chunk_producer(
             await ctx.file_discovery_queue.put(None)
 
 
-async def _fetch_metadata(ctx: HydraContext, url: str) -> tuple[str, int] | None:
+async def _fetch_metadata(ctx: HydraContext, url: str) -> tuple[str, int, bool] | None:
+    # 1. Пробуем HEAD
     response = await safe_request(ctx.net, "HEAD", url=url)
-    if response is None:
-        await log(ctx.ui, f"Skipping {url} due to unreachable remote.", status="ERROR")
-        return None
+    # 2. Если HEAD не дал инфы, используем GET, но ОБЯЗАТЕЛЬНО через stream
+    if response is None or int(response.headers.get("content-length", 0)) == 0:
+        try:  # Используем stream, чтобы не грузить файл в память!
+            # Контекстный менеджер 'async with' сам закроет соединение в конце
+            async with stream_chunk(ctx.net, url, ctx.config.chunk_timeout) as resp:
+                headers = resp.headers
+                return parse_headers(url, headers)
+        except Exception as e:
+            await log(ctx.ui, f"Failed GET metadata for {url}: {e}", status="ERROR")
+            return None
 
-    total_size = int(response.headers.get("content-length", 0))
-    filename = extract_filename(url, response.headers)
+    return parse_headers(url, response.headers)
 
-    if total_size <= 0:
-        await log(
-            ctx.ui,
-            f"Invalid Content-Length ({total_size}) for {filename}",
-            status="ERROR",
-        )
-        return None
 
-    return filename, total_size
+def parse_headers(url: str, headers: Headers) -> tuple[str, int, bool]:
+    total_size = int(headers.get("content-length", 0))
+    accept_ranges = headers.get("accept-ranges", "").lower()
+    supports_ranges = (accept_ranges == "bytes") and (total_size > 0)
+    filename = extract_filename(url, headers)
+    return filename, total_size, supports_ranges
 
 
 async def _resolve_md5(
-    ctx: HydraContext, url: str, filename: str, predefined_md5: str | None
-) -> str | None:
-    if predefined_md5:
-        return predefined_md5
+    ctx: HydraContext,
+    url: str,
+    filename: str,
+    checksum_tuple: tuple[TypeHash, str] | None,
+) -> Checksum | None:
+    if checksum_tuple:
+        return Checksum(algorithm=checksum_tuple[0], value=checksum_tuple[1])
 
     add_file(ctx.ui, filename)
-    md5_val = await resolve_hash(ctx.net, url, filename)
+
+    provider = ProviderRouter()
+    checksum = await provider.resolve_hash(ctx.net, url, filename)
     await done(ctx.ui, filename)
 
-    if md5_val is None:
+    if checksum is None:
         await log(ctx.ui, f"Missing MD5 hash for file: {filename}", status="WARNING")
 
-    return md5_val
+    return checksum
 
 
 async def _prepare_file_object(
-    ctx: HydraContext, url: str, filename: str, total_size: int, md5_val: str | None
+    ctx: HydraContext,
+    url: str,
+    filename: str,
+    total_size: int,
+    supports_ranges: bool,
+    checksum: Checksum | None,
 ) -> File:
     parts = ctx.config.threads
     chunk_size = max(total_size // parts, MIN_CHUNK)
@@ -99,16 +121,18 @@ async def _prepare_file_object(
                 filename=filename,
                 url=url,
                 content_length=total_size,
-                expected_md5=md5_val,
+                supports_ranges=supports_ranges,
+                expected_checksum=checksum,
             ),
             chunk_size=chunk_size,
         )
-
-    file_obj, num_states = load_state(ctx.fs, filename=filename)
-    if num_states > 1:
-        await log(
-            ctx.ui, f"Multiple state files found for {filename}!", status="WARNING"
-        )
+    file_obj = None
+    if supports_ranges:
+        file_obj, num_states = load_state(ctx.fs, filename=filename)
+        if num_states > 1:
+            await log(
+                ctx.ui, f"Multiple state files found for {filename}!", status="WARNING"
+            )
 
     if file_obj:
         return file_obj
@@ -123,7 +147,11 @@ async def _prepare_file_object(
         filename = new_filename
     return File(
         meta=FileMeta(
-            filename=filename, url=url, content_length=total_size, expected_md5=md5_val
+            filename=filename,
+            url=url,
+            content_length=total_size,
+            supports_ranges=supports_ranges,
+            expected_checksum=checksum,
         ),
         chunk_size=chunk_size,
     )

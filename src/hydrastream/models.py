@@ -3,23 +3,31 @@
 
 import asyncio
 import contextlib
-import math
 import os
-import ssl
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Self, TypedDict, TypeVar, cast, dataclass_transform
+from typing import (
+    Any,
+    Literal,
+    Self,
+    TypedDict,
+    TypeVar,
+    cast,
+    dataclass_transform,
+)
 
-import httpx
 import orjson
 from aiolimiter import AsyncLimiter
-from httpx._types import (
-    AuthTypes,
-    CookieTypes,
+from curl_cffi import (
+    AsyncSession,
+    BrowserTypeLiteral,
+    CurlHttpVersion,
+    CurlOpt,
+    Headers,
     HeaderTypes,
-    ProxyTypes,
-    TimeoutTypes,
+    Response,
 )
 from rich.console import Console
 from rich.live import Live
@@ -30,24 +38,46 @@ from rich.progress import (
 
 from hydrastream.constants import MIN_CHUNK
 
+TypeHash = Literal[
+    "md5",
+    "sha1",
+    "sha224",
+    "sha256",
+    "sha384",
+    "sha512",
+    "blake2b",
+    "blake2s",
+    "sha3_224",
+    "sha3_256",
+    "sha3_384",
+    "sha3_512",
+    "shake_128",
+    "shake_256",
+    "new",
+    "algorithms_guaranteed",
+    "algorithms_available",
+    "pbkdf2_hmac",
+    "file_digest",
+]
 
-class HttpxClientOptions(TypedDict, total=False):
+
+class BaseSessionParams(TypedDict, total=False):
     headers: HeaderTypes | None
-    cookies: CookieTypes | None
-    auth: AuthTypes | None
-    proxy: ProxyTypes | None
-    timeout: TimeoutTypes
-    verify: ssl.SSLContext | str | bool
-    follow_redirects: bool
-    http2: bool
-    http1: bool
+    verify: bool
+    timeout: float | tuple[float, float]
+    allow_redirects: bool
+    max_redirects: int
+    impersonate: BrowserTypeLiteral | None
+    default_headers: bool
+    http_version: CurlHttpVersion | str | None
+    curl_options: dict[CurlOpt, int] | None
 
 
-DEFAULT_OPTIONS: HttpxClientOptions = {
-    "timeout": httpx.Timeout(10.0, read=5.0),
-    "http2": True,
-    "follow_redirects": True,
+DEFAULT_OPTIONS: BaseSessionParams = {
+    "impersonate": "chrome120",
+    "timeout": 30.0,
 }
+
 
 _T = TypeVar("_T")
 
@@ -96,11 +126,18 @@ class Chunk:
 
 
 @value_object
+class Checksum:
+    algorithm: TypeHash  # "md5", "sha256", "sha1"
+    value: str
+
+
+@value_object
 class FileMeta:
     filename: str
     url: str
     content_length: int
-    expected_md5: str | None = None
+    expected_checksum: Checksum | None = None
+    supports_ranges: bool
 
 
 @entity
@@ -114,6 +151,16 @@ class File:
 
     def __post_init__(self) -> None:
         if self.chunks:
+            return
+        if not self.meta.supports_ranges or self.meta.content_length <= 0:
+            self.chunks.append(
+                Chunk(
+                    start=0,
+                    end=sys.maxsize,  # Бесконечность!
+                    current_pos=0,
+                    filename=self.meta.filename,
+                )
+            )
             return
         if self.chunk_size <= 0:
             raise ValueError(f"Chunk size must be positive, got {self.chunk_size}")
@@ -249,7 +296,7 @@ class NetworkState:
     client_kwargs: dict[str, Any] | None = None
     max_retries: int = 3
 
-    client: httpx.AsyncClient = field(init=False)
+    client: AsyncSession[Response] = field(init=False)
     rate_limiter: AMIDState = field(init=False)
 
     def __post_init__(self) -> None:
@@ -260,21 +307,14 @@ class NetworkState:
         options = cast(
             dict[str, Any], {**DEFAULT_OPTIONS, **(self.client_kwargs or {})}
         )
-
         user_headers = options.pop("headers", None)
-        headers_obj = httpx.Headers(user_headers)
+        headers_obj = Headers(user_headers)
         headers_obj.setdefault("Accept-Encoding", "identity")
-        headers_obj.setdefault("User-Agent", "HydraStream/1.0")
+        headers_obj.setdefault("Connection", "keep-alive")
 
-        calc_limits = httpx.Limits(
-            max_connections=math.ceil(self.threads * 1.1),
-            max_keepalive_connections=self.threads,
-            keepalive_expiry=4.5,
-        )
-        final_limits = options.pop("limits", calc_limits)
-
-        self.client = httpx.AsyncClient(
-            headers=headers_obj, limits=final_limits, **options
+        self.client = AsyncSession(
+            max_clients=self.threads,
+            **options,
         )
 
 
@@ -296,6 +336,7 @@ class HydraContext:
     is_running: bool = True
     stream: bool = False
     current_file: str = field(default="")
+    next_offset: int = 0
 
     net: NetworkState = field(init=False)
     ui: UIState = field(init=False)
