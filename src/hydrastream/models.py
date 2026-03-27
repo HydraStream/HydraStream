@@ -77,17 +77,6 @@ class BaseSessionParams(TypedDict, total=False):
 DEFAULT_OPTIONS: BaseSessionParams = {
     "impersonate": "chrome120",
     "timeout": 30.0,
-    "curl_options": {
-        CurlOpt.TCP_KEEPALIVE: 1,
-        CurlOpt.TCP_KEEPIDLE: 30,
-        CurlOpt.BUFFERSIZE: 128 * 1024,
-        CurlOpt.PIPEWAIT: 1,
-        CurlOpt.MAXCONNECTS: 100,
-        CurlOpt.CONNECTTIMEOUT: 5,
-        CurlOpt.NOSIGNAL: 1,
-        CurlOpt.DNS_CACHE_TIMEOUT: 3600,
-        CurlOpt.IPRESOLVE: 1,  # Только IPv4 для скорости
-    },
 }
 
 
