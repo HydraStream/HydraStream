@@ -29,15 +29,76 @@ jobs:
           echo "Testing wget..."
           time wget -q $TEST_URL -O wget_test.gz
           rm wget_test.gz
+        
+      - name: Benchmark 2 - ARIA2 (1 connections)
+        run: |
+          echo "Testing aria2c..."
+          time aria2c -q $TEST_URL -o aria_test.gz
+          rm aria_test.gz
 
-      - name: Benchmark 2 - ARIA2 (10 connections)
+      - name: Benchmark 3 - ARIA2 (5 connections)
+        run: |
+          echo "Testing aria2c..."
+          time aria2c -x 5 -s 5 -q $TEST_URL -o aria_test.gz
+          rm aria_test.gz
+
+      - name: Benchmark 4 - ARIA2 (10 connections)
         run: |
           echo "Testing aria2c..."
           time aria2c -x 10 -s 10 -q $TEST_URL -o aria_test.gz
           rm aria_test.gz
 
-      - name: Benchmark 3 - HydraStream (20 connections)
+      - name: Benchmark 5 - ARIA2 (16 connections)
+        run: |
+          echo "Testing aria2c..."
+          time aria2c -x 16 -s 16 -q $TEST_URL -o aria_test.gz
+          rm aria_test.gz
+        
+      - name: Benchmark 6 - HydraStream (1 connections)
+        run: |
+          echo "Testing HydraStream..."
+          time hs $TEST_URL -q -o ./
+          rm GCF_000001405.40_GRCh38.p14_genomic.fna.gz
+
+      - name: Benchmark 7 - HydraStream (5 connections)
+        run: |
+          echo "Testing HydraStream..."
+          time hs $TEST_URL -t 5 -q -o ./
+          rm GCF_000001405.40_GRCh38.p14_genomic.fna.gz
+
+      - name: Benchmark 8 - HydraStream (10 connections)
+        run: |
+          echo "Testing HydraStream..."
+          time hs $TEST_URL -t 10 -q -o ./
+          rm GCF_000001405.40_GRCh38.p14_genomic.fna.gz
+
+      - name: Benchmark 9 - HydraStream (15 connections)
+        run: |
+          echo "Testing HydraStream..."
+          time hs $TEST_URL -t 15 -q -o ./
+          rm GCF_000001405.40_GRCh38.p14_genomic.fna.gz
+
+      - name: Benchmark 10 - HydraStream (20 connections)
         run: |
           echo "Testing HydraStream..."
           time hs $TEST_URL -t 20 -q -o ./
           rm GCF_000001405.40_GRCh38.p14_genomic.fna.gz
+
+      - name: Benchmark 11 - hf_transfer (Rust-based)
+        run: |
+          echo "Preparing hf_transfer environment..."
+          # Создаем временное окружение и ставим туда hf_transfer
+          uv venv hf_env > /dev/null
+          uv pip install -p hf_env hf_transfer -q
+          
+          echo "Testing hf_transfer..."
+          # Запускаем Rust-движок напрямую через Python API
+          time ./hf_env/bin/python -c "
+          import os, hf_transfer
+          hf_transfer.download(
+              url=os.environ['TEST_URL'], 
+              filename='hf_test.gz'
+          )"
+          
+          # Убираем за собой
+          rm -rf hf_test.gz hf_env
