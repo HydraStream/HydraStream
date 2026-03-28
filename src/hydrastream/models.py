@@ -6,6 +6,7 @@ import contextlib
 import os
 import sys
 import typing
+import weakref
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -85,25 +86,32 @@ _T = TypeVar("_T")
 
 @dataclass_transform(kw_only_default=True)
 def entity(cls: type[_T]) -> type[_T]:
-    return dataclass(slots=True, kw_only=True)(cls)
+    return dataclass(slots=True, kw_only=True, weakref_slot=True)(cls)
 
 
 @dataclass_transform(kw_only_default=True)
 def ordered_entity(cls: type[_T]) -> type[_T]:
-    return dataclass(slots=True, kw_only=True, order=True)(cls)
+    return dataclass(slots=True, kw_only=True, order=True, weakref_slot=True)(cls)
 
 
 @dataclass_transform(kw_only_default=True, frozen_default=True)
 def value_object(cls: type[_T]) -> type[_T]:
-    return dataclass(slots=True, kw_only=True, frozen=True)(cls)
+    return dataclass(slots=True, kw_only=True, frozen=True, weakref_slot=True)(cls)
 
 
 @ordered_entity
 class Chunk:
-    filename: str = field(compare=False)
     current_pos: int
     start: int = field(compare=False)
     end: int = field(compare=False)
+    _file_ref: weakref.ReferenceType["File"] = field(repr=False, compare=False)
+
+    @property
+    def file(self) -> "File":
+        obj = self._file_ref()
+        if obj is None:
+            raise RuntimeError("File object was already garbage collected")
+        return obj
 
     @property
     def is_finished(self) -> bool:
@@ -134,32 +142,33 @@ class Checksum:
 
 @value_object
 class FileMeta:
-    filename: str
-    url: str
-    content_length: int
-    expected_checksum: Checksum | None = None
-    supports_ranges: bool
+    id: int
+    filename: str = field(compare=False)
+    url: str = field(compare=False)
+    content_length: int = field(compare=False)
+    expected_checksum: Checksum | None = field(default=None, compare=False)
+    supports_ranges: bool = field(compare=False)
 
 
 @entity
 class File:
     meta: FileMeta
-    chunk_size: int
-    chunks: list[Chunk] = field(default_factory=list[Chunk])
+    chunk_size: int = field(compare=False)
+    chunks: list[Chunk] = field(default_factory=list[Chunk], compare=False)
     fd: int | None = field(default=None, repr=False, compare=False)
-    verified: bool = False
-    is_failed: bool = False
+    verified: bool = field(default=False, compare=False)
+    is_failed: bool = field(default=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def create_chunks(self) -> None:
         if self.chunks:
             return
         if not self.meta.supports_ranges or self.meta.content_length <= 0:
             self.chunks.append(
                 Chunk(
                     start=0,
-                    end=sys.maxsize,  # Бесконечность!
+                    end=sys.maxsize,
                     current_pos=0,
-                    filename=self.meta.filename,
+                    _file_ref=weakref.ref(self),
                 )
             )
             return
@@ -176,7 +185,7 @@ class File:
                     start=start,
                     end=end,
                     current_pos=start,
-                    filename=self.meta.filename,
+                    _file_ref=weakref.ref(self),
                 )
             )
 
@@ -264,7 +273,7 @@ class StorageState:
     out_dir: Path
     ui: UIState
     is_running: bool = True
-    files: dict[str, File] = field(default_factory=dict[str, File])
+    files: dict[int, File] = field(default_factory=dict[int, File])
     state_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -344,7 +353,7 @@ class HydraContext:
 
     is_running: bool = True
     stream: bool = False
-    current_file: str = field(default="")
+    current_file_id: list[int] = field(default_factory=list[int])
     next_offset: int = 0
 
     net: NetworkState = field(init=False)
@@ -353,24 +362,24 @@ class HydraContext:
 
     heap_size: int = field(init=False)
 
-    files: dict[str, File] = field(default_factory=dict[str, File])
+    files: dict[int, File] = field(default_factory=dict[int, File])
     heap: list[tuple[int, bytearray]] = field(
         default_factory=list[tuple[int, bytearray]]
     )
-
+    links_queue: asyncio.PriorityQueue[tuple[int, str]] = field(init=False)
     chunk_queue: asyncio.PriorityQueue[tuple[int, Chunk]] = field(init=False)
     stream_queue: asyncio.Queue[tuple[int, bytearray]] = field(init=False)
-    file_discovery_queue: asyncio.Queue[str | None] = field(init=False)
     condition: asyncio.Condition = field(init=False)
 
-    task_creator: asyncio.Task[None] | None = None
+    task_creators: list[asyncio.Task[None]] | None = None
+    dispatcher: asyncio.Task[None] | None = None
     workers: list[asyncio.Task[None]] | None = None
     autosave_task: asyncio.Task[None] | None = None
 
     def __post_init__(self) -> None:
+        self.links_queue = asyncio.PriorityQueue()
         self.chunk_queue = asyncio.PriorityQueue()
         self.stream_queue = asyncio.Queue()
-        self.file_discovery_queue = asyncio.Queue()
         self.condition = asyncio.Condition()
 
         maxsize = (

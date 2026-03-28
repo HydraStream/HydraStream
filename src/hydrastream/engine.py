@@ -8,19 +8,45 @@ import heapq
 import math
 import random
 import signal
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
+from typing import TypeVarTuple, Unpack
 
 from hydrastream.dispatcher import download_worker
 from hydrastream.models import HydraContext, TypeHash
 from hydrastream.monitor import done, log, ui_start, ui_stop
 from hydrastream.network import close
-from hydrastream.producer import chunk_producer
+from hydrastream.producer import chunk_producer, dispatch_chunks
 from hydrastream.storage import autosave, save_all_states, verify_stream
 
+Ts = TypeVarTuple("Ts")
 
-async def delayed_worker(ctx: HydraContext, delay: float) -> None:
+
+async def delayed_task(
+    ctx: HydraContext,
+    task: Callable[[HydraContext, Unpack[Ts]], Awaitable[None]],
+    *args: Unpack[Ts],
+    delay: float = random.uniform(0, 0.5),
+) -> None:
     await asyncio.sleep(delay)
-    await download_worker(ctx)
+    await task(ctx, *args)
+
+
+async def cancel_tasks(ctx: HydraContext) -> None:
+
+    for task in ctx.task_creators or []:
+        if not task.done():
+            task.cancel()
+
+    if ctx.autosave_task:
+        ctx.autosave_task.cancel()
+
+    if ctx.dispatcher:
+        ctx.dispatcher.cancel()
+
+    await close(ctx.net)
+    for worker in ctx.workers or []:
+        if not worker.done():
+            worker.cancel()
 
 
 async def stop(ctx: HydraContext, complete: bool = False) -> None:
@@ -35,17 +61,7 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
             "Interrupt signal received. Initiating graceful shutdown...",
             status="INTERRUPT",
         )
-
-    if ctx.task_creator:
-        ctx.task_creator.cancel()
-    if ctx.autosave_task:
-        ctx.autosave_task.cancel()
-
-    await close(ctx.net)
-    if ctx.workers:
-        for worker in ctx.workers:
-            if worker and not worker.done():
-                worker.cancel()
+    await cancel_tasks(ctx)
 
     if ctx.stream:
         with contextlib.suppress(asyncio.QueueFull):
@@ -72,8 +88,13 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
     # Гасим задачи
     tasks_to_cancel = [
         t
-        for t in [ctx.task_creator, ctx.autosave_task, *(ctx.workers or [])]
-        if (t and asyncio.iscoroutine(t)) or isinstance(t, asyncio.Task)
+        for t in [
+            *(ctx.task_creators or []),  # Распаковываем список продюсеров
+            ctx.autosave_task,  # Единичный таск
+            *(ctx.workers or []),  # Распаковываем список воркеров
+            ctx.dispatcher,
+        ]
+        if isinstance(t, asyncio.Task)  # iscoroutine убираем, мы создаем только Tasks!
     ]
     with contextlib.suppress(asyncio.CancelledError):
         await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
@@ -93,12 +114,8 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
 
 
 async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]:
-    ctx.current_file = filename
-
-    async with ctx.condition:
-        ctx.condition.notify_all()
-
-    file_obj = ctx.files[filename]
+    id = ctx.current_file_id[0]
+    file_obj = ctx.files[id]
     total_size = file_obj.meta.content_length
 
     checksum = file_obj.meta.expected_checksum
@@ -157,7 +174,61 @@ async def _stream_one(ctx: HydraContext, filename: str) -> AsyncGenerator[bytes]
 
     finally:
         ctx.heap.clear()
-        del ctx.files[filename]
+        del ctx.files[id]
+        ctx.current_file_id.remove(id)
+
+
+async def create_tasks(
+    ctx: HydraContext,
+    links: list[str],
+    expected_checksums: dict[str, tuple[TypeHash, str]] | None,
+) -> None:
+    num_task_creator = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
+    num_task_creator = min(num_task_creator, 20)
+    ctx.task_creators = [
+        asyncio.create_task(
+            delayed_task(ctx, chunk_producer, expected_checksums),
+            name=f"Task creator: {i}",
+        )
+        for i in range(num_task_creator)
+    ]
+
+    if ctx.stream:
+        num_workers = ctx.config.threads
+    else:
+        num_workers = (
+            math.ceil(ctx.config.threads * 1.2)
+            if ctx.config.threads > 1
+            else ctx.config.threads
+        )
+
+        ctx.autosave_task = asyncio.create_task(
+            autosave(ctx, interval=60), name="Autosaver"
+        )
+    if ctx.task_creators:
+        for task in ctx.task_creators:
+            await task
+
+    ctx.dispatcher = asyncio.create_task(dispatch_chunks(ctx), name="Dispather")
+
+    ctx.workers = [
+        asyncio.create_task(
+            delayed_task(ctx, download_worker),
+            name=f"Worker: {i}",
+        )
+        for i in range(num_workers)
+    ]
+
+
+async def dispatch_links(
+    ctx: HydraContext, links: str | Iterable[str], loop: asyncio.AbstractEventLoop
+) -> None:
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
+
+    for i, link in enumerate(links):
+        await ctx.links_queue.put((i, link))
 
 
 async def stream_all(
@@ -165,39 +236,31 @@ async def stream_all(
     links: str | Iterable[str],
     expected_checksums: dict[str, tuple[TypeHash, str]] | None,
 ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
-    await ui_start(ctx.ui)
-    ctx.stream = True
-    links = [links] if isinstance(links, str) else list(links)
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
 
-    ctx.task_creator = asyncio.create_task(
-        chunk_producer(ctx, links, expected_checksums), name="Task creator"
-    )
-    ctx.workers = [
-        asyncio.create_task(
-            delayed_worker(ctx, random.uniform(0, 0.5)), name=f"Worker: {i}"
-        )
-        for i in range(ctx.config.threads)
-    ]
+    await ui_start(ctx.ui)
+
+    ctx.stream = True
+
+    loop = asyncio.get_running_loop()
+
+    links = [links] if isinstance(links, str) else list(links)
+
+    await dispatch_links(ctx, links, loop)
+
+    await create_tasks(ctx, links, expected_checksums)
 
     try:
-        for _ in links:
+        while ctx.files and ctx.is_running:
             if not ctx.is_running:
                 break
-
-            filename = await ctx.file_discovery_queue.get()
-
-            if filename is None:
-                continue
-
+            id = ctx.current_file_id[0]
+            filename = ctx.files[id].meta.filename
             file_gen = _stream_one(ctx, filename)
 
             yield filename, file_gen
             async with ctx.condition:
                 await ctx.condition.wait_for(
-                    lambda f=filename: f not in ctx.files or not ctx.is_running
+                    lambda id=id: id not in ctx.files or not ctx.is_running
                 )
 
     except asyncio.CancelledError:
@@ -216,34 +279,20 @@ async def run_downloads(
     links: str | Iterable[str],
     expected_checksums: dict[str, tuple[TypeHash, str]] | None,
 ) -> None:
+
     await ui_start(ctx.ui)
+
     ctx.stream = False
+
+    loop = asyncio.get_running_loop()
 
     links = [links] if isinstance(links, str) else list(links)
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(stop(ctx)))
-    ctx.task_creator = asyncio.create_task(
-        chunk_producer(ctx, links, expected_checksums), name="Task creator"
-    )
-    ctx.autosave_task = asyncio.create_task(
-        autosave(ctx, interval=60), name="Autosaver"
-    )
-    num_workers = (
-        math.ceil(ctx.config.threads * 1.2)
-        if ctx.config.threads > 1
-        else ctx.config.threads
-    )
-    ctx.workers = [
-        asyncio.create_task(
-            delayed_worker(ctx, random.uniform(0, 0.5)), name=f"Worker: {i}"
-        )
-        for i in range(num_workers)
-    ]
+    await dispatch_links(ctx, links, loop)
+
+    await create_tasks(ctx, links, expected_checksums)
 
     try:
-        await ctx.task_creator
         async with ctx.condition:
             await ctx.condition.wait_for(lambda: not (ctx.files and ctx.is_running))
     except asyncio.CancelledError:

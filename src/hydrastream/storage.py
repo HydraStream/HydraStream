@@ -96,9 +96,9 @@ def save_state(ctx: StorageState, file_obj: File) -> None:
         raise
 
 
-def save_all_states(ctx: StorageState, files: dict[str, File]) -> None:
+def save_all_states(ctx: StorageState, files: dict[int, File]) -> None:
     for file in list(files.values()):
-        if not all(c.current_pos > c.end for c in (file.chunks or [])):
+        if file.chunks and not all(c.current_pos > c.end for c in (file.chunks or [])):
             save_state(ctx, file)
 
 
@@ -174,6 +174,11 @@ def verify_size(ctx: StorageState, file: File) -> None:
                 f"Expected {expected_size} bytes, got {actual_size} bytes."
             )
             raise ValueError(err_msg)
+
+
+def del_file(ctx: StorageState, file: File) -> None:
+    filepath = ctx.out_dir / file.meta.filename
+    filepath.unlink(missing_ok=True)
 
 
 async def verify_file_hash(ctx: StorageState, file: File) -> bool | None:

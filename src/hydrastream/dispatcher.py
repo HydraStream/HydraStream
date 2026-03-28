@@ -16,6 +16,7 @@ from hydrastream.models import Chunk, HydraContext
 from hydrastream.monitor import done, log, update
 from hydrastream.network import stream_chunk
 from hydrastream.storage import (
+    del_file,
     delete_state,
     open_file,
     verify_file_hash,
@@ -28,15 +29,16 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
     if ctx.stream:
         return
 
-    filename = chunk.filename
-    file_obj = ctx.files[filename]
+    filename = chunk.file.meta.filename
+    file_obj = chunk.file
     if not await verify_file_hash(ctx.fs, file_obj):
         return
     file_obj.close_fd()
     verify_size(ctx.fs, file_obj)
     delete_state(ctx.fs, filename)
     await done(ctx.ui, filename)
-    del ctx.files[filename]
+    del ctx.files[chunk.file.meta.id]
+    ctx.current_file_id.remove(chunk.file.meta.id)
 
     if not ctx.files:
         async with ctx.condition:
@@ -45,16 +47,11 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
 
 async def get_chunk(ctx: HydraContext) -> Chunk | None:
     _, chunk = await ctx.chunk_queue.get()
-    file_obj = ctx.files.get(chunk.filename)
+    file_obj = chunk.file
     if not file_obj or file_obj.is_failed:
         return None
 
     if ctx.stream:
-        if ctx.current_file != chunk.filename:
-            async with ctx.condition:
-                await ctx.condition.wait_for(
-                    lambda c=chunk.filename: ctx.current_file == c or not ctx.is_running
-                )
         max_ahead_bytes = ctx.heap_size * STREAM_CHUNK_SIZE
 
         # Если чанк из "слишком далекого будущего" - ждем!
@@ -78,7 +75,6 @@ async def download_worker(ctx: HydraContext) -> None:
                 continue
             await process_chunk(ctx, chunk)
             await file_done(ctx, chunk)
-
         except asyncio.CancelledError:
             break
 
@@ -92,11 +88,12 @@ async def download_worker(ctx: HydraContext) -> None:
                 if chunk and status in {400, 401, 403, 404, 410, 416}:
                     await log(
                         ctx.ui,
-                        f"Chunk for {chunk.filename} failed permanently "
+                        f"Chunk for {chunk.file.meta.filename} failed permanently "
                         f"(HTTP {status}).",
                         status="ERROR",
                     )
-                    ctx.files[chunk.filename].is_failed = True
+                    chunk.file.is_failed = True
+                    del_file(ctx.fs, chunk.file)
 
                 # Остальные ошибки сервера (5xx, 429) — пробуем перекинуть чанк
                 # в очередь
@@ -124,13 +121,13 @@ async def requeue_chunk(
     if not (ctx.is_running and chunk):
         return
 
-    file_obj = ctx.files[chunk.filename]
+    file_obj = chunk.file
     supports_ranges = file_obj.meta.supports_ranges
 
     if not supports_ranges:
         if ctx.stream:
             err_msg = (
-                f"Stream interrupted for {chunk.filename}. "
+                f"Stream interrupted for {chunk.file.meta.filename}. "
                 f"Server does not support partial downloads (Range requests). "
                 f"Cannot resume stream. Aborting."
             )
@@ -141,14 +138,14 @@ async def requeue_chunk(
 
         await log(
             ctx.ui,
-            f"Connection dropped for {chunk.filename}. "
+            f"Connection dropped for {chunk.file.meta.filename}. "
             f"Server does not support resume. Restarting download from 0 bytes.",
             status="WARNING",
         )
 
         downloaded_so_far = chunk.current_pos - chunk.start
         if downloaded_so_far > 0:
-            update(ctx.ui, chunk.filename, -downloaded_so_far)
+            update(ctx.ui, chunk.file.meta.filename, -downloaded_so_far)
 
         chunk.current_pos = chunk.start
 
@@ -172,14 +169,14 @@ async def disk_process_chunk(
     ctx: HydraContext, chunk: Chunk, headers: dict[str, str] | None
 ) -> None:
     buffer = bytearray()
-    fd = ctx.files[chunk.filename].fd
+    fd = chunk.file.fd
     if fd is None:
-        fd = open_file(ctx.fs, chunk.filename)
+        fd = open_file(ctx.fs, chunk.file.meta.filename)
     buffer_size = 1_048_576
     chunk_timeout = ctx.config.chunk_timeout if headers else sys.maxsize
     async with stream_chunk(
         ctx.net,
-        ctx.files[chunk.filename].meta.url,
+        chunk.file.meta.url,
         headers=headers,
         chunk_timeout=chunk_timeout,
     ) as r:
@@ -187,7 +184,7 @@ async def disk_process_chunk(
             async for data in r.aiter_content(chunk_size=131072):  # type: ignore
                 data = cast(bytes, data)
                 buffer.extend(data)
-                update(ctx.ui, chunk.filename, len(data))
+                update(ctx.ui, chunk.file.meta.filename, len(data))
                 if len(buffer) >= buffer_size:
                     await write_chunk_data(fd, buffer, chunk.current_pos)
                     chunk.current_pos += len(buffer)
@@ -206,7 +203,7 @@ async def stream_process_chunk(
     chunk_timeout = ctx.config.chunk_timeout if headers else sys.maxsize
     async with stream_chunk(
         ctx.net,
-        ctx.files[chunk.filename].meta.url,
+        chunk.file.meta.url,
         chunk_timeout=chunk_timeout,
         headers=headers,
     ) as r:
@@ -214,7 +211,7 @@ async def stream_process_chunk(
             async for data in r.aiter_content(chunk_size=131072):  # type: ignore
                 data = cast(bytes, data)
                 buffer.extend(data)
-                update(ctx.ui, chunk.filename, len(data))
+                update(ctx.ui, chunk.file.meta.filename, len(data))
                 if len(ctx.heap) >= ctx.heap_size and chunk.start < ctx.next_offset:
                     async with ctx.condition:
                         await ctx.condition.wait_for(
@@ -240,7 +237,7 @@ async def stream_process_chunk(
 async def process_chunk(ctx: HydraContext, chunk: Chunk) -> None:
     if chunk.current_pos > chunk.end:
         return
-    if ctx.files[chunk.filename].meta.supports_ranges:
+    if chunk.file.meta.supports_ranges:
         headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
     else:
         headers = None

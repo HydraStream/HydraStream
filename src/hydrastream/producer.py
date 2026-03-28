@@ -2,7 +2,6 @@
 # Licensed under the MIT License.
 
 import asyncio
-from collections.abc import Iterable
 
 from curl_cffi import Headers
 
@@ -16,19 +15,19 @@ from hydrastream.storage import create_sparse_file, load_state, open_file
 
 async def chunk_producer(
     ctx: HydraContext,
-    links: Iterable[str],
     expected_checksums: dict[str, tuple[TypeHash, str]] | None = None,
 ) -> None:
     checksums_map = expected_checksums or {}
 
-    for i, url in enumerate(links):
+    while not ctx.links_queue.empty():
+        id, url = await ctx.links_queue.get()
+
         if not ctx.is_running:
             break
 
         try:
             meta = await _fetch_metadata(ctx, url)
             if not meta:
-                await ctx.file_discovery_queue.put(None)
                 continue
 
             filename, total_size, supports_ranges = meta
@@ -40,6 +39,7 @@ async def chunk_producer(
                 )
             file_obj = await _prepare_file_object(
                 ctx,
+                id=id,
                 url=url,
                 filename=filename,
                 total_size=total_size,
@@ -49,7 +49,7 @@ async def chunk_producer(
             if not ctx.stream:
                 file_obj.fd = open_file(ctx.fs, filename=file_obj.meta.filename)
 
-            await _register_and_dispatch(ctx, file_obj, i)
+            await _register_file(ctx, file_obj, id)
 
         except asyncio.CancelledError:
             break
@@ -59,7 +59,6 @@ async def chunk_producer(
             break
         except Exception as e:
             await log(ctx.ui, f"Failed to process URL {url}: {e}", status="ERROR")
-            await ctx.file_discovery_queue.put(None)
 
 
 async def _fetch_metadata(ctx: HydraContext, url: str) -> tuple[str, int, bool] | None:
@@ -108,8 +107,9 @@ async def _resolve_md5(
     return checksum
 
 
-async def _prepare_file_object(
+async def _prepare_file_object(  # noqa
     ctx: HydraContext,
+    id: int,
     url: str,
     filename: str,
     total_size: int,
@@ -124,6 +124,7 @@ async def _prepare_file_object(
     if ctx.stream:
         return File(
             meta=FileMeta(
+                id=id,
                 filename=filename,
                 url=url,
                 content_length=total_size,
@@ -153,6 +154,7 @@ async def _prepare_file_object(
         filename = new_filename
     return File(
         meta=FileMeta(
+            id=id,
             filename=filename,
             url=url,
             content_length=total_size,
@@ -163,11 +165,11 @@ async def _prepare_file_object(
     )
 
 
-async def _register_and_dispatch(
+async def _register_file(
     ctx: HydraContext, file_obj: File, priority_index: int
 ) -> None:
     filename = file_obj.meta.filename
-    ctx.files[filename] = file_obj
+    ctx.files[priority_index] = file_obj
     chunks = file_obj.chunks or []
 
     add_file(ctx.ui, filename, file_obj.meta.content_length)
@@ -175,11 +177,24 @@ async def _register_and_dispatch(
         downloaded = sum(c.uploaded for c in chunks)
         if downloaded - len(chunks) > 0:
             update(ctx.ui, filename, downloaded)
-    else:
-        await ctx.file_discovery_queue.put(filename)
 
-    for c in chunks:
-        if not ctx.is_running:
-            break
-        if c.current_pos <= c.end:
-            await ctx.chunk_queue.put((priority_index, c))
+
+async def dispatch_chunks(ctx: HydraContext) -> None:
+    for priority_index in range(len(ctx.files)):
+        file = ctx.files[priority_index]
+        file.create_chunks()
+
+        for c in file.chunks:
+            if not ctx.is_running:
+                break
+            if c.current_pos <= c.end:
+                await ctx.chunk_queue.put((priority_index, c))
+        ctx.current_file_id.append(priority_index)
+
+        async with ctx.condition:
+            if ctx.stream:
+                await ctx.condition.wait_for(lambda: not ctx.current_file_id)
+            else:
+                await ctx.condition.wait_for(
+                    lambda: len(ctx.current_file_id) < ctx.config.threads
+                )
