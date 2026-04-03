@@ -292,7 +292,6 @@ class AMIDState:
 
     def __post_init__(self) -> None:
         self.current_rps: int = int(self.max_rps**0.5)
-        self.max_rps: int = self.max_rps
         self.limiter = AsyncLimiter(self.current_rps, 1)
 
 

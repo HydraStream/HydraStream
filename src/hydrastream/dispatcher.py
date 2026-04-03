@@ -12,7 +12,7 @@ from curl_cffi.requests import RequestsError
 
 from .models import Chunk, HydraContext
 from .monitor import done, log, update
-from .network import stream_chunk
+from .network import stream_chunk, try_scale_up
 
 
 async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
@@ -209,6 +209,8 @@ async def disk_process_chunk(
                     await ctx.fs.write_chunk_data(fd, buffer, chunk.current_pos)
                     chunk.current_pos += len(buffer)
                     buffer = bytearray()
+                    if random.random() < 0.1:
+                        await try_scale_up(ctx.net.rate_limiter)
 
         finally:
             if buffer:
