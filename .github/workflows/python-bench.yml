@@ -42,6 +42,6 @@ jobs:
           echo "=================================================="
           
           # Вызываем бинарник прямо из изолированного venv
-          time ./bench_env/bin/hs $TEST_URL -t 15 -q --no-verify -o ./
+          time ./bench_env/bin/hs $TEST_URL -t 15 -q --no-verify -o ./hs_out 
           
-          rm GCF_000001405.40_GRCh38.p14_genomic.fna.gz
+          rm -rf ./hs_out

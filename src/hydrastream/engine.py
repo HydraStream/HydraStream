@@ -300,7 +300,7 @@ async def run_downloads(
 ) -> None:
 
     loop = asyncio.get_running_loop()
-    optimal_threads = ctx.config.threads + 4
+    optimal_threads = max(20, ctx.config.threads + 10)
     max_safe_threads = min(optimal_threads, 64)
     custom_pool = ThreadPoolExecutor(
         max_workers=max_safe_threads, thread_name_prefix="HydraIO"
@@ -334,7 +334,7 @@ async def run_downloads(
 
     finally:
         await teardown_engine(ctx, loop)
-        custom_pool.shutdown(wait=True)
+        await loop.shutdown_default_executor()
 
 
 def save_all_states(ctx: HydraContext, files: dict[int, File]) -> None:

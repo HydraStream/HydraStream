@@ -85,8 +85,8 @@ jobs:
       - name: Test 4 - HydraStream (20 connections)
         run: |
           echo "Testing HydraStream..."
-          time hs "${{ matrix.target.url }}" -t 20 -q --no-verify -o ./test_hs.bin || echo "❌ HYDRASTREAM FAILED"
-          rm -f test_hs.bin
+          time hs "${{ matrix.target.url }}" -t 20 -q --no-verify -o ./hs_out || echo "❌ HYDRASTREAM FAILED"
+          rm -rf ./hs_out
 
          # 5. HYDRASTREAM (Streaming to /dev/null)
       # ---------------------------------------------------------
