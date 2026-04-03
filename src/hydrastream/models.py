@@ -276,7 +276,7 @@ class UIState:
 
 @entity
 class AMIDState:
-    initial_rps: int
+    max_rps: int
     min_rps: int = 1
     cooldown_seconds: int = 30
     break_duration: int = 300
@@ -292,9 +292,9 @@ class AMIDState:
     circuit_broken_until: float = 0.0
 
     def __post_init__(self) -> None:
-        self.current_rps: int = self.initial_rps
-        self.max_rps: int = self.initial_rps
-        self.limiter = AsyncLimiter(self.initial_rps, 1)
+        self.current_rps: int = 3
+        self.max_rps: int = self.max_rps
+        self.limiter = AsyncLimiter(self.current_rps, 1)
 
 
 @entity
@@ -308,9 +308,7 @@ class NetworkState:
     rate_limiter: AMIDState = field(init=False)
 
     def __post_init__(self) -> None:
-        self.rate_limiter = AMIDState(
-            initial_rps=self.threads * 2, monitor=self.monitor
-        )
+        self.rate_limiter = AMIDState(max_rps=self.threads * 2, monitor=self.monitor)
 
         options = cast(
             dict[str, Any], {**DEFAULT_OPTIONS, **(self.client_kwargs or {})}
@@ -377,6 +375,7 @@ class HydraContext:
     stream: bool = False
     current_file_id: list[int] = field(default_factory=list[int])
     next_offset: int = 0
+    active_downloads: int = 0
 
     net: NetworkState = field(init=False)
     ui: UIState = field(init=False)

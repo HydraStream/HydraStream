@@ -22,12 +22,18 @@ from .models import AMIDState, NetworkState
 from .monitor import log
 
 
-async def report_429(ctx: AMIDState, retry_after: float | None = None) -> None:
+async def report_429(
+    ctx: AMIDState, retry_after: float | None = None, e503: bool = False
+) -> None:
     async with ctx.lock:
+        if e503:
+            ctx.current_rps = max(1, ctx.current_rps // 2)
+            return
+
         now = time.time()
         ctx.last_429_time = now
 
-        break_duration = retry_after if retry_after is not None else ctx.initial_rps
+        break_duration = retry_after if retry_after is not None else ctx.max_rps
 
         if ctx.current_rps <= ctx.min_rps or retry_after is not None:
             ctx.circuit_broken_until = now + break_duration
@@ -103,8 +109,10 @@ async def _evaluate_failure(
             return None
 
         server_delay = _get_retry_after(response)
-        if response.status_code in [429, 503]:
+        if response.status_code == 429:
             await report_429(ctx.rate_limiter, server_delay)
+        if response.status_code == 503:
+            await report_429(ctx.rate_limiter, server_delay, e503=True)
 
         delay = (
             server_delay if server_delay is not None else random.uniform(0, 2**attempt)

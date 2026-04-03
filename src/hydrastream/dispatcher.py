@@ -54,7 +54,6 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
     del ctx.files[chunk.file.meta.id]
     ctx.current_file_id.remove(chunk.file.meta.id)
     if not ctx.files:
-        print(ctx.dispatcher.done())
         async with ctx.condition:
             ctx.condition.notify_all()
 
@@ -86,6 +85,9 @@ async def get_chunk(ctx: HydraContext) -> Chunk | None:
 
 async def download_worker(ctx: HydraContext) -> None:
     while ctx.is_running:
+        while ctx.active_downloads >= ctx.net.rate_limiter.current_rps:
+            await asyncio.sleep(0.1)
+        ctx.active_downloads += 1
         chunk = None
         try:
             chunk = await get_chunk(ctx)
@@ -129,6 +131,7 @@ async def download_worker(ctx: HydraContext) -> None:
             raise
         finally:
             ctx.chunk_queue.task_done()
+            ctx.active_downloads -= 1
 
 
 async def requeue_chunk(
