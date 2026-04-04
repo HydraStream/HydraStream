@@ -164,7 +164,9 @@ class File:
             self.chunks.append(
                 Chunk(
                     start=0,
-                    end=sys.maxsize,
+                    end=sys.maxsize
+                    if not self.meta.content_length
+                    else self.meta.content_length,
                     current_pos=0,
                     _file_ref=weakref.ref(self),
                 )

@@ -18,12 +18,12 @@ async def chunk_producer(  # noqa
 ) -> None:
 
     while not ctx.links_queue.empty():
-        id, url, checksum = await ctx.links_queue.get()
-
-        if not ctx.is_running:
-            break
-
         try:
+            id, url, checksum = await ctx.links_queue.get()
+
+            if not ctx.is_running:
+                break
+
             meta = await _fetch_metadata(ctx, url)
 
             filename, total_size, supports_ranges = meta
@@ -80,8 +80,6 @@ async def chunk_producer(  # noqa
                 ctx.ui, f"Critical Task creator Exception: {e!r}", status="CRITICAL"
             )
             raise
-        finally:
-            ctx.links_queue.task_done()
 
 
 async def requeue_chunk(
@@ -148,7 +146,7 @@ async def _prepare_file_object(  # noqa
     checksum: Checksum | None,
 ) -> File:
     parts = ctx.config.threads
-    chunk_size = max(total_size // parts, ctx.config.MIN_CHUNK)
+    chunk_size = max(total_size // parts, ctx.config.MIN_CHUNK) if total_size > 0 else 0
     if ctx.stream and chunk_size > ctx.config.STREAM_CHUNK_SIZE:
         chunk_size = ctx.config.STREAM_CHUNK_SIZE
 

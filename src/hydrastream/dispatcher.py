@@ -22,28 +22,31 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
     filename = chunk.file.meta.filename
     file_obj = chunk.file
     try:
-        if chunk.file.verified or not chunk.file.is_complete:
-            return
+        if chunk.file.meta.content_length:
+            if chunk.file.verified or not chunk.file.is_complete:
+                return
 
-        chunk.file.verified = True
-        if not ctx.fs.verify_size(filename, file_obj.meta.content_length):
-            return
-        await log(
-            ctx.ui,
-            f"Verifying Hash checksum for {chunk.file.meta.filename}...",
-            status="INFO",
-        )
+            chunk.file.verified = True
+            if not ctx.fs.verify_size(filename, file_obj.meta.content_length):
+                return
+
         if file_obj.meta.expected_checksum:
+            await log(
+                ctx.ui,
+                f"Verifying Hash checksum for {chunk.file.meta.filename}...",
+                status="INFO",
+            )
             await ctx.fs.verify_file_hash(
                 file_obj.meta.filename,
                 file_obj.meta.expected_checksum.value,
                 file_obj.meta.expected_checksum.algorithm,
             )
-        await log(
-            ctx.ui,
-            f"Integrity confirmed: {chunk.file.meta.filename}",
-            status="SUCCESS",
-        )
+            await log(
+                ctx.ui,
+                f"Integrity confirmed: {chunk.file.meta.filename}",
+                status="SUCCESS",
+            )
+
     except (ValueError, OSError) as ve:
         await log(ctx.ui, str(ve), status="ERROR")
         raise
@@ -53,9 +56,8 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
     await done(ctx.ui, filename)
     del ctx.files[chunk.file.meta.id]
     ctx.current_file_id.remove(chunk.file.meta.id)
-    if not ctx.files:
-        async with ctx.condition:
-            ctx.condition.notify_all()
+    async with ctx.condition:
+        ctx.condition.notify_all()
 
 
 async def get_chunk(ctx: HydraContext) -> Chunk | None:
@@ -85,11 +87,12 @@ async def get_chunk(ctx: HydraContext) -> Chunk | None:
 
 async def download_worker(ctx: HydraContext) -> None:
     while ctx.is_running:
-        while ctx.active_downloads >= ctx.net.rate_limiter.current_rps:
-            await asyncio.sleep(0.1)
-        ctx.active_downloads += 1
-        chunk = None
         try:
+            while ctx.active_downloads >= ctx.net.rate_limiter.current_rps:
+                await asyncio.sleep(0.1)
+            ctx.active_downloads += 1
+            chunk = None
+
             chunk = await get_chunk(ctx)
             if chunk is None:
                 continue
@@ -130,7 +133,6 @@ async def download_worker(ctx: HydraContext) -> None:
             await log(ctx.ui, f"Critical Worker Exception: {e!r}", status="CRITICAL")
             raise
         finally:
-            ctx.chunk_queue.task_done()
             ctx.active_downloads -= 1
 
 

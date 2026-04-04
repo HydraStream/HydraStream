@@ -281,7 +281,6 @@ async def stream_all(
             file_gen = _stream_one(ctx, file_id)
 
             yield filename, file_gen
-            ctx.file_discovery_queue.task_done()
     except asyncio.CancelledError:
         pass
 

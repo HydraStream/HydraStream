@@ -313,7 +313,6 @@ def cli(
                 err=True,
             )
             raise typer.Exit(code=1)
-
         config = HydraConfig(
             threads=threads,
             dry_run=dry_run,

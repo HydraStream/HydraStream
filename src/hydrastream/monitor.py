@@ -3,6 +3,7 @@
 
 import asyncio
 import shutil
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -155,7 +156,7 @@ async def log(
         return
 
     if ctx.json_logs:
-        ctx.console.print(final_msg)
+        sys.stdout.write(final_msg + "\n")
         return
 
     renderable = final_msg
@@ -180,7 +181,6 @@ async def log_worker(ctx: UIState) -> None:
 
         # Ядовитая пилюля для остановки логгера
         if msg is None:
-            ctx.log_queue.task_done()
             break
 
         try:
@@ -188,8 +188,6 @@ async def log_worker(ctx: UIState) -> None:
             ctx.log_fd.flush()  # Гарантируем, что строка сразу упала на диск
         except OSError:
             pass  # Если диск отвалился, просто глотаем ошибку
-        finally:
-            ctx.log_queue.task_done()
 
 
 async def speed_limiter(ctx: UIState) -> None:
@@ -520,7 +518,13 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
         f"Total Time:    {time_str}\n"
         f"--------------------------------"
     )
-    await log(ctx, report)
+    report_dict = {
+        "total_files": ctx.files_completed,
+        "total_bytes": ctx.download_bytes,
+        "average_speed_mb": avg_speed,
+        "time_elapsed_sec": elapsed,
+    }
+    await log(ctx, report, **report_dict)
 
 
 async def ui_start(ctx: UIState) -> None:

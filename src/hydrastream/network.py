@@ -27,7 +27,7 @@ async def report_429(
 ) -> None:
     async with ctx.lock:
         if e503:
-            ctx.current_rps = max(1, ctx.current_rps // 2)
+            ctx.current_rps = max(1, ctx.current_rps - 1)
             return
 
         now = time.time()
