@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import asyncio
+import contextlib
 import sys
 import typing
 import weakref
@@ -53,11 +54,6 @@ TypeHash = Literal[
     "sha3_512",
     "shake_128",
     "shake_256",
-    "new",
-    "algorithms_guaranteed",
-    "algorithms_available",
-    "pbkdf2_hmac",
-    "file_digest",
 ]
 
 
@@ -134,8 +130,41 @@ class Chunk:
 
 @value_object
 class Checksum:
-    algorithm: TypeHash  # "md5", "sha256", "sha1"
+    algorithm: TypeHash
     value: str
+
+    def __post_init__(self) -> None:
+        normalized = self.value.strip().lower()
+        object.__setattr__(self, "value", normalized)
+
+        # Полный список фиксированных длин для TypeHash
+        expected_lengths = {
+            "md5": 32,
+            "sha1": 40,
+            "sha224": 56,
+            "sha3_224": 56,
+            "sha256": 64,
+            "sha3_256": 64,
+            "blake2s": 64,
+            "sha384": 96,
+            "sha3_384": 96,
+            "sha512": 128,
+            "sha3_512": 128,
+            "blake2b": 128,
+        }
+
+        # 1. Проверка hex-символов
+        if not all(c in "0123456789abcdef" for c in normalized):
+            raise ValueError("Hash value contains non-hex characters.")
+
+        # 2. Проверка длины (пропускаем для shake_*, так как там длина любая)
+        if self.algorithm in expected_lengths:
+            expected = expected_lengths[self.algorithm]
+            if len(normalized) != expected:
+                raise ValueError(
+                    f"Invalid {self.algorithm} length: expected {expected}, "
+                    f"got {len(normalized)}"
+                )
 
 
 @value_object
@@ -214,26 +243,60 @@ class File:
     @classmethod
     def from_json(cls, content: bytes) -> Self:
         data = orjson.loads(content)
-        data["chunks"] = [Chunk(**c_data) for c_data in data.get("chunks", [])]
+        meta = FileMeta(**data.pop("meta"))
+        chunks_data = data.pop("chunks", [])
 
-        if "meta" in data and isinstance(data["meta"], dict):
-            data["meta"] = FileMeta(**data["meta"])
+        file_obj = cls(meta=meta, **data)
 
-        return cls(**data)
+        # Восстанавливаем weakref ПОСЛЕ создания File
+        file_obj.chunks = [
+            Chunk(**{**c, "_file_ref": weakref.ref(file_obj)}) for c in chunks_data
+        ]
+        return file_obj
 
 
 @entity
-class UIState:
-    log_file: Path
+class DisplayConfig:
+    """Настройки отображения, переданные юзером."""
+
     no_ui: bool = False
     quiet: bool = False
     dry_run: bool = False
     json_logs: bool = False
-    speed_limit: float | None = None
     verify: bool = True
 
-    is_running: bool = True
-    console: Console = Console(stderr=True)
+
+@entity
+class ProgressState:
+    """Чисто статистика и счетчики загрузки."""
+
+    has_hash: int = 0
+    ranges: int = 0
+    start_time: float = 0.0
+    total_bytes: int = 0
+    download_bytes: int = 0
+    total_files: int = 0
+    files_completed: int = 0
+
+
+@entity
+class LogState:
+    """Всё, что касается записи логов на жесткий диск."""
+
+    log_file: Path
+    log_throttle: dict[str, float] = field(default_factory=dict[str, float])
+    log_fd: typing.TextIO | None = field(default=None, init=False, repr=False)
+    log_queue: asyncio.Queue[str | None] = field(
+        default_factory=asyncio.Queue[str | None], init=False
+    )
+    log_task: asyncio.Task[None] | None = field(default=None, init=False)
+
+
+@entity
+class SpeedLimiterState:
+    """Логика глобального ограничения скорости."""
+
+    speed_limit: float | None = None
     frequency_speed_limit: int = 10
     time_speed_limit: float = field(init=False)
     bytes_to_check: int = field(init=False)
@@ -244,48 +307,47 @@ class UIState:
     limit_event: asyncio.Event = field(default_factory=asyncio.Event)
     checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
 
-    has_hash: int = 0
-    ranges: int = 0
-
-    start_time: float = 0.0
-    total_bytes: int = 0
-    download_bytes: int = 0
-    total_files: int = 0
-    files_completed: int = 0
-
-    refresh_per_second = 10
-    renewal_rate: float = field(init=False)
-    dynamic_title: str = ""
-    date_printed: bool = False
-
-    tasks: dict[str, TaskID] = field(default_factory=dict[str, TaskID])
-    log_throttle: dict[str, float] = field(default_factory=dict[str, float])
-    buffer: defaultdict[str, int] = field(default_factory=lambda: defaultdict(int))
-    active_files: set[str] = field(default_factory=set[str])
-
-    log_fd: typing.TextIO | None = field(default=None, init=False, repr=False)
-    log_queue: asyncio.Queue[str | None] = field(
-        default_factory=asyncio.Queue[str | None], init=False
-    )
-    log_task: asyncio.Task[None] | None = field(default=None, init=False)
-
-    refresh: asyncio.Task[None] | None = None
-    progress: Progress | None = None
-
-    live: Live | None = None
-
     def __post_init__(self) -> None:
-        self.renewal_rate = 1 / self.refresh_per_second
         self.time_speed_limit = 1 / self.frequency_speed_limit
-
         if self.speed_limit:
             self.speed_limit = self.speed_limit * 1024**2
             self.bytes_to_check = int(self.speed_limit / self.frequency_speed_limit)
             self.target_time = self.bytes_to_check / self.speed_limit
         else:
             self.bytes_to_check = 5 * 1024**2
-
         self.limit_event.set()
+
+
+@entity
+class RichUIState:
+    """Всё, что относится к библиотеке Rich (Прогресс-бары, консоль)."""
+
+    console: Console = field(default_factory=lambda: Console(stderr=True))
+    refresh_per_second: int = 10
+    renewal_rate: float = field(init=False)
+    dynamic_title: str = ""
+    date_printed: bool = False
+
+    tasks: dict[str, TaskID] = field(default_factory=dict[str, TaskID])
+    buffer: defaultdict[str, int] = field(default_factory=lambda: defaultdict(int))
+    active_files: set[str] = field(default_factory=set[str])
+
+    refresh: asyncio.Task[None] | None = None
+    progress: Progress | None = None
+    live: Live | None = None
+
+    def __post_init__(self) -> None:
+        self.renewal_rate = 1 / self.refresh_per_second
+
+
+@entity
+class UIState:
+    is_running: bool = True
+    display: DisplayConfig
+    progress: ProgressState = field(default_factory=ProgressState)
+    log: LogState
+    speed: SpeedLimiterState
+    rich: RichUIState = field(default_factory=RichUIState)
 
 
 @entity
@@ -335,10 +397,14 @@ class NetworkState:
             **options,
         )
 
+    async def close(self) -> None:
+        with contextlib.suppress(TypeError, AttributeError):
+            await self.client.close()
+
 
 @value_object
 class HydraConfig:
-    threads: int = 1
+    threads: int = 128
     no_ui: bool = False
     quiet: bool = False
     output_dir: str = "download"
@@ -348,7 +414,7 @@ class HydraConfig:
     verify: bool = True
 
     min_chunk_size_mb: InitVar[int] = 1
-    min_stream_chunk_size_mb: InitVar[int] = 5
+    max_stream_chunk_size_mb: InitVar[int] = 5
     stream_buffer_size_mb: InitVar[int | None] = None
     client_kwargs: dict[str, Any] | None = None
 
@@ -362,6 +428,7 @@ class HydraConfig:
         min_stream_chunk_size_mb: int,
         stream_buffer_size_mb: int | None,
     ) -> None:
+
         object.__setattr__(self, "MIN_CHUNK", min_chunk_size_mb * 1024**2)
         object.__setattr__(
             self, "STREAM_CHUNK_SIZE", min_stream_chunk_size_mb * 1024**2
@@ -384,62 +451,75 @@ def create_done_task() -> asyncio.Task[None]:
 
 
 @entity
+class QueueSet:
+    links: asyncio.PriorityQueue[tuple[int, str, Checksum | None]] = field(
+        default_factory=asyncio.PriorityQueue
+    )
+    dispatch_file: asyncio.PriorityQueue[tuple[int, File | None]] = field(
+        default_factory=asyncio.PriorityQueue
+    )
+    file_discovery: asyncio.Queue[int] = field(default_factory=asyncio.Queue)
+    chunk: asyncio.PriorityQueue[tuple[int, Chunk] | tuple[Chunk, int]] = field(
+        default_factory=asyncio.PriorityQueue
+    )
+    stream: asyncio.Queue[tuple[int, bytearray]] = field(default_factory=asyncio.Queue)
+
+
+@entity
+class TaskSet:
+    creators: list[asyncio.Task[None]] = field(default_factory=list)
+    workers: list[asyncio.Task[None]] = field(default_factory=list)
+    dispatcher: asyncio.Task[None] = field(default_factory=create_done_task)
+    autosave: asyncio.Task[None] = field(default_factory=create_done_task)
+    telemetry: asyncio.Task[None] = field(default_factory=create_done_task)
+
+
+@entity
+class SyncSet:
+    current_files: asyncio.Condition = field(default_factory=asyncio.Condition)
+    chunk_from_future: asyncio.Condition = field(default_factory=asyncio.Condition)
+    dynamic_limit: asyncio.Condition = field(default_factory=asyncio.Condition)
+    all_complete: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@entity
 class HydraContext:
     config: HydraConfig
+    fs: StorageBackend
 
-    is_stoping: bool = False
+    is_stopping: bool = False
     stream: bool = False
-    current_files_id: set[int] = field(default_factory=set[int])
-    active_stream: set[Response] = field(default_factory=set[Response])
     next_offset: int = 0
     dynamic_limit: int = 1
 
-    net: NetworkState = field(init=False)
-    ui: UIState = field(init=False)
-    fs: StorageBackend
-
+    current_files_id: set[int] = field(default_factory=set[int])
+    active_stream: set[Response] = field(default_factory=set[Response])
     files: dict[int, File] = field(default_factory=dict[int, File])
     heap: list[tuple[int, bytearray]] = field(
         default_factory=list[tuple[int, bytearray]]
     )
-    links_queue: asyncio.PriorityQueue[tuple[int, str, Checksum | None]] = field(
-        init=False
-    )
-    dispatch_file_queue: asyncio.PriorityQueue[tuple[int, File]] = field(init=False)
-    file_discovery_queue: asyncio.Queue[int] = field(init=False)
-    chunk_queue: asyncio.PriorityQueue[tuple[int, Chunk] | tuple[int, Chunk]] = field(
-        init=False
-    )
-    stream_queue: asyncio.Queue[tuple[int, bytearray]] = field(init=False)
 
-    current_files_cond: asyncio.Condition = field(default_factory=asyncio.Condition)
-    chunk_from_future_cond: asyncio.Condition = field(default_factory=asyncio.Condition)
-    dynamic_limit_cond: asyncio.Condition = field(default_factory=asyncio.Condition)
-    all_complete_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Вложенные домены
+    queues: QueueSet = field(default_factory=QueueSet)
+    tasks: TaskSet = field(default_factory=TaskSet)
+    sync: SyncSet = field(default_factory=SyncSet)
 
-    task_creators: list[asyncio.Task[None]] = field(default_factory=list)
-    workers: list[asyncio.Task[None]] = field(default_factory=list)
-
-    dispatcher: asyncio.Task[None] = field(default_factory=create_done_task)
-    autosave_task: asyncio.Task[None] = field(default_factory=create_done_task)
-    telemetry_task: asyncio.Task[None] = field(default_factory=create_done_task)
+    net: NetworkState = field(init=False)
+    ui: UIState = field(init=False)
 
     def __post_init__(self) -> None:
-        self.links_queue = asyncio.PriorityQueue()
-        self.dispatch_file_queue = asyncio.PriorityQueue()
-        self.chunk_queue = asyncio.PriorityQueue()
-        self.file_discovery_queue = asyncio.Queue()
-        self.stream_queue = asyncio.Queue()
-
+        # Инициализируем UI, собирая его из настроек конфига
         self.ui = UIState(
-            is_running=not self.is_stoping,
-            no_ui=self.config.no_ui,
-            quiet=self.config.quiet,
-            dry_run=self.config.dry_run,
-            json_logs=self.config.json_logs,
-            speed_limit=self.config.speed_limit,
-            log_file=Path(self.config.output_dir) / "download.log",
-            verify=self.config.verify,
+            is_running=not self.is_stopping,
+            display=DisplayConfig(
+                no_ui=self.config.no_ui,
+                quiet=self.config.quiet,
+                dry_run=self.config.dry_run,
+                json_logs=self.config.json_logs,
+                verify=self.config.verify,
+            ),
+            log=LogState(log_file=Path(self.config.output_dir) / "download.log"),
+            speed=SpeedLimiterState(speed_limit=self.config.speed_limit),
         )
 
         self.net = NetworkState(

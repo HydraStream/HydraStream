@@ -14,14 +14,14 @@ from curl_cffi import CurlOpt, Response
 from curl_cffi.requests import RequestsError
 
 from .models import Chunk, HydraContext
-from .monitor import done, log, update
+from .monitor import done, format_size, log, update
 from .network import stream_chunk, try_scale_up
 
 
 async def telemetry_worker(ctx: HydraContext) -> None:
     """Фоновый инспектор. Управляет скоростью и Авто-тюнингом воркеров."""
 
-    ctx.ui.last_checkpoint_time = time.monotonic()
+    ctx.ui.speed.last_checkpoint_time = time.monotonic()
     smoothed_speed = 0.0
     prev_speed = 0.0
     current_limit = 2
@@ -32,11 +32,11 @@ async def telemetry_worker(ctx: HydraContext) -> None:
 
     while True:  # Проверяем глобальный флаг
         # 1. Ждем пульса от Монитора
-        await ctx.ui.checkpoint_event.wait()
-        ctx.ui.checkpoint_event.clear()
+        await ctx.ui.speed.checkpoint_event.wait()
+        ctx.ui.speed.checkpoint_event.clear()
 
         now = time.monotonic()
-        elapsed = min(1, now - ctx.ui.last_checkpoint_time)
+        elapsed = min(1, now - ctx.ui.speed.last_checkpoint_time)
 
         if elapsed <= 0:
             continue  # Защита от деления на ноль при сверхбыстрых всплесках
@@ -44,8 +44,8 @@ async def telemetry_worker(ctx: HydraContext) -> None:
         # =========================================================
         # ФАЗА 1: ЛОГИКА ОГРАНИЧИТЕЛЯ СКОРОСТИ (Global Valve)
         # =========================================================
-        if ctx.ui.speed_limit:
-            target_time = ctx.ui.bytes_to_check / ctx.ui.speed_limit
+        if ctx.ui.speed.speed_limit:
+            target_time = ctx.ui.speed.bytes_to_check / ctx.ui.speed.speed_limit
 
             if elapsed < target_time:
                 sleep_duration = target_time - elapsed
@@ -62,14 +62,14 @@ async def telemetry_worker(ctx: HydraContext) -> None:
                 # Важно: мы спали! Нужно пересчитать 'now' и 'elapsed'
                 # для Авто-тюнера, чтобы он считал РЕАЛЬНУЮ скорость с учетом паузы.
                 now = time.monotonic()
-                elapsed = now - ctx.ui.last_checkpoint_time
+                elapsed = now - ctx.ui.speed.last_checkpoint_time
 
                 continue
 
         # =========================================================
         # ФАЗА 2: АВТО-ТЮНЕР (AIMD Hill Climbing)
         # =========================================================
-        speed_now = ctx.ui.bytes_to_check / elapsed
+        speed_now = ctx.ui.speed.bytes_to_check / elapsed
 
         if smoothed_speed == 0.0:
             smoothed_speed = speed_now
@@ -80,9 +80,9 @@ async def telemetry_worker(ctx: HydraContext) -> None:
 
         coef = 1 / speed_now**0.2
         # Пересчитываем, когда мы хотим проснуться в следующий раз
-        new_bytes_to_check = int(ctx.ui.bytes_to_check * (1 - coef + elapsed))
+        new_bytes_to_check = int(ctx.ui.speed.bytes_to_check * (1 - coef + elapsed))
 
-        ctx.ui.bytes_to_check = max(MIN_WINDOW, new_bytes_to_check)
+        ctx.ui.speed.bytes_to_check = max(MIN_WINDOW, new_bytes_to_check)
         # Анализируем результат нашего предыдущего шага
         if smoothed_speed > prev_speed * 1.05:
             prev_speed = smoothed_speed
@@ -91,7 +91,8 @@ async def telemetry_worker(ctx: HydraContext) -> None:
                 current_limit += 1
                 await log(
                     ctx.ui,
-                    f"Speed increased to {speed_now / 1024**2:.1f} MB/s. Scaling up to {current_limit} workers.",
+                    f"Speed increased to {format_size(speed_now)}/s. "
+                    f"Scaling up to {current_limit} workers.",
                     status="INFO",
                     throttle_key="scale_up",
                     throttle_sec=5.0,
@@ -114,11 +115,11 @@ async def telemetry_worker(ctx: HydraContext) -> None:
         if ctx.dynamic_limit != current_limit:
             ctx.dynamic_limit = current_limit
             # Будим диспетчера только если лимит изменился
-            async with ctx.dynamic_limit_cond:
-                ctx.dynamic_limit_cond.notify_all()
+            async with ctx.sync.dynamic_limit:
+                ctx.sync.dynamic_limit.notify_all()
 
         # Фиксируем время для следующего круга
-        ctx.ui.last_checkpoint_time = time.monotonic()
+        ctx.ui.speed.last_checkpoint_time = time.monotonic()
 
 
 async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
@@ -161,18 +162,18 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
     await done(ctx.ui, filename)
     del ctx.files[chunk.file.meta.id]
     ctx.current_files_id.remove(chunk.file.meta.id)
-    async with ctx.current_files_cond:
-        ctx.current_files_cond.notify()
+    async with ctx.sync.current_files:
+        ctx.sync.current_files.notify()
     if not ctx.files:
-        ctx.all_complete_event.set()
+        ctx.sync.all_complete.set()
 
 
 async def get_chunk(ctx: HydraContext) -> Chunk | None:
     if ctx.stream:
-        _, chunk = await ctx.chunk_queue.get()
+        _, chunk = await ctx.queues.chunk.get()
     else:
-        chunk, _ = await ctx.chunk_queue.get()
-        chunk = cast(Chunk, chunk)
+        chunk, _ = await ctx.queues.chunk.get()
+    chunk = cast(Chunk, chunk)
     if _ == sys.maxsize:
         raise asyncio.CancelledError
     file_obj = chunk.file
@@ -180,8 +181,8 @@ async def get_chunk(ctx: HydraContext) -> Chunk | None:
         return None
 
     if ctx.stream:
-        async with ctx.chunk_from_future_cond:
-            await ctx.chunk_from_future_cond.wait_for(
+        async with ctx.sync.chunk_from_future:
+            await ctx.sync.chunk_from_future.wait_for(
                 lambda: (
                     ctx.next_offset + ctx.config.STREAM_BUFFER_SIZE >= chunk.current_pos
                 )
@@ -193,8 +194,8 @@ async def download_worker(ctx: HydraContext, worker_id: int) -> None:
     while True:
         try:
             if worker_id >= ctx.dynamic_limit:
-                async with ctx.dynamic_limit_cond:
-                    await ctx.dynamic_limit_cond.wait_for(
+                async with ctx.sync.dynamic_limit:
+                    await ctx.sync.dynamic_limit.wait_for(
                         lambda: worker_id < ctx.dynamic_limit
                     )
             chunk = None
@@ -207,7 +208,7 @@ async def download_worker(ctx: HydraContext, worker_id: int) -> None:
 
         except ValueError:
             if chunk:
-                await ctx.chunk_queue.put((-1, chunk))
+                await ctx.queues.chunk.put((-1, chunk))
 
         except asyncio.CancelledError:
             break
@@ -239,8 +240,8 @@ async def download_worker(ctx: HydraContext, worker_id: int) -> None:
                     await requeue_chunk(ctx, chunk)
 
             ctx.dynamic_limit = max(ctx.dynamic_limit - 1, 1)
-            async with ctx.dynamic_limit_cond:
-                ctx.dynamic_limit_cond.notify_all()
+            async with ctx.sync.dynamic_limit:
+                ctx.sync.dynamic_limit.notify_all()
 
         except TimeoutError:
             if chunk:
@@ -298,7 +299,7 @@ async def requeue_chunk(
                 await loop.run_in_executor(
                     None, os.ftruncate, fd, file_obj.meta.content_length
                 )
-    await ctx.chunk_queue.put((-1, chunk))
+    await ctx.queues.chunk.put((-1, chunk))
     delay = random.uniform(*delay_range)
     await asyncio.sleep(delay)
 
@@ -354,12 +355,12 @@ async def stream_process_chunk(
                 buffer.extend(data)
                 update(ctx.ui, chunk.file.meta.filename, len(data))
                 if len(buffer) > ctx.config.STREAM_CHUNK_SIZE:
-                    await ctx.stream_queue.put((chunk.current_pos, buffer))
+                    await ctx.queues.stream.put((chunk.current_pos, buffer))
                     chunk.current_pos = chunk.current_pos + len(buffer)
                     buffer = bytearray()
                 if ctx.dynamic_limit <= worker_id:
                     raise ValueError
-            await ctx.stream_queue.put((chunk.current_pos, buffer))
+            await ctx.queues.stream.put((chunk.current_pos, buffer))
             chunk.current_pos = chunk.current_pos + len(buffer)
             buffer = bytearray()
         except asyncio.CancelledError:
@@ -367,7 +368,7 @@ async def stream_process_chunk(
         except Exception:
             if ctx.stream and buffer:
                 with contextlib.suppress(asyncio.QueueFull):
-                    ctx.stream_queue.put_nowait((chunk.current_pos, buffer))
+                    ctx.queues.stream.put_nowait((chunk.current_pos, buffer))
                     chunk.current_pos = chunk.current_pos + len(buffer)
             raise
         finally:

@@ -2,21 +2,46 @@
 # Licensed under the MIT License.
 
 import asyncio
+import re
 import sys
 from collections.abc import Generator
 from contextlib import contextmanager
+from functools import partial
 from io import TextIOWrapper
 from pathlib import Path
-from typing import Annotated, Any, TextIO
+from typing import Annotated, Any, TextIO, get_args
 from urllib.parse import urlparse
 
+import tomllib
 import typer
 
 from hydrastream import __version__
 from hydrastream.facade import HydraClient
-from hydrastream.models import HydraConfig, TypeHash
+from hydrastream.models import Checksum, HydraConfig, TypeHash
 
-app = typer.Typer(add_completion=False, no_args_is_help=True)
+
+def load_user_config() -> dict:
+
+    config_path = Path.home() / ".config" / "hydrastream" / "config.toml"
+
+    if not config_path.is_file():
+        return {}
+
+    try:
+        with config_path.open("rb") as f:
+            return tomllib.load(f)
+    except Exception:
+        return {}
+
+
+USER_CONFIG: dict[str, Any] = load_user_config()
+
+app = typer.Typer(
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+    epilog="[bold]Examples:[/]\n  hs https://example.com/file.gz\n  hs -i urls.txt "
+    "-t 10 -o ./data\n  hs --stream https://example.com/file.gz | zcat | grep pattern",
+)
 
 
 def version_callback(value: bool) -> None:
@@ -73,7 +98,13 @@ def parse_urls(links_from_args: list[str] | None, filepath: str | None) -> list[
 
     # 1. Ссылки из прямых аргументов (hs url1 url2)
     if links_from_args:
-        all_links.extend(url for url in links_from_args if is_valid_url(url))
+        for url in links_from_args:
+            if is_valid_url(url):
+                all_links.append(url)
+            else:
+                typer.secho(
+                    f"Warning: Skipping invalid URL: '{url}'", fg="yellow", err=True
+                )
 
     # 2. Обработка файла или пайпа (hs -i urls.txt или hs -i -)
     if filepath:
@@ -98,7 +129,7 @@ async def async_main(
     config: HydraConfig,
     stream: bool,
     valid_links: list[str],
-    expected_checksums: dict[str, tuple[TypeHash, str]],
+    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum],
 ) -> None:
     """
     Core asynchronous orchestrator for downloading or streaming files.
@@ -165,105 +196,260 @@ async def async_main(
             await loader.run(valid_links, expected_checksums)
 
 
+def validate_threads(value: int | None) -> int | None:
+    if value is not None:
+        if value < 1:
+            raise typer.BadParameter("Number of threads must be at least 1.")
+        if value > 128:
+            raise typer.BadParameter(
+                "Maximum allowed threads is 128 to prevent system overload."
+            )
+    return value
+
+
+def validate_positive_int(value: int | None) -> int | None:
+    if value is not None and value < 1:
+        raise typer.BadParameter("Value must be a positive integer (>= 1).")
+    return value
+
+
+def validate_speed_limit(value: float | None) -> float | None:
+    if value is not None and value <= 0.0:
+        raise typer.BadParameter("Speed limit must be greater than 0.0 MB/s.")
+    return value
+
+
+def validate_typehash(value: str) -> str:
+    allowed_hashes = get_args(TypeHash)
+    if value not in allowed_hashes:
+        raise typer.BadParameter(
+            f"Invalid hash algorithm '{value}'. Supported: {', '.join(allowed_hashes)}"
+        )
+    return value
+
+
+def validate_links(links: list[str] | None) -> list[str] | None:
+    if not links:
+        return links
+
+    for url in links:
+        try:
+            result = urlparse(url)
+            is_valid = result.scheme in ("http", "https") and bool(result.netloc)
+        except ValueError:
+            is_valid = False
+
+        if not is_valid:
+            raise typer.BadParameter(
+                f"Invalid URL: '{url}'. Only HTTP/HTTPS are supported."
+            )
+
+    return links
+
+
+def validate_input_file(value: str | None) -> str | None:
+    if value is None or value == "-":
+        return value
+
+    path = Path(value)
+    if not path.exists():
+        raise typer.BadParameter(f"Input file '{value}' does not exist.")
+    if not path.is_file():
+        raise typer.BadParameter(f"'{value}' is not a file.")
+    return str(path)
+
+
+def validate_output_dir(value: str) -> str:
+    path = Path(value)
+
+    if path.exists() and not path.is_dir():
+        raise typer.BadParameter(
+            f"Output path '{value}' exists but is not a directory."
+        )
+
+    try:
+        path.resolve()
+    except Exception:
+        raise typer.BadParameter(
+            f"Invalid path format for directory: '{value}'"
+        ) from None
+
+    return str(path)
+
+
+def validate_hash_format(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    clean_hash = value.strip().lower()
+
+    if not clean_hash:
+        raise typer.BadParameter("Hash checksum cannot be an empty string.")
+
+    if not re.fullmatch(r"[0-9a-f]+", clean_hash):
+        raise typer.BadParameter(
+            f"Invalid hash format: '{value}'. "
+            "A checksum should only contain hexadecimal characters (0-9, a-f)."
+        )
+
+    return clean_hash
+
+
+def get_cfg(key: str, default: Any = None) -> Any:  # noqa: ANN401
+    return USER_CONFIG.get(key, default)
+
+
 @app.command()
 def cli(
     links: Annotated[
-        list[str] | None, typer.Argument(help="List of target URLs to download.")
-    ] = None,
+        list[str] | None,
+        typer.Argument(
+            help="List of target URLs to download.",
+            default_factory=partial(get_cfg, "links"),
+            callback=validate_links,
+        ),
+    ],
     input_file: Annotated[
         str | None,
-        typer.Option("-i", "--input", help="Read URLs from file or '-' for stdin"),
-    ] = None,
+        typer.Option(
+            "-i",
+            "--input",
+            help="Read URLs from file or '-' for stdin",
+            default_factory=partial(get_cfg, "input"),
+            callback=validate_input_file,
+        ),
+    ],
     typehash: Annotated[
         TypeHash,
         typer.Option(
-            "--typehash", "-th", help="Hash algorithm type (e.g., md5, sha256)."
+            "--typehash",
+            "-th",
+            help="Hash algorithm type (e.g., md5, sha256).",
+            default_factory=partial(get_cfg, "typehash", "md5"),
+            callback=validate_typehash,
         ),
-    ] = "md5",
+    ],
     hash: Annotated[
         str | None,
         typer.Option(
-            "--hash", help="Expected hash checksum (applicable only for a single URL)."
+            "--hash",
+            help="Expected hash checksum (applicable only for a single URL).",
+            default_factory=partial(get_cfg, "hash"),
+            callback=validate_hash_format,
         ),
-    ] = None,
+    ],
     output_dir: Annotated[
         str,
         typer.Option(
-            "-o", "--output", help="Destination directory for downloaded files."
+            "-o",
+            "--output",
+            help="Destination directory for downloaded files.",
+            default_factory=partial(get_cfg, "output", "download"),
+            callback=validate_output_dir,
         ),
-    ] = "download",
+    ],
     threads: Annotated[
-        int,
+        int | None,
         typer.Option(
-            "-t", "--threads", help="Number of concurrent download connections."
+            "-t",
+            "--threads",
+            help="Number of concurrent download connections.",
+            default_factory=partial(get_cfg, "threads"),
+            callback=validate_threads,
         ),
-    ] = 1,
+    ],
     stream: Annotated[
         bool,
         typer.Option(
             "-s",
             "--stream",
             help="Enable streaming mode (outputs to stdout without saving to disk).",
+            default_factory=partial(get_cfg, "stream", False),
         ),
-    ] = False,
+    ],
     dry_run: Annotated[
         bool,
         typer.Option(
             "--dry-run",
             help="""Simulate the process: fetch metadata, check disk space, and print a
              report without downloading data.""",
+            default_factory=partial(get_cfg, "dry-run", False),
         ),
-    ] = False,
+    ],
     min_chunk_size_mb: Annotated[
-        int,
+        int | None,
         typer.Option(
             "--min-chunk-mb",
             help="Minimum chunk size in Megabytes for standard disk downloads.",
+            default_factory=partial(get_cfg, "min-chunk-mb", 1),
+            callback=validate_positive_int,
         ),
-    ] = 1,
-    min_stream_chunk_size_mb: Annotated[
-        int,
+    ],
+    max_stream_chunk_size_mb: Annotated[
+        int | None,
         typer.Option(
             "--stream-chunk-mb",
             help="Target chunk size in Megabytes for streaming mode.",
+            default_factory=partial(get_cfg, "stream-chunk-mb", 5),
+            callback=validate_positive_int,
         ),
-    ] = 5,
+    ],
     stream_buffer_size_mb: Annotated[
         int | None,
         typer.Option(
             "--buffer",
             "-b",
             help="Maximum stream buffer size in Megabytes to prevent OOM.",
+            default_factory=partial(get_cfg, "buffer"),
+            callback=validate_positive_int,
         ),
-    ] = None,
+    ],
     speed_limit: Annotated[
         float | None,
-        typer.Option("--limit", "-l", help="Global download speed limit in MB/s."),
-    ] = None,
+        typer.Option(
+            "--limit",
+            "-l",
+            help="Global download speed limit in MB/s.",
+            default_factory=partial(get_cfg, "limit"),
+            callback=validate_speed_limit,
+        ),
+    ],
     no_ui: Annotated[
         bool,
         typer.Option(
-            "--no-ui", "-nu", help="Disable GUI (plain text logs only) if set to True."
+            "--no-ui",
+            "-nu",
+            help="Disable GUI (plain text logs only) if set to True.",
+            default_factory=partial(get_cfg, "no-ui", False),
         ),
-    ] = False,
+    ],
     quiet: Annotated[
         bool,
-        typer.Option("--quiet", "-q", help="Dead silence. No console output at all."),
-    ] = False,
+        typer.Option(
+            "--quiet",
+            "-q",
+            help="Dead silence. No console output at all.",
+            default_factory=partial(get_cfg, "quiet", False),
+        ),
+    ],
     json_logs: Annotated[
         bool,
         typer.Option(
-            "--json", "-j", help="Output logs in JSON Lines format (for machines)."
+            "--json",
+            "-j",
+            help="Output logs in JSON Lines format (for machines).",
+            default_factory=partial(get_cfg, "json", False),
         ),
-    ] = False,
+    ],
     verify: Annotated[
         bool,
         typer.Option(
             "--verify/--no-verify",
             "-V/-N",
             help="Verify the downloaded file hash. Use --no-verify to skip check.",
+            default_factory=partial(get_cfg, "verify", True),
         ),
-    ] = True,
+    ],
     version: Annotated[
         bool | None,
         typer.Option("--version", "-v", callback=version_callback, is_eager=True),
@@ -273,6 +459,7 @@ def cli(
     HydraStream: Concurrent HTTP downloader with in-memory stream reordering
     (curl_cffi + uvloop).
     """
+
     if not links and not input_file:
         typer.secho(
             "You must provide either[LINKS] or an --input file.",
@@ -301,11 +488,13 @@ def cli(
             )
             raise typer.Exit(code=1)
 
-        expected_checksums: dict[str, tuple[TypeHash, str]] = {}
+        expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] = {}
 
         # Hash logic: only map the hash if a single URL is provided
         if hash and len(valid_links) == 1:
-            expected_checksums[valid_links[0]] = (typehash, hash)
+            expected_checksums[valid_links[0]] = Checksum(
+                algorithm=typehash, value=hash
+            )
         elif hash and len(valid_links) > 1:
             typer.secho(
                 "Warning: The --hash flag is ignored when multiple URLs are provided.",
@@ -313,11 +502,19 @@ def cli(
                 err=True,
             )
             raise typer.Exit(code=1)
+
+        if threads is None:
+            threads = 128
+        if min_chunk_size_mb is None:
+            min_chunk_size_mb = 5
+        if max_stream_chunk_size_mb is None:
+            max_stream_chunk_size_mb = 5
+
         config = HydraConfig(
             threads=threads,
             dry_run=dry_run,
             min_chunk_size_mb=min_chunk_size_mb,
-            min_stream_chunk_size_mb=min_stream_chunk_size_mb,
+            max_stream_chunk_size_mb=max_stream_chunk_size_mb,
             speed_limit=speed_limit,
             no_ui=no_ui,
             quiet=quiet,

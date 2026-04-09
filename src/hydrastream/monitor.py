@@ -69,11 +69,11 @@ class GradientPercent(ProgressColumn):
 
 
 def write_log(ctx: UIState, msg: str) -> None:
-    if not ctx.log_file:
+    if not ctx.log.log_file:
         return
 
     try:
-        with Path(ctx.log_file).open("a", encoding="utf-8") as f:
+        with Path(ctx.log.log_file).open("a", encoding="utf-8") as f:
             clean_msg = Text.from_markup(str(msg)).plain
             f.write(f"{clean_msg}\n")
     except OSError:
@@ -84,8 +84,8 @@ async def date_print(ctx: UIState) -> None:
     current_date = datetime.now().strftime("%Y-%m-%d")
     date_header = f"[bold cyan] Date: {current_date}[/]"
 
-    if not (ctx.no_ui or ctx.quiet):
-        ctx.console.print(Rule(date_header))
+    if not (ctx.display.no_ui or ctx.display.quiet):
+        ctx.rich.console.print(Rule(date_header))
     await log(ctx, f"--- {current_date} ---")
 
 
@@ -130,11 +130,11 @@ async def log(
 ) -> None:
     if throttle_key:
         now = time.monotonic()
-        last_time = ctx.log_throttle.get(throttle_key, 0.0)
+        last_time = ctx.log.log_throttle.get(throttle_key, 0.0)
         if now - last_time < throttle_sec:
             return
-        ctx.log_throttle[throttle_key] = now
-    if ctx.json_logs:
+        ctx.log.log_throttle[throttle_key] = now
+    if ctx.display.json_logs:
         # Собираем словарь для JSON
         log_record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -148,24 +148,24 @@ async def log(
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         final_msg = f"{timestamp} {message}"
 
-    if ctx.log_file:
+    if ctx.log.log_file:
         clean_msg = Text.from_markup(str(final_msg)).plain
-        ctx.log_queue.put_nowait(clean_msg)
+        ctx.log.log_queue.put_nowait(clean_msg)
 
-    if ctx.quiet:
+    if ctx.display.quiet:
         return
 
-    if ctx.json_logs:
+    if ctx.display.json_logs:
         sys.stdout.write(final_msg + "\n")
         return
 
     renderable = final_msg
-    if ctx.progress:
+    if ctx.rich.progress:
         renderable = formatting_log(message, renderable, status)
         if progress or status in ["WARNING", "ERROR", "CRITICAL", "INTERRUPT"]:
-            ctx.progress.console.print(renderable)
+            ctx.rich.progress.console.print(renderable)
     else:
-        ctx.console.print(Text.from_markup(str(renderable)).plain)
+        ctx.rich.console.print(Text.from_markup(str(renderable)).plain)
 
 
 async def log_worker(ctx: UIState) -> None:
@@ -173,129 +173,131 @@ async def log_worker(ctx: UIState) -> None:
     Фоновый воркер. Живет всё время работы программы.
     Берет строки из очереди и пишет в ОТКРЫТЫЙ файл.
     """
-    if not ctx.log_fd:
+    if not ctx.log.log_fd:
         return
 
     while True:
-        msg = await ctx.log_queue.get()
+        msg = await ctx.log.log_queue.get()
 
         # Ядовитая пилюля для остановки логгера
         if msg is None:
             break
 
         try:
-            ctx.log_fd.write(f"{msg}\n")
-            ctx.log_fd.flush()  # Гарантируем, что строка сразу упала на диск
+            ctx.log.log_fd.write(f"{msg}\n")
+            ctx.log.log_fd.flush()  # Гарантируем, что строка сразу упала на диск
         except OSError:
             pass  # Если диск отвалился, просто глотаем ошибку
 
 
 async def speed_limiter(ctx: UIState) -> None:
     prev = 0
-    time = ctx.time_speed_limit
-    if ctx.speed_limit is None:
+    time = ctx.speed.time_speed_limit
+    if ctx.speed.speed_limit is None:
         return
     while ctx.is_running:
-        d_time = (ctx.download_bytes - prev) / (ctx.speed_limit)
+        d_time = (ctx.progress.download_bytes - prev) / (ctx.speed.speed_limit)
         if d_time > 1:
-            ctx.limit_event.clear()
-            await asyncio.sleep(ctx.time_speed_limit * d_time)
-            ctx.limit_event.set()
-        prev = ctx.download_bytes
+            ctx.speed.limit_event.clear()
+            await asyncio.sleep(ctx.speed.time_speed_limit * d_time)
+            ctx.speed.limit_event.set()
+        prev = ctx.progress.download_bytes
         await asyncio.sleep(time)
 
 
 def add_file(ctx: UIState, filename: str, total_size: int | None = None) -> None:
     if total_size is not None:
-        ctx.total_bytes += total_size
-        ctx.total_files += 1
+        ctx.progress.total_bytes += total_size
+        ctx.progress.total_files += 1
 
-    if ctx.progress:
+    if ctx.rich.progress:
         t_filename = truncate_filename(filename)
         if total_size is None:
-            task_id = ctx.progress.add_task(
+            task_id = ctx.rich.progress.add_task(
                 "Download Hash for", filename=t_filename, total=total_size
             )
         else:
-            task_id = ctx.progress.add_task(
+            task_id = ctx.rich.progress.add_task(
                 "Download file", filename=t_filename, total=total_size, visible=False
             )
-        ctx.tasks[filename] = task_id
+        ctx.rich.tasks[filename] = task_id
         update_panel_title(ctx)
 
 
 def update(ctx: UIState, filename: str, advance_bytes: int) -> None:
 
-    ctx.buffer[filename] += advance_bytes
-    ctx.download_bytes += advance_bytes
+    ctx.rich.buffer[filename] += advance_bytes
+    ctx.progress.download_bytes += advance_bytes
 
-    if ctx.download_bytes - ctx.prev_bytes >= ctx.bytes_to_check:
-        ctx.prev_bytes += ctx.bytes_to_check
+    if ctx.progress.download_bytes - ctx.speed.prev_bytes >= ctx.speed.bytes_to_check:
+        ctx.speed.prev_bytes += ctx.speed.bytes_to_check
 
-        ctx.checkpoint_event.set()
+        ctx.speed.checkpoint_event.set()
 
 
 async def refresh_loop(ctx: UIState) -> None:
-    if ctx.progress:
+    if ctx.rich.progress:
         while ctx.is_running:
             try:
-                current_batch = ctx.buffer.copy()
-                ctx.buffer.clear()
+                current_batch = ctx.rich.buffer.copy()
+                ctx.rich.buffer.clear()
 
                 for filename, bytes_to_advance in current_batch.items():
-                    if bytes_to_advance > 0 and filename in ctx.tasks:
-                        ctx.progress.update(
-                            ctx.tasks[filename], advance=bytes_to_advance, visible=True
+                    if bytes_to_advance > 0 and filename in ctx.rich.tasks:
+                        ctx.rich.progress.update(
+                            ctx.rich.tasks[filename],
+                            advance=bytes_to_advance,
+                            visible=True,
                         )
-                        if filename not in ctx.active_files:
-                            ctx.active_files.add(filename)
+                        if filename not in ctx.rich.active_files:
+                            ctx.rich.active_files.add(filename)
                             update_panel_title(ctx)
 
-                await asyncio.sleep(ctx.renewal_rate)
+                await asyncio.sleep(ctx.rich.renewal_rate)
             except Exception as e:
                 await log(ctx, f"UI Refresh Error: {e!r}", status="ERROR")
 
 
 def update_panel_title(ctx: UIState) -> None:
-    if not ctx.live:
-        ctx.dynamic_title = ""
+    if not ctx.rich.live:
+        ctx.rich.dynamic_title = ""
 
-    active = len(ctx.active_files)
-    ctx.dynamic_title = (
-        f"[bold white][green]{ctx.files_completed}[/]/"
-        + f"[blue]{ctx.total_files}[/] Files | [yellow]{active} Active[/]"
+    active = len(ctx.rich.active_files)
+    ctx.rich.dynamic_title = (
+        f"[bold white][green]{ctx.progress.files_completed}[/]/"
+        + f"[blue]{ctx.progress.total_files}[/] Files | [yellow]{active} Active[/]"
     )
 
 
 async def done(ctx: UIState, filename: str) -> None:
-    if ctx.progress and filename in ctx.tasks:
-        task_id = ctx.tasks[filename]
-        ctx.progress.update(
-            task_id, completed=ctx.progress.tasks[task_id].total, visible=False
+    if ctx.rich.progress and filename in ctx.rich.tasks:
+        task_id = ctx.rich.tasks[filename]
+        ctx.rich.progress.update(
+            task_id, completed=ctx.rich.progress.tasks[task_id].total, visible=False
         )
-        del ctx.tasks[filename]
-        ctx.active_files.discard(filename)
+        del ctx.rich.tasks[filename]
+        ctx.rich.active_files.discard(filename)
 
-        if ctx.progress.tasks[task_id].total is not None:
-            ctx.files_completed += 1
+        if ctx.rich.progress.tasks[task_id].total is not None:
+            ctx.progress.files_completed += 1
             update_panel_title(ctx)
             await log(ctx, f"Done: {filename}", status="SUCCESS", progress=True)
 
-    elif ctx.buffer.get(filename, 0):
-        ctx.files_completed += 1
+    elif ctx.rich.buffer.get(filename, 0):
+        ctx.progress.files_completed += 1
         await log(ctx, f"Done: {filename}", status="SUCCESS", progress=True)
 
 
 def make_panel(ctx: UIState) -> Panel | str:
-    if not ctx.progress:
+    if not ctx.rich.progress:
         return ""
 
-    if not ctx.tasks and len(ctx.progress.tasks) == 0:
+    if not ctx.rich.tasks and len(ctx.rich.tasks) == 0:
         return ""
 
-    elapsed = time.monotonic() - ctx.start_time
-    avg_speed = ctx.download_bytes / elapsed if elapsed > 0 else 0
-    speed_str = f"{avg_speed / 1024 / 1024:.2f} MB/s"
+    elapsed = time.monotonic() - ctx.progress.start_time
+    avg_speed = ctx.progress.download_bytes / elapsed if elapsed > 0 else 0
+    speed_str = f"{format_size(avg_speed)}/s"
 
     mins, secs = divmod(int(elapsed), 60)
     hours = 0
@@ -304,8 +306,8 @@ def make_panel(ctx: UIState) -> Panel | str:
     time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
 
     remain_time = (
-        (ctx.total_bytes - ctx.download_bytes) / avg_speed
-        if ctx.total_bytes and avg_speed
+        (ctx.progress.total_bytes - ctx.progress.download_bytes) / avg_speed
+        if ctx.progress.total_bytes and avg_speed
         else 0
     )
 
@@ -315,23 +317,24 @@ def make_panel(ctx: UIState) -> Panel | str:
         r_hours, r_mins = divmod(r_mins, 60)
     remain_time_str = f"{r_hours:02d}:{r_mins:02d}:{r_secs:02d}"
 
-    if ctx.total_bytes < 1_073_741_824:
-        size_str = (
-            f"{ctx.download_bytes / (1024**2):.2f}/{ctx.total_bytes / (1024**2):.2f} MB"
-        )
-    else:
-        size_str = (
-            f"{ctx.download_bytes / (1024**3):.2f}/{ctx.total_bytes / (1024**3):.2f} GB"
-        )
+    size_str = (
+        f"{format_size(ctx.progress.download_bytes)}"
+        + f"/{format_size(ctx.progress.total_bytes)}"
+    )
 
-    if not ctx.tasks and ctx.total_files > 0 and ctx.total_files == ctx.files_completed:
+    if (
+        not ctx.rich.tasks
+        and ctx.progress.total_files > 0
+        and ctx.progress.total_files == ctx.progress.files_completed
+    ):
         grid = Table.grid(expand=True)
         grid.add_column()
         grid.add_column(justify="center")
 
         content = Group("[green]All downloads completed successfully!\n", grid)
         grid.add_row(
-            "[white]Total files:", f"[green3]{ctx.files_completed}/{ctx.total_files}[/]"
+            "[white]Total files:",
+            f"[green3]{ctx.progress.files_completed}/{ctx.progress.total_files}[/]",
         )
         grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
         grid.add_row("[white]Average Speed:", f"[bold yellow]{speed_str}[/]")
@@ -343,24 +346,22 @@ def make_panel(ctx: UIState) -> Panel | str:
             expand=False,
         )
 
-    if ctx.dry_run:
-        if ctx.total_bytes < 1_073_741_824:
-            size_str = f"{ctx.total_bytes / (1024**2):.2f} MB"
-        else:
-            size_str = f"{ctx.total_bytes / (1024**3):.2f} GB"
+    if ctx.display.dry_run:
+        size_str = f"{format_size(ctx.progress.total_bytes)}"
         grid = Table.grid(expand=True)
         grid.add_column()
         grid.add_column(justify="center")
 
-        grid.add_row("[white]Total files:", f"[green3]{ctx.total_files}[/]")
+        grid.add_row("[white]Total files:", f"[green3]{ctx.progress.total_files}[/]")
         grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
-        if ctx.verify:
+        if ctx.display.verify:
             grid.add_row(
                 "[white]Hash Found:",
-                f"[bold yellow]{ctx.has_hash}/{ctx.total_files}[/]",
+                f"[bold yellow]{ctx.progress.has_hash}/{ctx.progress.total_files}[/]",
             )
         grid.add_row(
-            "[white]Ranges:", f"[bold magenta]{ctx.ranges}/{ctx.total_files}[/]"
+            "[white]Ranges:",
+            f"[bold magenta]{ctx.progress.ranges}/{ctx.progress.total_files}[/]",
         )
         return Panel(
             grid,
@@ -376,8 +377,8 @@ def make_panel(ctx: UIState) -> Panel | str:
     )
 
     return Panel(
-        ctx.progress,
-        title=ctx.dynamic_title + dynamic_title_full,
+        ctx.rich.progress,
+        title=ctx.rich.dynamic_title + dynamic_title_full,
         border_style="blue",
         padding=(1, 2),
     )
@@ -389,10 +390,10 @@ async def print_dry_run_report(
     """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
 
     # 1. Если включен режим JSON логов, отдаем структурированные данные
-    if ctx.json_logs:
+    if ctx.display.json_logs:
         report_data = {
-            "total_files": ctx.total_files,
-            "total_bytes": ctx.total_bytes,
+            "total_files": ctx.progress.total_files,
+            "total_bytes": ctx.progress.total_bytes,
             "files": [
                 {
                     "filename": f.meta.filename,
@@ -423,7 +424,7 @@ async def print_dry_run_report(
         return
 
     # 2. Если режим тишины (без JSON), просто выходим
-    if ctx.quiet:
+    if ctx.display.quiet:
         return
 
     # 3. Красивый UI для людей
@@ -431,40 +432,38 @@ async def print_dry_run_report(
     table.add_column("Filename", style="cyan", no_wrap=True)
     table.add_column("Size", justify="right")
     table.add_column("Chunks", justify="right")
-    if ctx.verify:
+    if ctx.display.verify:
         table.add_column("Hash Found", justify="center")
     table.add_column("Ranges", justify="center")
 
     for f in files.values():
         f.create_chunks()
-        size_mb = f.meta.content_length / (1024 * 1024)
-        if ctx.verify:
+        str_size = format_size(f.meta.content_length)
+        if ctx.display.verify:
             if f.meta.expected_checksum:
                 has_hash = "✅"
-                ctx.has_hash += 1
+                ctx.progress.has_hash += 1
             else:
                 has_hash = "❌"
 
         if f.meta.supports_ranges:
             ranges = "✅"
-            ctx.ranges += 1
+            ctx.progress.ranges += 1
         else:
             ranges = "❌ (Fallback to 1 thread)"
 
-        if ctx.verify:
+        if ctx.display.verify:
             table.add_row(
                 f.meta.filename,
-                f"{size_mb:.2f} MB",
+                str_size,
                 str(len(f.chunks)),
                 has_hash,
                 ranges,
             )
         else:
-            table.add_row(
-                f.meta.filename, f"{size_mb:.2f} MB", str(len(f.chunks)), ranges
-            )
+            table.add_row(f.meta.filename, str_size, str(len(f.chunks)), ranges)
     # Печатаем таблицу в stderr (чтобы не сломать пайпы)
-    ctx.console.print(table)
+    ctx.rich.console.print(table)
 
     # 4. Проверка свободного места (Только для режима диска)
     if not stream:
@@ -478,38 +477,45 @@ async def print_dry_run_report(
         try:
             free_space = shutil.disk_usage(check_dir).free
 
-            if free_space < ctx.total_bytes:
-                ctx.console.print("\n[bold red] DANGER: Insufficient disk space![/]")
-                ctx.console.print(
-                    f"[red]Required: {ctx.total_bytes / (1024**3):.2f} GB | "
-                    f"Available: {free_space / (1024**3):.2f} GB[/]"
+            if free_space < ctx.progress.total_bytes:
+                ctx.rich.console.print(
+                    "\n[bold red] DANGER: Insufficient disk space![/]"
+                )
+                ctx.rich.console.print(
+                    f"[red]Required: {format_size(ctx.progress.total_bytes)} | "
+                    f"Available: {format_size(free_space)}[/]"
                 )
             else:
-                ctx.console.print(
+                ctx.rich.console.print(
                     f"\n[bold green] Disk space check passed "
-                    f"({free_space / (1024**3):.2f} GB free).[/]\n"
+                    f"({format_size(free_space)} free).[/]\n"
                 )
         except OSError:
             pass  # Игнорируем ошибки доступа при проверке места
 
 
+def format_size(size_bytes: float) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(size_bytes) < 1024:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.2f} PB"
+
+
 async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
-    if ctx.live:
-        ctx.live.stop()
-        if ctx.refresh:
-            ctx.refresh.cancel()
-    elapsed = time.monotonic() - ctx.start_time
-    avg_speed = (ctx.download_bytes / elapsed) / (1024**2) if elapsed > 0 else 0
+    if ctx.rich.live:
+        ctx.rich.live.stop()
+        if ctx.rich.refresh:
+            ctx.rich.refresh.cancel()
+    elapsed = time.monotonic() - ctx.progress.start_time
+    avg_speed = (
+        f"{format_size(ctx.progress.download_bytes / elapsed)}/s" if elapsed > 0 else 0
+    )
 
-    if ctx.total_bytes < 1_073_741_824:
-        size_str = (
-            f"{ctx.download_bytes / (1024**2):.2f}/{ctx.total_bytes / (1024**2):.2f} MB"
-        )
-    else:
-        size_str = (
-            f"{ctx.download_bytes / (1024**3):.2f}/{ctx.total_bytes / (1024**3):.2f} GB"
-        )
-
+    size_str = (
+        f"{format_size(ctx.progress.download_bytes)}"
+        + f"/{format_size(ctx.progress.download_bytes)}"
+    )
     mins, secs = divmod(int(elapsed), 60)
     hours, mins = divmod(mins, 60)
     time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
@@ -518,16 +524,16 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
 
     report = (
         f"\n--- Final Report ({status_word}) ---\n"
-        f"Total files:   {ctx.files_completed}/{ctx.total_files}\n"
+        f"Total files:   {ctx.progress.files_completed}/{ctx.progress.total_files}\n"
         f"Total Data:    {size_str}\n"
-        f"Average Speed: {avg_speed:.2f} MB/s\n"
+        f"Average Speed: {avg_speed}\n"
         f"Total Time:    {time_str}\n"
         f"--------------------------------"
     )
     report_dict = {
-        "total_files": ctx.files_completed,
-        "total_bytes": ctx.download_bytes,
-        "average_speed_mb": avg_speed,
+        "total_files": ctx.progress.files_completed,
+        "total_bytes": ctx.progress.download_bytes,
+        "average_speed": avg_speed,
         "time_elapsed_sec": elapsed,
     }
     await log(ctx, report, **report_dict)
@@ -535,15 +541,15 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
 
 async def ui_start(ctx: UIState) -> None:
     # 1. ОТКРЫВАЕМ ФАЙЛ ЛОГОВ И ЗАПУСКАЕМ ВОРКЕРА
-    if ctx.log_file:
+    if ctx.log.log_file:
         try:
             # Открываем в режиме Append (дозапись)
-            ctx.log_fd = ctx.log_file.open("a", encoding="utf-8")
-            ctx.log_task = asyncio.create_task(log_worker(ctx))
+            ctx.log.log_fd = ctx.log.log_file.open("a", encoding="utf-8")
+            ctx.log.log_task = asyncio.create_task(log_worker(ctx))
         except OSError:
-            ctx.log_fd = None
+            ctx.log.log_fd = None
 
-    if not (ctx.no_ui or ctx.quiet):
+    if not (ctx.display.no_ui or ctx.display.quiet):
         ctx.progress = Progress(
             SpinnerColumn("aesthetic"),
             TextColumn("[bold yellow]{task.description}"),
@@ -562,21 +568,21 @@ async def ui_start(ctx: UIState) -> None:
             TransferSpeedColumn(),
             "•",
             TimeRemainingColumn(),
-            console=ctx.console,
+            console=ctx.rich.console,
             transient=False,
             expand=True,
         )
 
-        ctx.live = Live(
+        ctx.rich.live = Live(
             get_renderable=lambda: make_panel(ctx),
-            console=ctx.console,
+            console=ctx.rich.console,
             auto_refresh=True,
             refresh_per_second=10,
             transient=False,
         )
-        ctx.live.start()
-        ctx.refresh = asyncio.create_task(refresh_loop(ctx))
-    ctx.start_time = time.monotonic()
+        ctx.rich.live.start()
+        ctx.rich.refresh = asyncio.create_task(refresh_loop(ctx))
+    ctx.progress.start_time = time.monotonic()
     await log(ctx, "--- Session Started ---")
     await date_print(ctx)
 
@@ -586,13 +592,13 @@ async def ui_stop(ctx: UIState) -> None:
     await log(ctx, "--- Session Finished ---")
 
     # 2. КОРРЕКТНО ГАСИМ ЛОГГЕР
-    if ctx.log_task:
+    if ctx.log.log_task:
         # Отправляем ядовитую пилюлю
-        ctx.log_queue.put_nowait(None)
+        ctx.log.log_queue.put_nowait(None)
         # Ждем, пока логгер допишет все оставшиеся в очереди строки на диск
-        await ctx.log_task
+        await ctx.log.log_task
 
     # 3. ЗАКРЫВАЕМ ФАЙЛОВЫЙ ДЕСКРИПТОР
-    if ctx.log_fd:
-        ctx.log_fd.close()
-        ctx.log_fd = None
+    if ctx.log.log_fd:
+        ctx.log.log_fd.close()
+        ctx.log.log_fd = None

@@ -37,7 +37,9 @@ class NCBIProvider:
 
 # 3. КОНКРЕТНЫЙ ПРОВАЙДЕР ДЛЯ ОБЛАКОВ (S3, GCS)
 class CloudProvider:
-    async def resolve(self, ctx: NetworkState, url: str) -> Checksum | None:
+    async def resolve(
+        self, ctx: NetworkState, url: str, filename: str
+    ) -> Checksum | None:
         resp = await safe_request(ctx, "HEAD", url)
         if not resp:
             return None
@@ -96,4 +98,4 @@ class ProviderRouter:
                 return await provider.resolve(ctx, url, filename)
 
         # Если ни один домен не подошел, пробуем вытащить из стандартных заголовков
-        return await self._fallback.resolve(ctx, url)
+        return await self._fallback.resolve(ctx, url, filename)

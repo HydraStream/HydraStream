@@ -17,7 +17,6 @@ from typing import TypeVarTuple, Unpack
 from .dispatcher import download_worker, telemetry_worker
 from .models import Checksum, File, HydraContext, TypeHash
 from .monitor import done, log, print_dry_run_report, ui_start, ui_stop
-from .network import close
 from .producer import chunk_producer, dispatch_chunks
 
 Ts = TypeVarTuple("Ts")
@@ -27,9 +26,9 @@ async def delayed_task(
     ctx: HydraContext,
     task: Callable[[HydraContext, Unpack[Ts]], Awaitable[None]],
     *args: Unpack[Ts],
-    delay: float = random.uniform(0, 0.5),
+    delay: tuple[float, float] = (0, 0.5),
 ) -> None:
-    await asyncio.sleep(delay)
+    await asyncio.sleep(random.uniform(*delay))
     await task(ctx, *args)
 
 
@@ -47,27 +46,27 @@ async def autosave(ctx: HydraContext, interval: float) -> None:
 
 async def cancel_tasks(ctx: HydraContext) -> None:
 
-    for task in ctx.task_creators or []:
+    for task in ctx.tasks.creators or []:
         if not task.done():
             task.cancel()
 
-    if ctx.autosave_task:
-        ctx.autosave_task.cancel()
+    if ctx.tasks.autosave:
+        ctx.tasks.autosave.cancel()
 
-    if ctx.dispatcher:
-        ctx.dispatcher.cancel()
+    if ctx.tasks.dispatcher:
+        ctx.tasks.dispatcher.cancel()
 
-    await close(ctx.net)
-    for worker in ctx.workers or []:
+    await ctx.net.close()
+    for worker in ctx.tasks.workers or []:
         if not worker.done():
             worker.cancel()
 
 
 async def stop(ctx: HydraContext, complete: bool = False) -> None:
-    if ctx.is_stoping:
+    if ctx.is_stopping:
         return
 
-    ctx.is_stoping = True
+    ctx.is_stopping = True
 
     if not complete:
         await log(
@@ -79,17 +78,17 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
 
     if ctx.stream:
         with contextlib.suppress(asyncio.QueueFull):
-            ctx.stream_queue.put_nowait((-1, bytearray()))
-            ctx.file_discovery_queue.put_nowait(-1)
+            ctx.queues.stream.put_nowait((-1, bytearray()))
+            ctx.queues.file_discovery.put_nowait(-1)
     else:
-        ctx.all_complete_event.set()
+        ctx.sync.all_complete.set()
 
 
 async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
     if (
-        not ctx.is_stoping
-        and ctx.ui.total_files > 0
-        and ctx.ui.total_files == ctx.ui.files_completed
+        not ctx.is_stopping
+        and ctx.ui.progress.total_files > 0
+        and ctx.ui.progress.total_files == ctx.ui.progress.files_completed
     ):
         await log(
             ctx.ui,
@@ -102,10 +101,10 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
     tasks_to_cancel = [
         t
         for t in [
-            *ctx.task_creators,
-            ctx.autosave_task,
-            *ctx.workers,
-            ctx.dispatcher,
+            *ctx.tasks.creators,
+            ctx.tasks.autosave,
+            *ctx.tasks.workers,
+            ctx.tasks.dispatcher,
         ]
         if isinstance(t, asyncio.Task)
     ]
@@ -147,12 +146,12 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
                 length = len(chunk_bytes)
                 ctx.next_offset += length
 
-                async with ctx.chunk_from_future_cond:
-                    ctx.chunk_from_future_cond.notify_all()
+                async with ctx.sync.chunk_from_future:
+                    ctx.sync.chunk_from_future.notify_all()
 
                 continue
 
-            chunk_start, chunk_data = await ctx.stream_queue.get()
+            chunk_start, chunk_data = await ctx.queues.stream.get()
             if chunk_start == -1:
                 break
 
@@ -166,8 +165,8 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
 
                 length = len(chunk_bytes)
                 ctx.next_offset += length
-                async with ctx.chunk_from_future_cond:
-                    ctx.chunk_from_future_cond.notify_all()
+                async with ctx.sync.chunk_from_future:
+                    ctx.sync.chunk_from_future.notify_all()
 
             else:
                 heapq.heappush(ctx.heap, (chunk_start, chunk_data))
@@ -186,10 +185,10 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
         ctx.heap.clear()
         del ctx.files[file_id]
         ctx.current_files_id.remove(file_id)
-        async with ctx.current_files_cond:
-            ctx.current_files_cond.notify()
+        async with ctx.sync.current_files:
+            ctx.sync.current_files.notify()
         if ctx.stream and not ctx.files:
-            await ctx.file_discovery_queue.put(-1)
+            await ctx.queues.file_discovery.put(-1)
 
 
 async def create_tasks(
@@ -203,7 +202,7 @@ async def create_tasks(
 
     num_task_creator = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
     num_task_creator = min(num_task_creator, 20)
-    ctx.task_creators = [
+    ctx.tasks.creators = [
         asyncio.create_task(
             delayed_task(ctx, chunk_producer),
             name=f"Task creator: {i}",
@@ -220,13 +219,13 @@ async def create_tasks(
             else ctx.config.threads
         )
 
-        ctx.autosave_task = asyncio.create_task(
+        ctx.tasks.autosave = asyncio.create_task(
             autosave(ctx, interval=60), name="Autosaver"
         )
     if ctx.config.dry_run:
         return
-    ctx.telemetry_task = asyncio.create_task(telemetry_worker(ctx), name="Telemetry")
-    ctx.workers = [
+    ctx.tasks.telemetry = asyncio.create_task(telemetry_worker(ctx), name="Telemetry")
+    ctx.tasks.workers = [
         asyncio.create_task(
             delayed_task(ctx, download_worker, i),
             name=f"Worker: {i}",
@@ -234,32 +233,33 @@ async def create_tasks(
         for i in range(num_workers)
     ]
 
-    ctx.dispatcher = asyncio.create_task(dispatch_chunks(ctx), name="Dispather")
+    ctx.tasks.dispatcher = asyncio.create_task(dispatch_chunks(ctx), name="Dispather")
 
 
 async def dispatch_links(
     ctx: HydraContext,
     links: str | Iterable[str],
-    expected_checksums: dict[str, tuple[TypeHash, str]] | None,
+    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
 ) -> None:
 
     checksums = None
     for i, link in enumerate(links):
         if expected_checksums is not None:
-            if checksums := expected_checksums.get(link):
+            checksums = expected_checksums.get(link)
+            if checksums and not isinstance(checksums, Checksum):
                 checksums = Checksum(algorithm=checksums[0], value=checksums[1])
         else:
             expected_checksums = None
-        await ctx.links_queue.put((i, link, checksums))
+        await ctx.queues.links.put((i, link, checksums))
 
-    for _ in range(len(ctx.task_creators)):
-        await ctx.links_queue.put((sys.maxsize, "", None))
+    for _ in range(len(ctx.tasks.creators)):
+        await ctx.queues.links.put((sys.maxsize, "", None))
 
 
 async def stream_all(
     ctx: HydraContext,
     links: str | Iterable[str],
-    expected_checksums: dict[str, tuple[TypeHash, str]] | None,
+    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
 ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
 
     await ui_start(ctx.ui)
@@ -276,7 +276,7 @@ async def stream_all(
 
     try:
         while True:
-            file_id = await ctx.file_discovery_queue.get()
+            file_id = await ctx.queues.file_discovery.get()
             if file_id == -1:
                 break
             filename = ctx.files[file_id].meta.filename
@@ -298,7 +298,7 @@ async def stream_all(
 async def run_downloads(
     ctx: HydraContext,
     links: str | Iterable[str],
-    expected_checksums: dict[str, tuple[TypeHash, str]] | None,
+    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
 ) -> None:
 
     loop = asyncio.get_running_loop()
@@ -319,15 +319,15 @@ async def run_downloads(
 
     await dispatch_links(ctx, links, expected_checksums)
 
-    if ctx.config.dry_run and ctx.task_creators:
-        for task in ctx.task_creators:
+    if ctx.config.dry_run and ctx.tasks.creators:
+        for task in ctx.tasks.creators:
             await task
 
         await print_dry_run_report(ctx.ui, ctx.files, ctx.stream, ctx.config.output_dir)
-        ctx.all_complete_event.set()
+        ctx.sync.all_complete.set()
 
     try:
-        await ctx.all_complete_event.wait()
+        await ctx.sync.all_complete.wait()
     except asyncio.CancelledError:
         pass
 
