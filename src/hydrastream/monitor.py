@@ -5,9 +5,9 @@ import asyncio
 import shutil
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import Literal
 
 import orjson
 from rich.console import Group
@@ -30,9 +30,18 @@ from rich.rule import Rule
 from rich.table import Column, Table
 from rich.text import Text
 
+from hydrastream.exceptions import LogFileError
+
 from .models import File, UIState
 
-STATUS = Literal["SUCCESS", "INFO", "WARNING", "ERROR", "CRITICAL", "INTERRUPT"]
+
+class LogStatus(StrEnum):
+    SUCCESS = "SUCCESS"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+    INTERRUPT = "INTERRUPT"
 
 
 def truncate_filename(name: str, w: int = 30) -> str:
@@ -68,18 +77,6 @@ class GradientPercent(ProgressColumn):
         return Text(f"{p:>5.1f}%", style=f"bold {color}")
 
 
-def write_log(ctx: UIState, msg: str) -> None:
-    if not ctx.log.log_file:
-        return
-
-    try:
-        with Path(ctx.log.log_file).open("a", encoding="utf-8") as f:
-            clean_msg = Text.from_markup(str(msg)).plain
-            f.write(f"{clean_msg}\n")
-    except OSError:
-        pass
-
-
 async def date_print(ctx: UIState) -> None:
     current_date = datetime.now().strftime("%Y-%m-%d")
     date_header = f"[bold cyan] Date: {current_date}[/]"
@@ -90,7 +87,7 @@ async def date_print(ctx: UIState) -> None:
 
 
 def formatting_log(
-    message: str | Rule, formatted_msg: str, status: STATUS = "INFO"
+    message: str | Rule, formatted_msg: str, status: LogStatus = LogStatus.INFO
 ) -> Panel | str | Rule:
     match status.upper():
         case "CRITICAL" | "INTERRUPT":
@@ -122,7 +119,7 @@ async def log(
     ctx: UIState,
     message: str | Rule,
     *,
-    status: STATUS = "INFO",
+    status: LogStatus = LogStatus.INFO,
     progress: bool = False,
     throttle_key: str | None = None,
     throttle_sec: float = 10.0,
@@ -137,7 +134,7 @@ async def log(
     if ctx.display.json_logs:
         # Собираем словарь для JSON
         log_record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": status.upper(),
             "message": message,
             **kwargs,  # Распаковываем дополнительные данные!
@@ -186,8 +183,13 @@ async def log_worker(ctx: UIState) -> None:
         try:
             ctx.log.log_fd.write(f"{msg}\n")
             ctx.log.log_fd.flush()  # Гарантируем, что строка сразу упала на диск
-        except OSError:
-            pass  # Если диск отвалился, просто глотаем ошибку
+        except OSError as e:
+            err = LogFileError(path=str(ctx.log.log_file), original_err=str(e))
+            await log(ctx, f"{err.formatted_msg}", status=LogStatus.WARNING)
+
+            ctx.log.log_fd.close()
+            ctx.log.log_fd = None
+            break
 
 
 async def speed_limiter(ctx: UIState) -> None:
@@ -255,7 +257,7 @@ async def refresh_loop(ctx: UIState) -> None:
 
                 await asyncio.sleep(ctx.rich.renewal_rate)
             except Exception as e:
-                await log(ctx, f"UI Refresh Error: {e!r}", status="ERROR")
+                await log(ctx, f"UI Refresh Error: {e!r}", status=LogStatus.ERROR)
 
 
 def update_panel_title(ctx: UIState) -> None:
@@ -281,11 +283,11 @@ async def done(ctx: UIState, filename: str) -> None:
         if ctx.rich.progress.tasks[task_id].total is not None:
             ctx.progress.files_completed += 1
             update_panel_title(ctx)
-            await log(ctx, f"Done: {filename}", status="SUCCESS", progress=True)
+            await log(ctx, f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
     elif ctx.rich.buffer.get(filename, 0):
         ctx.progress.files_completed += 1
-        await log(ctx, f"Done: {filename}", status="SUCCESS", progress=True)
+        await log(ctx, f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
 
 def make_panel(ctx: UIState) -> Panel | str:
@@ -415,7 +417,7 @@ async def print_dry_run_report(
         await log(
             ctx,
             "DRY_RUN_REPORT",
-            status="INFO",
+            status=LogStatus.INFO,
             progress=False,
             throttle_key=None,
             throttle_sec=10,
@@ -490,8 +492,12 @@ async def print_dry_run_report(
                     f"\n[bold green] Disk space check passed "
                     f"({format_size(free_space)} free).[/]\n"
                 )
-        except OSError:
-            pass  # Игнорируем ошибки доступа при проверке места
+        except OSError as e:
+            await log(
+                ctx,
+                f"Warning: Could not check disk space: {e}",
+                status=LogStatus.WARNING,
+            )
 
 
 def format_size(size_bytes: float) -> str:
@@ -546,11 +552,18 @@ async def ui_start(ctx: UIState) -> None:
             # Открываем в режиме Append (дозапись)
             ctx.log.log_fd = ctx.log.log_file.open("a", encoding="utf-8")
             ctx.log.log_task = asyncio.create_task(log_worker(ctx))
-        except OSError:
+        except OSError as e:
             ctx.log.log_fd = None
 
+            err = LogFileError(path=str(ctx.log.log_file), original_err=str(e))
+            await log(
+                ctx,
+                f"[bold yellow]LOGGING DISABLED:[/] {err.formatted_msg}",
+                status=LogStatus.WARNING,
+            )
+
     if not (ctx.display.no_ui or ctx.display.quiet):
-        ctx.progress = Progress(
+        ctx.rich.progress = Progress(
             SpinnerColumn("aesthetic"),
             TextColumn("[bold yellow]{task.description}"),
             TextColumn(

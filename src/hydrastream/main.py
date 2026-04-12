@@ -2,22 +2,27 @@
 # Licensed under the MIT License.
 
 import asyncio
-import re
 import sys
-from collections.abc import Generator
-from contextlib import contextmanager
-from functools import partial
-from io import TextIOWrapper
-from pathlib import Path
-from typing import Annotated, Any, TextIO, get_args
-from urllib.parse import urlparse
-
 import tomllib
+from functools import partial
+from pathlib import Path
+from typing import Annotated, Any
+
 import typer
 
-from hydrastream import __version__
+from hydrastream.__init__ import __version__
+from hydrastream.exceptions import HydraError, InvalidParameterError, ValidationError
 from hydrastream.facade import HydraClient
-from hydrastream.models import Checksum, HydraConfig, TypeHash
+from hydrastream.models import (
+    Checksum,
+    DisplayConfig,
+    HydraConfig,
+    LogState,
+    SpeedLimiterState,
+    TypeHash,
+    UIState,
+)
+from hydrastream.monitor import LogStatus, log, ui_start, ui_stop
 
 
 def load_user_config() -> dict:
@@ -50,86 +55,23 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def is_valid_url(url: str) -> bool:
-    """Checks if a given string is a structurally valid HTTP/HTTPS URL."""
-    try:
-        result = urlparse(url)
-        return result.scheme in ("http", "https") and bool(result.netloc)
-    except ValueError:
-        return False
-
-
-@contextmanager
-def get_input_stream(
-    filepath: str,
-) -> Generator[TextIO | Any | TextIOWrapper, Any, None]:
-    """Context manager for reading from a file or standard input (pipe)."""
-    if filepath == "-":
-        yield sys.stdin
-    else:
-        path = Path(filepath).expanduser().resolve()
-
-        if not path.exists():
-            typer.secho(f"Error: Path does not exist: {path}", fg="red", err=True)
-            raise typer.Exit(code=2)
-        if not path.is_file():
-            typer.secho(
-                f"Error: Target is a directory, not a file: {path}",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(code=2)
-
-        try:
-            with path.open(encoding="utf-8") as f:
-                yield f
-        except PermissionError:
-            typer.secho(f"Error: Permission denied: {path}", fg="red", err=True)
-            raise typer.Exit(code=2) from None
-
-
-def parse_urls(links_from_args: list[str] | None, filepath: str | None) -> list[str]:
-    """
-    Extracts, validates, and deduplicates URLs from both CLI arguments and
-    an input file/stdin.
-    Preserves the original order of URLs.
-    """
-    all_links = []
-
-    # 1. Ссылки из прямых аргументов (hs url1 url2)
-    if links_from_args:
-        for url in links_from_args:
-            if is_valid_url(url):
-                all_links.append(url)
-            else:
-                typer.secho(
-                    f"Warning: Skipping invalid URL: '{url}'", fg="yellow", err=True
-                )
-
-    # 2. Обработка файла или пайпа (hs -i urls.txt или hs -i -)
-    if filepath:
-        try:
-            with get_input_stream(filepath) as stream:
-                for line in stream:
-                    clean_line = line.strip()
-                    if clean_line and not clean_line.startswith("#"):
-                        # Берем первое слово, отсекая комментарии или пробелы в конце
-                        url = clean_line.split()[0]
-                        if is_valid_url(url):
-                            all_links.append(url)
-        except (FileNotFoundError, PermissionError, OSError) as e:
-            typer.secho(f"Read error: {e}", fg="red", err=True)
-            raise typer.Exit(code=2) from None
-
-    # Используем dict.fromkeys для удаления дубликатов с сохранением порядка
-    return list(dict.fromkeys(all_links))
-
-
 async def async_main(
-    config: HydraConfig,
+    links: list[str] | None,
+    input_file: str | None,
     stream: bool,
-    valid_links: list[str],
-    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum],
+    typehash: TypeHash,
+    hash: str | None,
+    output_dir: str,
+    dry_run: bool,
+    no_ui: bool,
+    quiet: bool,
+    json_logs: bool,
+    verify: bool,
+    threads: int,
+    min_chunk_size_mb: int,
+    max_stream_chunk_size_mb: int,
+    stream_buffer_size_mb: int | None,
+    speed_limit: float | None,
 ) -> None:
     """
     Core asynchronous orchestrator for downloading or streaming files.
@@ -152,147 +94,125 @@ async def async_main(
         json_logs: Output logs in structured JSON Lines format.
         verify: Enable or disable post-download hash verification.
     """  # noqa: E501
-
-    async with HydraClient(config=config) as loader:
-        if stream and not config.dry_run:
-            assert sys.__stdout__ is not None
-            is_terminal = sys.__stdout__.isatty()
-
-            if is_terminal:
-                typer.secho(
-                    "Warning: You are running in --stream mode but output "
-                    "is not redirected!\n"
-                    "The downloaded binary data will be discarded.",
-                    fg="yellow",
-                    err=True,
-                )
-
-                if not expected_checksums:
-                    typer.secho(
-                        "Please use a pipe (e.g., '| zcat') or redirect to a file "
-                        "(e.g., '> file.gz').\n"
-                        "Aborting to save bandwidth.",
-                        fg="red",
-                        err=True,
-                    )
-                    raise typer.Exit(code=1)
-
-                typer.secho(
-                    "Proceeding in 'Verification Only' mode since --hash is provided.",
-                    fg="cyan",
-                    err=True,
-                )
-
-            async for _, file_gen in loader.stream(valid_links, expected_checksums):
-                async for chunk in file_gen:
-                    if not is_terminal:
-                        sys.stdout.buffer.write(chunk)
-                    else:
-                        pass
-
-                if not is_terminal:
-                    sys.stdout.buffer.flush()
-        else:
-            await loader.run(valid_links, expected_checksums)
-
-
-def validate_threads(value: int | None) -> int | None:
-    if value is not None:
-        if value < 1:
-            raise typer.BadParameter("Number of threads must be at least 1.")
-        if value > 128:
-            raise typer.BadParameter(
-                "Maximum allowed threads is 128 to prevent system overload."
-            )
-    return value
-
-
-def validate_positive_int(value: int | None) -> int | None:
-    if value is not None and value < 1:
-        raise typer.BadParameter("Value must be a positive integer (>= 1).")
-    return value
-
-
-def validate_speed_limit(value: float | None) -> float | None:
-    if value is not None and value <= 0.0:
-        raise typer.BadParameter("Speed limit must be greater than 0.0 MB/s.")
-    return value
-
-
-def validate_typehash(value: str) -> str:
-    allowed_hashes = get_args(TypeHash)
-    if value not in allowed_hashes:
-        raise typer.BadParameter(
-            f"Invalid hash algorithm '{value}'. Supported: {', '.join(allowed_hashes)}"
-        )
-    return value
-
-
-def validate_links(links: list[str] | None) -> list[str] | None:
-    if not links:
-        return links
-
-    for url in links:
-        try:
-            result = urlparse(url)
-            is_valid = result.scheme in ("http", "https") and bool(result.netloc)
-        except ValueError:
-            is_valid = False
-
-        if not is_valid:
-            raise typer.BadParameter(
-                f"Invalid URL: '{url}'. Only HTTP/HTTPS are supported."
-            )
-
-    return links
-
-
-def validate_input_file(value: str | None) -> str | None:
-    if value is None or value == "-":
-        return value
-
-    path = Path(value)
-    if not path.exists():
-        raise typer.BadParameter(f"Input file '{value}' does not exist.")
-    if not path.is_file():
-        raise typer.BadParameter(f"'{value}' is not a file.")
-    return str(path)
-
-
-def validate_output_dir(value: str) -> str:
-    path = Path(value)
-
-    if path.exists() and not path.is_dir():
-        raise typer.BadParameter(
-            f"Output path '{value}' exists but is not a directory."
-        )
-
     try:
-        path.resolve()
-    except Exception:
-        raise typer.BadParameter(
-            f"Invalid path format for directory: '{value}'"
-        ) from None
+        ui = UIState(
+            display=DisplayConfig(
+                no_ui=no_ui,
+                quiet=quiet,
+                dry_run=dry_run,
+                json_logs=json_logs,
+                verify=verify,
+            ),
+            log=LogState(
+                log_file=Path(output_dir).expanduser().resolve() / "download.log"
+            ),
+            speed=SpeedLimiterState(speed_limit=speed_limit),
+        )
+        await ui_start(ui)
 
-    return str(path)
+        expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] = {}
 
+        # Hash logic: only map the hash if a single URL is provided
+        if hash and links and len(links) == 1:
+            expected_checksums[links[0]] = Checksum(algorithm=typehash, value=hash)
+        elif hash and links and len(links) > 1:
+            raise ValidationError(
+                param="hash",
+                reason=(
+                    "Warning: The --hash flag is ignored when "
+                    "multiple URLs are provided."
+                ),
+            )
 
-def validate_hash_format(value: str | None) -> str | None:
-    if value is None:
-        return None
-
-    clean_hash = value.strip().lower()
-
-    if not clean_hash:
-        raise typer.BadParameter("Hash checksum cannot be an empty string.")
-
-    if not re.fullmatch(r"[0-9a-f]+", clean_hash):
-        raise typer.BadParameter(
-            f"Invalid hash format: '{value}'. "
-            "A checksum should only contain hexadecimal characters (0-9, a-f)."
+        config = HydraConfig(
+            threads=threads,
+            dry_run=dry_run,
+            min_chunk_size_mb=min_chunk_size_mb,
+            max_stream_chunk_size_mb=max_stream_chunk_size_mb,
+            speed_limit=speed_limit,
+            no_ui=no_ui,
+            quiet=quiet,
+            output_dir=output_dir,
+            stream_buffer_size_mb=stream_buffer_size_mb,
+            json_logs=json_logs,
+            verify=verify,
+            client_kwargs=None,
         )
 
-    return clean_hash
+        async with HydraClient(config=config, ui=ui) as loader:
+            if stream and not config.dry_run:
+                assert sys.__stdout__ is not None
+                is_terminal = sys.__stdout__.isatty()
+
+                if is_terminal:
+                    await InvalidParameterError(
+                        param="stream",
+                        reason=(
+                            "Warning: You are running in --stream mode but output "
+                            "is not redirected!\n"
+                            "The downloaded binary data will be discarded."
+                        ),
+                    ).report(ui)
+
+                    if not expected_checksums:
+                        await ValidationError(
+                            param="stream",
+                            reason=(
+                                "Please use a pipe (e.g., '| zcat') or redirect to "
+                                "a file (e.g., '> file.gz').\n"
+                                "Aborting to save bandwidth."
+                            ),
+                        ).report(ui)
+
+                    await InvalidParameterError(
+                        param="stream",
+                        reason=(
+                            "Proceeding in 'Verification Only' mode "
+                            "since --hash is provided."
+                        ),
+                    ).report(ui)
+
+                async for _, file_gen in await loader.stream(
+                    links, input_file, expected_checksums
+                ):
+                    async for chunk in file_gen:
+                        if not is_terminal:
+                            sys.stdout.buffer.write(chunk)
+                        else:
+                            pass
+
+                    if not is_terminal:
+                        sys.stdout.buffer.flush()
+            else:
+                await loader.run(links, input_file, expected_checksums)
+
+    except (Exception, ExceptionGroup) as e:
+        await handle_crash(ui, e)
+        if isinstance(e, ExceptionGroup):
+            codes = [
+                err.exit_code for err in e.exceptions if isinstance(err, HydraError)
+            ]
+            sys.exit(max(codes) if codes else 1)
+        else:
+            sys.exit(getattr(e, "exit_code", 1))
+
+    finally:
+        await ui_stop(ui)
+
+
+async def handle_crash(ui: UIState, error: Exception | ExceptionGroup) -> None:
+
+    if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt)):
+        await log(ui, "Interrupted", status=LogStatus.INTERRUPT)
+        return
+
+    if isinstance(error, ExceptionGroup):
+        for e in error.exceptions:
+            await handle_crash(ui, e)
+    elif isinstance(error, HydraError):
+        await error.report(ui)
+    else:
+        await log(ui, f"FATAL ERROR: {error!r}", status=LogStatus.CRITICAL)
 
 
 def get_cfg(key: str, default: Any = None) -> Any:  # noqa: ANN401
@@ -306,7 +226,6 @@ def cli(
         typer.Argument(
             help="List of target URLs to download.",
             default_factory=partial(get_cfg, "links"),
-            callback=validate_links,
         ),
     ],
     input_file: Annotated[
@@ -316,7 +235,6 @@ def cli(
             "--input",
             help="Read URLs from file or '-' for stdin",
             default_factory=partial(get_cfg, "input"),
-            callback=validate_input_file,
         ),
     ],
     typehash: Annotated[
@@ -326,7 +244,6 @@ def cli(
             "-th",
             help="Hash algorithm type (e.g., md5, sha256).",
             default_factory=partial(get_cfg, "typehash", "md5"),
-            callback=validate_typehash,
         ),
     ],
     hash: Annotated[
@@ -335,7 +252,6 @@ def cli(
             "--hash",
             help="Expected hash checksum (applicable only for a single URL).",
             default_factory=partial(get_cfg, "hash"),
-            callback=validate_hash_format,
         ),
     ],
     output_dir: Annotated[
@@ -345,7 +261,6 @@ def cli(
             "--output",
             help="Destination directory for downloaded files.",
             default_factory=partial(get_cfg, "output", "download"),
-            callback=validate_output_dir,
         ),
     ],
     threads: Annotated[
@@ -355,7 +270,6 @@ def cli(
             "--threads",
             help="Number of concurrent download connections.",
             default_factory=partial(get_cfg, "threads"),
-            callback=validate_threads,
         ),
     ],
     stream: Annotated[
@@ -382,7 +296,6 @@ def cli(
             "--min-chunk-mb",
             help="Minimum chunk size in Megabytes for standard disk downloads.",
             default_factory=partial(get_cfg, "min-chunk-mb", 1),
-            callback=validate_positive_int,
         ),
     ],
     max_stream_chunk_size_mb: Annotated[
@@ -391,7 +304,6 @@ def cli(
             "--stream-chunk-mb",
             help="Target chunk size in Megabytes for streaming mode.",
             default_factory=partial(get_cfg, "stream-chunk-mb", 5),
-            callback=validate_positive_int,
         ),
     ],
     stream_buffer_size_mb: Annotated[
@@ -401,7 +313,6 @@ def cli(
             "-b",
             help="Maximum stream buffer size in Megabytes to prevent OOM.",
             default_factory=partial(get_cfg, "buffer"),
-            callback=validate_positive_int,
         ),
     ],
     speed_limit: Annotated[
@@ -411,7 +322,6 @@ def cli(
             "-l",
             help="Global download speed limit in MB/s.",
             default_factory=partial(get_cfg, "limit"),
-            callback=validate_speed_limit,
         ),
     ],
     no_ui: Annotated[
@@ -459,58 +369,28 @@ def cli(
     HydraStream: Concurrent HTTP downloader with in-memory stream reordering
     (curl_cffi + uvloop).
     """
+    if sys.platform != "win32":
+        try:
+            import uvloop  # noqa
 
-    if not links and not input_file:
-        typer.secho(
-            "You must provide either[LINKS] or an --input file.",
-            fg="red",
-            bold=True,
-            err=True,
-        )
-        raise typer.Exit(code=1)
+            uvloop.install()
+        except ImportError:
+            pass
 
-    try:
-        if sys.platform != "win32":
-            try:
-                import uvloop  # noqa
+    if threads is None:
+        threads = 128
+    if min_chunk_size_mb is None:
+        min_chunk_size_mb = 5
+    if max_stream_chunk_size_mb is None:
+        max_stream_chunk_size_mb = 5
 
-                uvloop.install()
-            except ImportError:
-                pass
-
-        # ВСЕГДА парсим ссылки, чтобы отфильтровать мусор и дубликаты из прямых
-        # аргументов!
-        valid_links = parse_urls(links, input_file)
-
-        if not valid_links:
-            typer.secho(
-                "No valid URLs found to process!", fg="red", bold=True, err=True
-            )
-            raise typer.Exit(code=1)
-
-        expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] = {}
-
-        # Hash logic: only map the hash if a single URL is provided
-        if hash and len(valid_links) == 1:
-            expected_checksums[valid_links[0]] = Checksum(
-                algorithm=typehash, value=hash
-            )
-        elif hash and len(valid_links) > 1:
-            typer.secho(
-                "Warning: The --hash flag is ignored when multiple URLs are provided.",
-                fg="yellow",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-
-        if threads is None:
-            threads = 128
-        if min_chunk_size_mb is None:
-            min_chunk_size_mb = 5
-        if max_stream_chunk_size_mb is None:
-            max_stream_chunk_size_mb = 5
-
-        config = HydraConfig(
+    asyncio.run(
+        async_main(
+            links=links,
+            input_file=input_file,
+            stream=stream,
+            typehash=typehash,
+            hash=hash,
             threads=threads,
             dry_run=dry_run,
             min_chunk_size_mb=min_chunk_size_mb,
@@ -522,23 +402,8 @@ def cli(
             stream_buffer_size_mb=stream_buffer_size_mb,
             json_logs=json_logs,
             verify=verify,
-            client_kwargs=None,
         )
-        asyncio.run(
-            async_main(
-                config=config,
-                stream=stream,
-                valid_links=valid_links,
-                expected_checksums=expected_checksums,
-            )
-        )
-    except KeyboardInterrupt:
-        typer.secho("\nInterrupted by user (CLI).", fg="yellow", err=True)
-        raise typer.Exit(code=130) from None
-
-    except Exception as e:
-        typer.secho(f"\nCritical error: {e}", fg="red", bold=True, err=True)
-        raise  # typer.Exit(code=1) from None
+    )
 
 
 if __name__ == "__main__":

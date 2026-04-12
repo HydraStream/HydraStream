@@ -1,4 +1,11 @@
+import uuid
+from dataclasses import asdict, dataclass, field
 from enum import IntEnum
+from pathlib import Path
+from typing import Any
+
+from hydrastream.models import UIState
+from hydrastream.monitor import LogStatus, format_size, log
 
 
 class ExitCode(IntEnum):
@@ -8,3 +15,237 @@ class ExitCode(IntEnum):
     HASH_MISMATCH = 3  # Файл скачался, но MD5 не совпал
     NETWORK_ERROR = 4  # Отвалился интернет или сервер выдает 404/503
     INTERRUPTED = 130  # Пользователь нажал Ctrl+C
+
+
+@dataclass(kw_only=True)
+class HydraError(Exception):
+    exit_code: ExitCode = ExitCode.GENERAL_ERROR
+    log_status: LogStatus = LogStatus.ERROR
+    message_tpl: str = "Unknown error"
+
+    # Исключаем служебные поля из сериализации в лог
+    error_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8], init=False)
+
+    def __post_init__(self) -> None:
+        try:
+            self.formatted_msg = self.message_tpl.format(**self.__dict__)
+        except (KeyError, IndexError):
+            self.formatted_msg = self.message_tpl
+
+        super().__init__(f"[{self.error_id}] {self.formatted_msg}")
+
+    async def report(self, ctx: UIState, **log_extra: Any) -> None:  # noqa: ANN401
+        """
+        Передаем данные ошибки в логгер.
+        asdict() превратит поля датакласса в ключи для JSON-лога.
+        """
+        # Убираем системные поля, которые не нужны в JSON-атрибутах
+        data = asdict(self)
+        for key in ["exit_code", "log_status", "message_tpl", "formatted_msg"]:
+            data.pop(key, None)
+
+        await log(
+            ctx,
+            f"[{self.error_id}] {self.formatted_msg}",
+            status=self.log_status,
+            **data,  # Все поля (filename, required и т.д.) попадут в JSON!
+            **log_extra,  # Дополнительные флаги типа throttle_key
+        )
+
+
+@dataclass(kw_only=True)
+class HashMismatchError(HydraError):
+    filename: str
+    algorithm: str
+    expected: str
+    actual: str
+    exit_code: ExitCode = ExitCode.HASH_MISMATCH
+    log_status: LogStatus = LogStatus.CRITICAL
+
+    def __post_init__(self) -> None:
+        self.message_tpl: str = (
+            f"Hash mismatch for {self.filename}! ({self.algorithm}) "
+            f"Expected {self.expected}, got {self.actual}"
+        )
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class InsufficientSpaceError(HydraError):
+    path: str | Path
+    required: int
+    free: int
+
+    def __post_init__(self) -> None:
+        self.message_tpl: str = (
+            f"Insufficient space on {self.path}. "
+            f"Need {format_size(self.required)}, have {format_size(self.free)}."
+        )
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class DownloadFailedError(HydraError):
+    url: str
+    status_code: int | None = None
+    reason: str | None = None  # Описание ошибки от сервера или библиотеки
+
+    exit_code: ExitCode = ExitCode.NETWORK_ERROR
+    log_status: LogStatus = LogStatus.ERROR
+
+    def __post_init__(self) -> None:
+        parts = [f"Failed to download {self.url}"]
+
+        if self.status_code:
+            parts.append(f"(Status: {self.status_code})")
+        if self.reason:
+            parts.append(f": {self.reason}")
+
+        self.message_tpl = " ".join(parts)
+        super().__post_init__()
+
+
+class WorkerScaleDown(Exception):  # noqa: N818
+    """Сигнал для воркера уйти в спячку при сужении лимита AIMD."""
+
+    pass
+
+
+@dataclass(kw_only=True)
+class FileSizeMismatchError(HydraError):
+    filename: str
+    expected: int
+    actual: int
+    exit_code: ExitCode = ExitCode.HASH_MISMATCH  # Обычно размер и хеш идут рядом
+    log_status: LogStatus = LogStatus.ERROR
+
+    def __post_init__(self) -> None:
+        self.message_tpl = (
+            f"Size mismatch for {self.filename}: "
+            f"Expected {format_size(self.expected)}, got {format_size(self.actual)}."
+        )
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class HydraFileNotFoundError(HydraError):
+    filename: str
+    path: str
+    exit_code: ExitCode = ExitCode.USAGE_ERROR
+    log_status: LogStatus = LogStatus.ERROR
+
+    def __post_init__(self) -> None:
+        self.message_tpl = f"File not found: {self.filename} (Expected at: {self.path})"
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class StateSaveError(HydraError):
+    filename: str
+    target_path: str
+    reason: str
+    exit_code: ExitCode = ExitCode.GENERAL_ERROR
+    log_status: LogStatus = LogStatus.CRITICAL  # Состояние — это критично
+
+    def __post_init__(self) -> None:
+        self.message_tpl = (
+            f"Failed to save state for {self.filename} "
+            f"at {self.target_path}. Reason: {self.reason}"
+        )
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class OrphanedChunkError(HydraError):
+    # В DOD нам важно знать, какой именно кусок данных "осиротел"
+    start_pos: int
+    end_pos: int
+    exit_code: ExitCode = ExitCode.GENERAL_ERROR
+    log_status: LogStatus = LogStatus.CRITICAL  # Это баг логики, а не юзера
+
+    def __post_init__(self) -> None:
+        self.message_tpl = (
+            f"Orphaned Chunk: Reference to File object lost! "
+            f"Chunk range: {self.start_pos}-{self.end_pos}"
+        )
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class InvalidChecksumError(HydraError):
+    algorithm: str
+    value: str
+    reason: str
+    exit_code: ExitCode = ExitCode.USAGE_ERROR
+    log_status: LogStatus = LogStatus.ERROR
+
+    def __post_init__(self) -> None:
+        self.message_tpl = (
+            f"Invalid checksum for {self.algorithm}: {self.reason} "
+            f"(Value: {self.value})"
+        )
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class LogFileError(HydraError):
+    path: str
+    original_err: str
+    exit_code: ExitCode = ExitCode.GENERAL_ERROR
+    log_status: LogStatus = LogStatus.CRITICAL
+    message_tpl: str = (
+        "CRITICAL: Cannot write to log file {path}. OS Error: {original_err}"
+    )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class SystemContextError(HydraError):
+    operation: str  # Что мы пытались сделать (например, "initializing tasks")
+    original_error: str  # Текст ошибки из OSError или Exception
+    path: str | None = None  # Путь к файлу, если он был замешан
+
+    exit_code: ExitCode = ExitCode.GENERAL_ERROR
+    log_status: LogStatus = LogStatus.CRITICAL
+
+    def __post_init__(self) -> None:
+        # Собираем понятное сообщение
+        msg = f"System error during {self.operation}: {self.original_error}"
+        if self.path:
+            msg += f" (Path: {self.path})"
+
+        self.message_tpl = msg
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class ValidationError(HydraError):
+    # Универсальный класс для всех проблем с аргументами
+    param: str
+    value: Any = None
+    reason: str
+    exit_code: ExitCode = ExitCode.USAGE_ERROR
+    log_status: LogStatus = LogStatus.ERROR
+
+    def __post_init__(self) -> None:
+        self.message_tpl = f"Invalid --{self.param} [{self.value}]: {self.reason}"
+        super().__post_init__()
+
+
+@dataclass(kw_only=True)
+class FileReadError(HydraError):
+    path: str
+    reason: str
+    exit_code: ExitCode = ExitCode.USAGE_ERROR
+    log_status: LogStatus = LogStatus.ERROR
+
+
+@dataclass(kw_only=True)
+class InvalidParameterError(HydraError):
+    param: str
+    value: str | None = None
+    reason: str
+    exit_code: ExitCode = ExitCode.USAGE_ERROR
+    log_status: LogStatus = LogStatus.WARNING  # Для ссылок можно WARNING,

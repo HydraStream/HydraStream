@@ -3,14 +3,28 @@
 
 
 import asyncio
-from collections.abc import AsyncGenerator
+import sys
+from collections.abc import AsyncGenerator, Generator
+from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Self, TextIO
+from urllib.parse import urlparse
+
+from hydrastream.exceptions import FileReadError, InvalidParameterError, ValidationError
 
 from .engine import run_downloads, stream_all, teardown_engine
 from .interfaces import LocalStorageManager, StorageBackend
-from .models import HydraConfig, HydraContext, TypeHash
+from .models import (
+    Checksum,
+    DisplayConfig,
+    HydraConfig,
+    HydraContext,
+    LogState,
+    SpeedLimiterState,
+    TypeHash,
+    UIState,
+)
 
 
 class HydraClient:
@@ -30,7 +44,9 @@ class HydraClient:
         verify: bool = True,
         client_kwargs: dict[str, Any] | None = None,
         fs: StorageBackend | None = None,
+        ui: UIState | None = None,
     ) -> None:
+
         if config:
             self.config = config
         else:
@@ -48,7 +64,20 @@ class HydraClient:
                 verify=verify,
                 client_kwargs=client_kwargs,
             )
-
+        if ui:
+            self.ui = ui
+        else:
+            self.ui = UIState(
+                display=DisplayConfig(
+                    no_ui=self.config.no_ui,
+                    quiet=self.config.quiet,
+                    dry_run=self.config.dry_run,
+                    json_logs=self.config.json_logs,
+                    verify=self.config.verify,
+                ),
+                log=LogState(log_file=Path(self.config.output_dir) / "download.log"),
+                speed=SpeedLimiterState(speed_limit=self.config.speed_limit),
+            )
         self.state: HydraContext | None = None
         if fs:
             self.fs = fs
@@ -70,16 +99,131 @@ class HydraClient:
 
     async def run(
         self,
-        links: list[str] | str,
-        expected_checksums: dict[str, tuple[TypeHash, str]] | None = None,
+        links: list[str] | str | None = None,
+        input_file: str | None = None,
+        expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
     ) -> None:
+        links = await self.validate(links, input_file)
         self.state = HydraContext(config=self.config, fs=self.fs)
         await run_downloads(self.state, links, expected_checksums)
 
-    def stream(
+    async def stream(
         self,
-        links: list[str],
-        expected_checksums: dict[str, tuple[TypeHash, str]] | None = None,
+        links: list[str] | str | None = None,
+        input_file: str | None = None,
+        expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
     ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
+        links = await self.validate(links, input_file)
         self.state = HydraContext(config=self.config, fs=self.fs)
         return stream_all(self.state, links, expected_checksums)
+
+    async def validate(
+        self,
+        links: list[str] | str | None,
+        input_file: str | None,
+    ) -> list[str]:
+
+        if not links and not input_file:
+            raise ValidationError(
+                param="links",
+                reason="You must provide either[LINKS] or an --input file.",
+            )
+        validate_input_file(input_file)
+        if links is not None:
+            links = [links] if isinstance(links, str) else list(links)
+        valid_links = await parse_urls(self.ui, links, input_file)
+        if not valid_links:
+            raise ValidationError(
+                param="links", reason="No valid URLs found to process!"
+            )
+
+        return valid_links
+
+
+def validate_input_file(value: str | None) -> None:
+    if value is None or value == "-":
+        return
+
+    path = Path(value)
+    if not path.exists():
+        raise ValidationError(param="input", value=value, reason="File does not exist")
+    if not path.is_file():
+        raise ValidationError(param="input", value=value, reason="Target is not a file")
+
+
+def validate_output_dir(value: str) -> None:
+    path = Path(value)
+    if path.exists() and not path.is_dir():
+        raise ValidationError(
+            param="output", value=value, reason="Path exists but is not a directory"
+        )
+    try:
+        path.resolve()
+    except Exception as e:
+        raise ValidationError(
+            param="output", value=value, reason="Invalid path format"
+        ) from e
+
+
+def is_valid_url(url: str) -> bool:
+    """Checks if a given string is a structurally valid HTTP/HTTPS URL."""
+    try:
+        result = urlparse(url)
+        return result.scheme in ("http", "https") and bool(result.netloc)
+    except ValueError:
+        return False
+
+
+@contextmanager
+def get_input_stream(filepath: str) -> Generator[TextIO, None, None]:
+    if filepath == "-":
+        yield sys.stdin
+        return
+
+    path = Path(filepath).expanduser().resolve()
+
+    if not path.exists():
+        raise FileReadError(path=str(path), reason="Path does not exist")
+    if not path.is_file():
+        raise FileReadError(path=str(path), reason="Target is a directory, not a file")
+
+    try:
+        with path.open(encoding="utf-8") as f:
+            yield f
+    except PermissionError as e:
+        raise FileReadError(path=str(path), reason="Permission denied") from e
+    except OSError as e:
+        raise FileReadError(path=str(path), reason=str(e)) from e
+
+
+async def parse_urls(
+    ctx: UIState, links_from_args: list[str] | None, filepath: str | None
+) -> list[str]:
+    all_links = []
+
+    # Обработка аргументов
+    if links_from_args:
+        for url in links_from_args:
+            if is_valid_url(url):
+                all_links.append(url)
+            else:
+                await InvalidParameterError(
+                    param="url", value=url, reason="Invalid HTTP/HTTPS format"
+                ).report(ctx)
+
+    if filepath:
+        with get_input_stream(filepath) as stream:
+            for line in stream:
+                clean_line = line.strip()
+                if not clean_line or clean_line.startswith("#"):
+                    continue
+
+                url = clean_line.split()[0]
+                if is_valid_url(url):
+                    all_links.append(url)
+                else:
+                    await InvalidParameterError(
+                        param="file_link", value=url, reason="Invalid URL in input file"
+                    ).report(ctx)
+
+    return list(dict.fromkeys(all_links))

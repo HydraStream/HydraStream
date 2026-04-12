@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import re
 import sys
 import typing
 import weakref
@@ -17,7 +18,9 @@ from typing import (
     TypeVar,
     cast,
     dataclass_transform,
+    get_args,
 )
+from urllib.parse import urlparse
 
 import orjson
 from aiolimiter import AsyncLimiter
@@ -35,6 +38,12 @@ from rich.live import Live
 from rich.progress import (
     Progress,
     TaskID,
+)
+
+from hydrastream.exceptions import (
+    InvalidChecksumError,
+    OrphanedChunkError,
+    ValidationError,
 )
 
 from .interfaces import StorageBackend
@@ -104,7 +113,8 @@ class Chunk:
     def file(self) -> "File":
         obj = self._file_ref()
         if obj is None:
-            raise RuntimeError("File object was already garbage collected")
+            # Выбрасываем структурированную ошибку вместо безликого RuntimeError
+            raise OrphanedChunkError(start_pos=self.start, end_pos=self.end)
         return obj
 
     @property
@@ -128,16 +138,26 @@ class Chunk:
         return {"Range": f"bytes={self.current_pos}-{self.end}"}
 
 
+def validate_typehash(value: TypeHash) -> None:
+    allowed_hashes = get_args(TypeHash)
+    if value not in allowed_hashes:
+        raise ValidationError(
+            param="typehash",
+            value=value,
+            reason=f"Invalid hash algorithm. Supported: {', '.join(allowed_hashes)}",
+        )
+
+
 @value_object
 class Checksum:
     algorithm: TypeHash
     value: str
 
     def __post_init__(self) -> None:
+        validate_typehash(self.algorithm)
         normalized = self.value.strip().lower()
         object.__setattr__(self, "value", normalized)
 
-        # Полный список фиксированных длин для TypeHash
         expected_lengths = {
             "md5": 32,
             "sha1": 40,
@@ -153,17 +173,24 @@ class Checksum:
             "blake2b": 128,
         }
 
-        # 1. Проверка hex-символов
+        # Проверка на HEX
         if not all(c in "0123456789abcdef" for c in normalized):
-            raise ValueError("Hash value contains non-hex characters.")
+            raise InvalidChecksumError(
+                algorithm=self.algorithm,
+                value=normalized,
+                reason="Contains non-hex characters",
+            )
 
-        # 2. Проверка длины (пропускаем для shake_*, так как там длина любая)
+        # Проверка длины
         if self.algorithm in expected_lengths:
             expected = expected_lengths[self.algorithm]
             if len(normalized) != expected:
-                raise ValueError(
-                    f"Invalid {self.algorithm} length: expected {expected}, "
-                    f"got {len(normalized)}"
+                raise InvalidChecksumError(
+                    algorithm=self.algorithm,
+                    value=normalized,
+                    reason=(
+                        f"Invalid length: expected {expected}, got {len(normalized)}"
+                    ),
                 )
 
 
@@ -291,6 +318,19 @@ class LogState:
     )
     log_task: asyncio.Task[None] | None = field(default=None, init=False)
 
+    def safe_init(self) -> None:
+        """Пытается создать папку для лога. Если не выходит - падает на дефолт."""
+        try:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            # Пробуем открыть файл на дозапись (тест прав доступа)
+            with self.log_file.open("a", encoding="utf-8"):
+                pass
+        except OSError:
+            # Если юзер передал /root/secret/dir/ и у нас нет прав,
+            # откатываемся в текущую директорию!
+            fallback = Path.cwd() / "download.log"
+            self.log_file = fallback
+
 
 @entity
 class SpeedLimiterState:
@@ -402,6 +442,84 @@ class NetworkState:
             await self.client.close()
 
 
+def validate_threads(value: int | None) -> None:
+    if value is not None and (value < 1 or value > 128):
+        raise ValidationError(
+            param="threads", value=value, reason="Must be between 1 and 128"
+        )
+
+
+def validate_speed_limit(value: float | None) -> None:
+    if value is not None and value <= 0.0:
+        raise ValidationError(
+            param="speed-limit", value=value, reason="Must be greater than 0.0 MB/s"
+        )
+
+
+def validate_positive_int(param_name: str, value: int | None) -> None:
+
+    if value is None:
+        return
+
+    if value <= 0:
+        raise ValidationError(
+            param=param_name,
+            value=value,
+            reason="Value must be a positive integer (greater than 0).",
+        )
+
+
+def validate_input_file(value: str | None) -> None:
+    if value is None or value == "-":
+        return
+
+    path = Path(value)
+    if not path.exists():
+        raise ValidationError(param="input", value=value, reason="File does not exist")
+    if not path.is_file():
+        raise ValidationError(param="input", value=value, reason="Target is not a file")
+
+
+def validate_output_dir(value: str) -> None:
+    path = Path(value)
+    if path.exists() and not path.is_dir():
+        raise ValidationError(
+            param="output", value=value, reason="Path exists but is not a directory"
+        )
+    try:
+        path.resolve()
+    except Exception as e:
+        raise ValidationError(
+            param="output", value=value, reason="Invalid path format"
+        ) from e
+
+
+def validate_links(links: list[str] | None) -> None:
+    if not links:
+        return
+    for url in links:
+        result = urlparse(url)
+        if not (result.scheme in ("http", "https") and result.netloc):
+            raise ValidationError(
+                param="link", value=url, reason="Only HTTP/HTTPS are supported"
+            )
+    return
+
+
+def validate_hash_format(value: str | None) -> None:
+    if value is None:
+        return
+    clean_hash = value.strip().lower()
+
+    if not clean_hash:
+        raise ValidationError(param="hash", value="", reason="Hash cannot be empty")
+    if not re.fullmatch(r"[0-9a-f]+", clean_hash):
+        raise ValidationError(
+            param="hash", value=value, reason="Should only contain hex (0-9, a-f)"
+        )
+    return
+
+
 @value_object
 class HydraConfig:
     threads: int = 128
@@ -425,13 +543,19 @@ class HydraConfig:
     def __post_init__(
         self,
         min_chunk_size_mb: int,
-        min_stream_chunk_size_mb: int,
+        max_stream_chunk_size_mb: int,
         stream_buffer_size_mb: int | None,
     ) -> None:
+        validate_threads(self.threads)
+        validate_output_dir(self.output_dir)
+        validate_speed_limit(self.speed_limit)
+        validate_positive_int("min_chunk_size_mb", min_chunk_size_mb)
+        validate_positive_int("max_stream_chunk_size_mb", max_stream_chunk_size_mb)
+        validate_positive_int("stream_buffer_size_mb", stream_buffer_size_mb)
 
         object.__setattr__(self, "MIN_CHUNK", min_chunk_size_mb * 1024**2)
         object.__setattr__(
-            self, "STREAM_CHUNK_SIZE", min_stream_chunk_size_mb * 1024**2
+            self, "STREAM_CHUNK_SIZE", max_stream_chunk_size_mb * 1024**2
         )
         if stream_buffer_size_mb:
             object.__setattr__(
@@ -441,13 +565,6 @@ class HydraConfig:
             object.__setattr__(
                 self, "STREAM_BUFFER_SIZE", self.STREAM_CHUNK_SIZE * self.threads * 2
             )
-
-
-def create_done_task() -> asyncio.Task[None]:
-    loop = asyncio.get_event_loop()
-    f = loop.create_future()
-    f.set_result(None)
-    return cast(asyncio.Task[None], f)
 
 
 @entity
@@ -466,12 +583,13 @@ class QueueSet:
 
 
 @entity
-class TaskSet:
-    creators: list[asyncio.Task[None]] = field(default_factory=list)
-    workers: list[asyncio.Task[None]] = field(default_factory=list)
-    dispatcher: asyncio.Task[None] = field(default_factory=create_done_task)
-    autosave: asyncio.Task[None] = field(default_factory=create_done_task)
-    telemetry: asyncio.Task[None] = field(default_factory=create_done_task)
+class TaskCounts:
+    dispatch_links: int = 0
+    creators: int = 0
+    workers: int = 0
+    dispatcher: int = 0
+    autosave: int = 0
+    telemetry: int = 0
 
 
 @entity
@@ -479,7 +597,6 @@ class SyncSet:
     current_files: asyncio.Condition = field(default_factory=asyncio.Condition)
     chunk_from_future: asyncio.Condition = field(default_factory=asyncio.Condition)
     dynamic_limit: asyncio.Condition = field(default_factory=asyncio.Condition)
-    all_complete: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @entity
@@ -501,7 +618,7 @@ class HydraContext:
 
     # Вложенные домены
     queues: QueueSet = field(default_factory=QueueSet)
-    tasks: TaskSet = field(default_factory=TaskSet)
+    tasks: TaskCounts = field(default_factory=TaskCounts)
     sync: SyncSet = field(default_factory=SyncSet)
 
     net: NetworkState = field(init=False)

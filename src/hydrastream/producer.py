@@ -8,8 +8,10 @@ import sys
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
+from hydrastream.exceptions import HydraError, SystemContextError
+
 from .models import Checksum, File, FileMeta, HydraContext, TypeHash
-from .monitor import add_file, done, log, update
+from .monitor import LogStatus, add_file, done, log, update
 from .network import extract_filename, safe_request, stream_chunk
 from .providers import ProviderRouter
 
@@ -57,7 +59,7 @@ async def chunk_producer(  # noqa
                     await log(
                         ctx.ui,
                         f"Link {url} failed permanently (HTTP {status}).",
-                        status="ERROR",
+                        status=LogStatus.ERROR,
                     )
                     continue
 
@@ -70,12 +72,23 @@ async def chunk_producer(  # noqa
 
         except TimeoutError:
             await requeue_chunk(ctx, id, url, checksum)
-        except OSError as e:
-            await log(ctx.ui, f"OS/Disk Error: {e}", status="CRITICAL")
+        except HydraError as e:
+            await e.report(ctx.ui)
             raise
+        except OSError as e:
+            err = SystemContextError(
+                operation="task creation",
+                original_error=str(e),
+                path=str(ctx.config.output_dir),  # Добавляем контекст пути
+            )
+            await err.report(ctx.ui)
+            raise err from e
+
         except Exception as e:
             await log(
-                ctx.ui, f"Critical Task creator Exception: {e!r}", status="CRITICAL"
+                ctx.ui,
+                f"Critical Task Creator crash: {e!r}",
+                status=LogStatus.CRITICAL,
             )
             raise
 
@@ -133,7 +146,9 @@ async def _resolve_hash(
     await done(ctx.ui, filename)
 
     if checksum is None:
-        await log(ctx.ui, f"Missing MD5 hash for file: {filename}", status="WARNING")
+        await log(
+            ctx.ui, f"Missing MD5 hash for file: {filename}", status=LogStatus.WARNING
+        )
 
     return checksum
 
@@ -169,7 +184,9 @@ async def _prepare_file_object(  # noqa
         file_obj, num_states = ctx.fs.load_state(filename=filename)
         if num_states > 1:
             await log(
-                ctx.ui, f"Multiple state files found for {filename}!", status="WARNING"
+                ctx.ui,
+                f"Multiple state files found for {filename}!",
+                status=LogStatus.WARNING,
             )
 
     if file_obj:
@@ -180,7 +197,7 @@ async def _prepare_file_object(  # noqa
             await log(
                 ctx.ui,
                 f"{filename} already exists. Saving as {new_filename}.",
-                status="WARNING",
+                status=LogStatus.WARNING,
             )
             filename = new_filename
     return File(
@@ -235,7 +252,7 @@ async def dispatch_chunks(ctx: HydraContext) -> None:
                     lambda: len(ctx.current_files_id) < ctx.config.threads
                 )
 
-    for _ in range(len(ctx.tasks.workers)):
+    for _ in range(ctx.tasks.workers):
         if ctx.stream:
             await ctx.queues.chunk.put((sys.maxsize, c))
         else:

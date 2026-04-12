@@ -10,6 +10,14 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from hydrastream.exceptions import (
+    FileSizeMismatchError,
+    HashMismatchError,
+    HydraFileNotFoundError,
+    InsufficientSpaceError,
+    StateSaveError,
+)
+
 if TYPE_CHECKING:
     from .models import File, TypeHash
 
@@ -54,11 +62,10 @@ class LocalStorageManager:
     def allocate_space(self, filename: str, size: int) -> str | None:
         free_space = shutil.disk_usage(self.output_dir).free
         if free_space < size:
-            raise OSError(
-                f"Insufficient disk space. "
-                f"Required: {size / (1024**2):.2f} MB,"
-                f" Available: {free_space / (1024**2):.2f} MB."
+            raise InsufficientSpaceError(
+                path=self.output_dir, required=size, free=free_space
             )
+
         filepath = self.output_dir / filename
 
         if filepath.is_file():
@@ -90,28 +97,33 @@ class LocalStorageManager:
         filepath.unlink(missing_ok=True)
 
     def save_state(self, file_obj: File) -> None:
-        path = Path(self.get_state_path(file_obj.meta.filename))
+        filename = file_obj.meta.filename
+        path = Path(self.get_state_path(filename))
         temp_dir = path.parent
         temp_dir.mkdir(parents=True, exist_ok=True)
-
-        with tempfile.NamedTemporaryFile("wb", dir=temp_dir, delete=False) as tf:
-            tf.write(file_obj.to_json())
-            tf.flush()
-            os.fsync(tf.fileno())
-            temp_path = Path(tf.name)
-
         try:
-            Path.replace(temp_path, path)
-            if os.name != "nt":
-                dir_fd = os.open(str(temp_dir), os.O_RDONLY)
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
-        except Exception:
-            if Path.exists(temp_path):
-                Path.unlink(temp_path)
-            raise
+            with tempfile.NamedTemporaryFile("wb", dir=temp_dir, delete=False) as tf:
+                tf.write(file_obj.to_json())
+                tf.flush()
+                os.fsync(tf.fileno())
+                temp_path = Path(tf.name)
+
+            try:
+                Path.replace(temp_path, path)
+                if os.name != "nt":
+                    dir_fd = os.open(str(temp_dir), os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+            except Exception as e:
+                if Path.exists(temp_path):
+                    Path.unlink(temp_path)
+                raise e
+        except OSError as e:
+            raise StateSaveError(
+                filename=filename, target_path=str(path), reason=str(e)
+            ) from e
 
     def load_state(self, filename: str) -> tuple[File | None, int]:
         p = Path(filename)
@@ -159,20 +171,19 @@ class LocalStorageManager:
         self.get_state_path(filename).unlink(missing_ok=True)
 
     def verify_size(self, filename: str, expected_size: int) -> bool:
-
         file_path = self.output_dir / filename
 
-        if file_path.is_file():
-            actual_size = file_path.stat().st_size
+        if not file_path.is_file():
+            raise HydraFileNotFoundError(filename=filename, path=str(file_path))
 
-            if expected_size and actual_size != expected_size:
-                err_msg = (
-                    f"Size mismatch for {filename}: "
-                    f"Expected {expected_size} bytes, got {actual_size} bytes."
-                )
-                raise ValueError(err_msg)
-            return True
-        raise OSError(f"File: {filename} not found")
+        actual_size = file_path.stat().st_size
+
+        if expected_size and actual_size != expected_size:
+            raise FileSizeMismatchError(
+                filename=filename, expected=expected_size, actual=actual_size
+            )
+
+        return True
 
     async def verify_file_hash(
         self, filename: str, expected_checksum: str, algorithm: TypeHash
@@ -183,7 +194,7 @@ class LocalStorageManager:
         def _compute_hash(algorithm: TypeHash) -> str:
             filepath = self.output_dir / filename
             if not filepath.exists():
-                raise OSError(f"File: {filename} not found")
+                raise HydraFileNotFoundError(filename=filename, path=str(filepath))
             with filepath.open("rb") as f:
                 digest = hashlib.file_digest(f, algorithm)
                 return digest.hexdigest()
@@ -193,14 +204,13 @@ class LocalStorageManager:
 
         if calculated != expected_checksum:
             filepath = self.output_dir / filename
-            err_msg = (
-                f"CRITICAL: Hash mismatch for {filename}!\n"
-                f"Expected: {algorithm} "
-                f"{expected_checksum}\n"
-                f"Got:      {calculated}"
-            )
             filepath.unlink(missing_ok=True)
-            raise ValueError(err_msg)
+            raise HashMismatchError(
+                filename=filename,
+                algorithm=algorithm,
+                expected=expected_checksum,
+                actual=calculated,
+            )
 
     def get_unique_path(self, file_path: Path) -> Path:
 

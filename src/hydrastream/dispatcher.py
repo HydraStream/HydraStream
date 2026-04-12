@@ -13,8 +13,10 @@ from typing import cast
 from curl_cffi import CurlOpt, Response
 from curl_cffi.requests import RequestsError
 
+from hydrastream.exceptions import DownloadFailedError, HydraError, WorkerScaleDown
+
 from .models import Chunk, HydraContext
-from .monitor import done, format_size, log, update
+from .monitor import LogStatus, done, format_size, log, update
 from .network import stream_chunk, try_scale_up
 
 
@@ -30,96 +32,100 @@ async def telemetry_worker(ctx: HydraContext) -> None:
     TAU = 2.0
     MIN_WINDOW = 1024  # 1 КБ (чтобы не сжечь CPU)
 
-    while True:  # Проверяем глобальный флаг
-        # 1. Ждем пульса от Монитора
-        await ctx.ui.speed.checkpoint_event.wait()
-        ctx.ui.speed.checkpoint_event.clear()
+    while True:
+        try:
+            await ctx.ui.speed.checkpoint_event.wait()
+            ctx.ui.speed.checkpoint_event.clear()
 
-        now = time.monotonic()
-        elapsed = min(1, now - ctx.ui.speed.last_checkpoint_time)
+            now = time.monotonic()
+            elapsed = min(1, now - ctx.ui.speed.last_checkpoint_time)
 
-        if elapsed <= 0:
-            continue  # Защита от деления на ноль при сверхбыстрых всплесках
+            if elapsed <= 0:
+                continue  # Защита от деления на ноль при сверхбыстрых всплесках
 
-        # =========================================================
-        # ФАЗА 1: ЛОГИКА ОГРАНИЧИТЕЛЯ СКОРОСТИ (Global Valve)
-        # =========================================================
-        if ctx.ui.speed.speed_limit:
-            target_time = ctx.ui.speed.bytes_to_check / ctx.ui.speed.speed_limit
+            # =========================================================
+            # ФАЗА 1: ЛОГИКА ОГРАНИЧИТЕЛЯ СКОРОСТИ (Global Valve)
+            # =========================================================
+            if ctx.ui.speed.speed_limit:
+                target_time = ctx.ui.speed.bytes_to_check / ctx.ui.speed.speed_limit
 
-            if elapsed < target_time:
-                sleep_duration = target_time - elapsed
+                if elapsed < target_time:
+                    sleep_duration = target_time - elapsed
 
-                # ЗАКРЫВАЕМ ВЕНТИЛЬ
-                for r in ctx.active_stream:
-                    if r.curl is not None:
-                        r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, 1)
-                await asyncio.sleep(sleep_duration)
-                # ОТКРЫВАЕМ ВЕНТИЛЬ
-                for r in ctx.active_stream:
-                    if r.curl is not None:
-                        r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, 0)
-                # Важно: мы спали! Нужно пересчитать 'now' и 'elapsed'
-                # для Авто-тюнера, чтобы он считал РЕАЛЬНУЮ скорость с учетом паузы.
-                now = time.monotonic()
-                elapsed = now - ctx.ui.speed.last_checkpoint_time
+                    # ЗАКРЫВАЕМ ВЕНТИЛЬ
+                    for r in ctx.active_stream:
+                        if r.curl is not None:
+                            r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, 1)
+                    await asyncio.sleep(sleep_duration)
+                    # ОТКРЫВАЕМ ВЕНТИЛЬ
+                    for r in ctx.active_stream:
+                        if r.curl is not None:
+                            r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, 0)
+                    # Важно: мы спали! Нужно пересчитать 'now' и 'elapsed'
+                    # для Авто-тюнера, чтобы он считал РЕАЛЬНУЮ скорость с учетом паузы.
+                    now = time.monotonic()
+                    elapsed = now - ctx.ui.speed.last_checkpoint_time
 
-                continue
+                    continue
 
-        # =========================================================
-        # ФАЗА 2: АВТО-ТЮНЕР (AIMD Hill Climbing)
-        # =========================================================
-        speed_now = ctx.ui.speed.bytes_to_check / elapsed
+            # =========================================================
+            # ФАЗА 2: АВТО-ТЮНЕР (AIMD Hill Climbing)
+            # =========================================================
+            speed_now = ctx.ui.speed.bytes_to_check / elapsed
 
-        if smoothed_speed == 0.0:
-            smoothed_speed = speed_now
-        else:
-            # Магия: вычисляем вес нового замера на основе физического времени
-            alpha = 1.0 - math.exp(-elapsed / TAU)
-            smoothed_speed = (alpha * speed_now) + ((1.0 - alpha) * smoothed_speed)
+            if smoothed_speed == 0.0:
+                smoothed_speed = speed_now
+            else:
+                # Магия: вычисляем вес нового замера на основе физического времени
+                alpha = 1.0 - math.exp(-elapsed / TAU)
+                smoothed_speed = (alpha * speed_now) + ((1.0 - alpha) * smoothed_speed)
 
-        coef = 1 / speed_now**0.2
-        # Пересчитываем, когда мы хотим проснуться в следующий раз
-        new_bytes_to_check = int(ctx.ui.speed.bytes_to_check * (1 - coef + elapsed))
+            coef = 1 / speed_now**0.2
+            # Пересчитываем, когда мы хотим проснуться в следующий раз
+            new_bytes_to_check = int(ctx.ui.speed.bytes_to_check * (1 - coef + elapsed))
 
-        ctx.ui.speed.bytes_to_check = max(MIN_WINDOW, new_bytes_to_check)
-        # Анализируем результат нашего предыдущего шага
-        if smoothed_speed > prev_speed * 1.05:
-            prev_speed = smoothed_speed
-            # Скорость выросла! Добавляем воркеров (если не уперлись в лимит юзера)
-            if current_limit < ctx.config.threads:
-                current_limit += 1
-                await log(
-                    ctx.ui,
-                    f"Speed increased to {format_size(speed_now)}/s. "
-                    f"Scaling up to {current_limit} workers.",
-                    status="INFO",
-                    throttle_key="scale_up",
-                    throttle_sec=5.0,
-                )
+            ctx.ui.speed.bytes_to_check = max(MIN_WINDOW, new_bytes_to_check)
+            # Анализируем результат нашего предыдущего шага
+            if smoothed_speed > prev_speed * 1.05:
+                prev_speed = smoothed_speed
+                # Скорость выросла! Добавляем воркеров (если не уперлись в лимит юзера)
+                if current_limit < ctx.config.threads:
+                    current_limit += 1
+                    await log(
+                        ctx.ui,
+                        f"Speed increased to {format_size(speed_now)}/s. "
+                        f"Scaling up to {current_limit} workers.",
+                        status=LogStatus.INFO,
+                        throttle_key="scale_up",
+                        throttle_sec=5.0,
+                    )
 
-        elif smoothed_speed < prev_speed * 0.95:
-            prev_speed = smoothed_speed
-            # Скорость резко упала (сеть забилась). Скидываем воркеров.
-            if current_limit > 2:
-                current_limit -= 1
-                await log(
-                    ctx.ui,
-                    f"Network congested. Scaling down to {current_limit} workers.",
-                    status="WARNING",
-                    throttle_key="scale_down",
-                    throttle_sec=5.0,
-                )
+            elif smoothed_speed < prev_speed * 0.95:
+                prev_speed = smoothed_speed
+                # Скорость резко упала (сеть забилась). Скидываем воркеров.
+                if current_limit > 2:
+                    current_limit -= 1
+                    await log(
+                        ctx.ui,
+                        f"Network congested. Scaling down to {current_limit} workers.",
+                        status=LogStatus.WARNING,
+                        throttle_key="scale_down",
+                        throttle_sec=5.0,
+                    )
 
-        # Применяем лимит
-        if ctx.dynamic_limit != current_limit:
-            ctx.dynamic_limit = current_limit
-            # Будим диспетчера только если лимит изменился
-            async with ctx.sync.dynamic_limit:
-                ctx.sync.dynamic_limit.notify_all()
+            # Применяем лимит
+            if ctx.dynamic_limit != current_limit:
+                ctx.dynamic_limit = current_limit
+                # Будим диспетчера только если лимит изменился
+                async with ctx.sync.dynamic_limit:
+                    ctx.sync.dynamic_limit.notify_all()
 
-        # Фиксируем время для следующего круга
-        ctx.ui.speed.last_checkpoint_time = time.monotonic()
+            # Фиксируем время для следующего круга
+            ctx.ui.speed.last_checkpoint_time = time.monotonic()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            await log(ctx.ui, f"Telemetry failed: {e}", status=LogStatus.ERROR)
 
 
 async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
@@ -140,7 +146,7 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
             await log(
                 ctx.ui,
                 f"Verifying Hash checksum for {chunk.file.meta.filename}...",
-                status="INFO",
+                status=LogStatus.INFO,
             )
             await ctx.fs.verify_file_hash(
                 file_obj.meta.filename,
@@ -150,11 +156,11 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
             await log(
                 ctx.ui,
                 f"Integrity confirmed: {chunk.file.meta.filename}",
-                status="SUCCESS",
+                status=LogStatus.SUCCESS,
             )
 
-    except (ValueError, OSError) as ve:
-        await log(ctx.ui, str(ve), status="ERROR")
+    except HydraError as e:
+        await e.report(ctx.ui)
         raise
 
     ctx.fs.close_file(fd_or_conn=file_obj.fd)
@@ -164,8 +170,6 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
     ctx.current_files_id.remove(chunk.file.meta.id)
     async with ctx.sync.current_files:
         ctx.sync.current_files.notify()
-    if not ctx.files:
-        ctx.sync.all_complete.set()
 
 
 async def get_chunk(ctx: HydraContext) -> Chunk | None:
@@ -206,7 +210,7 @@ async def download_worker(ctx: HydraContext, worker_id: int) -> None:
             await process_chunk(ctx, chunk, worker_id)
             await file_done(ctx, chunk)
 
-        except ValueError:
+        except WorkerScaleDown:
             if chunk:
                 await ctx.queues.chunk.put((-1, chunk))
 
@@ -224,12 +228,18 @@ async def download_worker(ctx: HydraContext, worker_id: int) -> None:
                     if status in {400, 401, 403, 404, 410, 416}:
                         await log(
                             ctx.ui,
-                            f"Chunk for {chunk.file.meta.filename} failed permanently "
+                            f"Chunk for {chunk.file.meta.filename} failed permanently"
                             f"(HTTP {status}).",
-                            status="ERROR",
+                            status=LogStatus.ERROR,
                         )
                         chunk.file.is_failed = True
                         ctx.fs.delete_file(chunk.file.meta.filename)
+                        if ctx.stream:
+                            raise DownloadFailedError(
+                                url=chunk.file.meta.url,
+                                status_code=status,
+                                reason=response.reason,
+                            ) from None
 
                     # Остальные ошибки сервера (5xx, 429) — пробуем перекинуть чанк
                     # в очередь
@@ -247,8 +257,13 @@ async def download_worker(ctx: HydraContext, worker_id: int) -> None:
             if chunk:
                 await requeue_chunk(ctx, chunk)
 
+        except HydraError as e:
+            await e.report(ctx.ui)
+            raise
         except Exception as e:
-            await log(ctx.ui, f"Critical Worker Exception: {e!r}", status="CRITICAL")
+            await log(
+                ctx.ui, f"Worker internal crash: {e!r}", status=LogStatus.CRITICAL
+            )
             raise
 
 
@@ -270,7 +285,7 @@ async def requeue_chunk(
                 f"Server does not support partial downloads (Range requests). "
                 f"Cannot resume stream. Aborting."
             )
-            await log(ctx.ui, err_msg, status="CRITICAL")
+            await log(ctx.ui, err_msg, status=LogStatus.CRITICAL)
 
             file_obj.is_failed = True
             return
@@ -279,7 +294,7 @@ async def requeue_chunk(
             ctx.ui,
             f"Connection dropped for {chunk.file.meta.filename}. "
             f"Server does not support resume. Restarting download from 0 bytes.",
-            status="WARNING",
+            status=LogStatus.WARNING,
         )
 
         downloaded_so_far = chunk.current_pos - chunk.start
@@ -330,7 +345,7 @@ async def disk_process_chunk(
                     if random.random() < 0.1:
                         await try_scale_up(ctx.net.rate_limiter)
                 if ctx.dynamic_limit <= worker_id:
-                    raise ValueError
+                    raise WorkerScaleDown
 
         finally:
             ctx.active_stream.remove(r)
@@ -359,7 +374,7 @@ async def stream_process_chunk(
                     chunk.current_pos = chunk.current_pos + len(buffer)
                     buffer = bytearray()
                 if ctx.dynamic_limit <= worker_id:
-                    raise ValueError
+                    raise WorkerScaleDown
             await ctx.queues.stream.put((chunk.current_pos, buffer))
             chunk.current_pos = chunk.current_pos + len(buffer)
             buffer = bytearray()
