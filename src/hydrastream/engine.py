@@ -14,11 +14,11 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TypeVarTuple, Unpack
 
-from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError
+from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
 
 from .dispatcher import download_worker, telemetry_worker
 from .models import Checksum, File, HydraContext, TypeHash
-from .monitor import LogStatus, done, log, print_dry_run_report, ui_start, ui_stop
+from .monitor import done, log, print_dry_run_report, ui_start, ui_stop
 from .producer import chunk_producer, dispatch_chunks
 
 Ts = TypeVarTuple("Ts")
@@ -36,16 +36,23 @@ async def delayed_task(
 
 async def autosave(ctx: HydraContext, interval: float) -> None:
     loop = asyncio.get_running_loop()
-    while True:
+
+    while not ctx.sync.all_complete.is_set():
         try:
-            await asyncio.sleep(interval)
-            await loop.run_in_executor(None, save_all_states, ctx, ctx.files)
+            async with asyncio.timeout(interval):
+                await ctx.sync.all_complete.wait()
+
+            break
+        except TimeoutError:
+            try:
+                await loop.run_in_executor(None, save_all_states, ctx, ctx.files)
+            except Exception as e:
+                await log(
+                    ctx.ui, f"Auto-save operation failed: {e}", status=LogStatus.ERROR
+                )
+
         except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            await log(
-                ctx.ui, f"Auto-save operation failed: {e}", status=LogStatus.ERROR
-            )
+            break
 
 
 async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
@@ -167,8 +174,13 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
         ctx.current_files_id.remove(file_id)
         async with ctx.sync.current_files:
             ctx.sync.current_files.notify()
-        if ctx.stream and not ctx.files:
+        if not ctx.files:
             await ctx.queues.file_discovery.put(-1)
+            ctx.sync.all_complete.set()
+            ctx.ui.speed.checkpoint_event.set()
+            ctx.dynamic_limit = sys.maxsize
+            async with ctx.sync.dynamic_limit:
+                ctx.sync.dynamic_limit.notify_all()
 
 
 async def create_tasks(
@@ -254,7 +266,7 @@ async def dispatch_links(
 
 async def session_killer(ctx: HydraContext) -> None:
     try:
-        await asyncio.Event().wait()
+        await ctx.sync.all_complete.wait()
     except asyncio.CancelledError:
         await ctx.net.close()
         raise
@@ -355,7 +367,7 @@ def verify_stream(
         )
 
     calculated = hasher.hexdigest()
-    if calculated != expected_checksum:
+    if calculated != expected_checksum.value:
         raise HashMismatchError(
             filename=filename,
             algorithm=expected_checksum.algorithm,

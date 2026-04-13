@@ -1,11 +1,12 @@
+from __future__ import annotations
+
 import uuid
-from dataclasses import asdict, dataclass, field
-from enum import IntEnum
+from dataclasses import dataclass, field
+from enum import IntEnum, StrEnum
 from pathlib import Path
 from typing import Any
 
-from hydrastream.models import UIState
-from hydrastream.monitor import LogStatus, format_size, log
+from hydrastream.utils import format_size
 
 
 class ExitCode(IntEnum):
@@ -15,6 +16,15 @@ class ExitCode(IntEnum):
     HASH_MISMATCH = 3  # Файл скачался, но MD5 не совпал
     NETWORK_ERROR = 4  # Отвалился интернет или сервер выдает 404/503
     INTERRUPTED = 130  # Пользователь нажал Ctrl+C
+
+
+class LogStatus(StrEnum):
+    SUCCESS = "SUCCESS"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+    INTERRUPT = "INTERRUPT"
 
 
 @dataclass(kw_only=True)
@@ -33,24 +43,6 @@ class HydraError(Exception):
             self.formatted_msg = self.message_tpl
 
         super().__init__(f"[{self.error_id}] {self.formatted_msg}")
-
-    async def report(self, ctx: UIState, **log_extra: Any) -> None:  # noqa: ANN401
-        """
-        Передаем данные ошибки в логгер.
-        asdict() превратит поля датакласса в ключи для JSON-лога.
-        """
-        # Убираем системные поля, которые не нужны в JSON-атрибутах
-        data = asdict(self)
-        for key in ["exit_code", "log_status", "message_tpl", "formatted_msg"]:
-            data.pop(key, None)
-
-        await log(
-            ctx,
-            f"[{self.error_id}] {self.formatted_msg}",
-            status=self.log_status,
-            **data,  # Все поля (filename, required и т.д.) попадут в JSON!
-            **log_extra,  # Дополнительные флаги типа throttle_key
-        )
 
 
 @dataclass(kw_only=True)

@@ -8,10 +8,10 @@ import sys
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
-from hydrastream.exceptions import HydraError, SystemContextError
+from hydrastream.exceptions import LogStatus, SystemContextError
 
 from .models import Checksum, File, FileMeta, HydraContext, TypeHash
-from .monitor import LogStatus, add_file, done, log, update
+from .monitor import add_file, done, log, update
 from .network import extract_filename, safe_request, stream_chunk
 from .providers import ProviderRouter
 
@@ -72,16 +72,12 @@ async def chunk_producer(  # noqa
 
         except TimeoutError:
             await requeue_chunk(ctx, id, url, checksum)
-        except HydraError as e:
-            await e.report(ctx.ui)
-            raise
         except OSError as e:
             err = SystemContextError(
                 operation="task creation",
                 original_error=str(e),
                 path=str(ctx.config.output_dir),  # Добавляем контекст пути
             )
-            await err.report(ctx.ui)
             raise err from e
 
         except Exception as e:

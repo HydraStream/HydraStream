@@ -18,6 +18,8 @@ from curl_cffi import CurlError, Headers, Response
 from curl_cffi.requests import RequestsError
 from curl_cffi.requests.session import HttpMethod, RequestParams
 
+from hydrastream.exceptions import LogStatus
+
 from .models import AMIDState, NetworkState
 from .monitor import log
 
@@ -44,7 +46,7 @@ async def report_429(
                 f"!!! CIRCUIT BREAKER !!!"
                 f"Server requested {break_duration:.0f}s pause. "
                 f"All workers sleeping...",
-                LogStatus="WARNING",
+                status=LogStatus.WARNING,
             )
             return
 
@@ -57,7 +59,7 @@ async def report_429(
             await log(
                 ctx.monitor,
                 f"429 detected. Throttling to {new_rps} RPS",
-                LogStatus="WARNING",
+                status=LogStatus.WARNING,
             )
 
 
@@ -108,7 +110,7 @@ async def _evaluate_failure(
             await log(
                 ctx.monitor,
                 f"Fatal HTTP error {response.status_code} for {url}",
-                LogStatus="ERROR",
+                status=LogStatus.ERROR,
             )
             return None
 
@@ -125,7 +127,7 @@ async def _evaluate_failure(
             ctx.monitor,
             f"Attempt {attempt} failed ({response.status_code}) for {url}. "
             f"Retrying in {delay:.2f}s...",
-            LogStatus="WARNING",
+            status=LogStatus.WARNING,
             throttle_key="net_slow",
         )
         return delay
@@ -142,7 +144,7 @@ async def _evaluate_failure(
             await log(
                 ctx.monitor,
                 f"Network issue ({err_name}) on {url}. Retrying in {delay:.2f}s...",
-                LogStatus="WARNING",
+                status=LogStatus.WARNING,
                 throttle_key="net_drop",
             )
             return delay
@@ -150,7 +152,7 @@ async def _evaluate_failure(
         await log(
             ctx.monitor,
             f"Unrecoverable request error for {url}: {exc}",
-            LogStatus="ERROR",
+            status=LogStatus.ERROR,
         )
         return None
 

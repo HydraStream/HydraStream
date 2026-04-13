@@ -11,7 +11,13 @@ from typing import Annotated, Any
 import typer
 
 from hydrastream.__init__ import __version__
-from hydrastream.exceptions import HydraError, InvalidParameterError, ValidationError
+from hydrastream.exceptions import (
+    ExitCode,
+    HydraError,
+    InvalidParameterError,
+    LogStatus,
+    ValidationError,
+)
 from hydrastream.facade import HydraClient
 from hydrastream.models import (
     Checksum,
@@ -22,7 +28,7 @@ from hydrastream.models import (
     TypeHash,
     UIState,
 )
-from hydrastream.monitor import LogStatus, log, ui_start, ui_stop
+from hydrastream.monitor import log, log_start, log_stop, report
 
 
 def load_user_config() -> dict:
@@ -55,7 +61,7 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-async def async_main(
+async def async_main(  # noqa: C901, PLR0912
     links: list[str] | None,
     input_file: str | None,
     stream: bool,
@@ -108,7 +114,7 @@ async def async_main(
             ),
             speed=SpeedLimiterState(speed_limit=speed_limit),
         )
-        await ui_start(ui)
+        await log_start(ui)
 
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] = {}
 
@@ -145,32 +151,41 @@ async def async_main(
                 is_terminal = sys.__stdout__.isatty()
 
                 if is_terminal:
-                    await InvalidParameterError(
-                        param="stream",
-                        reason=(
-                            "Warning: You are running in --stream mode but output "
-                            "is not redirected!\n"
-                            "The downloaded binary data will be discarded."
-                        ),
-                    ).report(ui)
-
-                    if not expected_checksums:
-                        await ValidationError(
+                    await report(
+                        ui,
+                        InvalidParameterError(
                             param="stream",
                             reason=(
-                                "Please use a pipe (e.g., '| zcat') or redirect to "
-                                "a file (e.g., '> file.gz').\n"
-                                "Aborting to save bandwidth."
+                                "Warning: You are running in --stream mode but output "
+                                "is not redirected!\n"
+                                "The downloaded binary data will be discarded."
                             ),
-                        ).report(ui)
-
-                    await InvalidParameterError(
-                        param="stream",
-                        reason=(
-                            "Proceeding in 'Verification Only' mode "
-                            "since --hash is provided."
                         ),
-                    ).report(ui)
+                    )
+
+                    if not expected_checksums:
+                        await report(
+                            ui,
+                            ValidationError(
+                                param="stream",
+                                reason=(
+                                    "Please use a pipe (e.g., '| zcat') or redirect to "
+                                    "a file (e.g., '> file.gz').\n"
+                                    "Aborting to save bandwidth."
+                                ),
+                            ),
+                        )
+
+                        await report(
+                            ui,
+                            InvalidParameterError(
+                                param="stream",
+                                reason=(
+                                    "Proceeding in 'Verification Only' mode "
+                                    "since --hash is provided."
+                                ),
+                            ),
+                        )
 
                 async for _, file_gen in await loader.stream(
                     links, input_file, expected_checksums
@@ -186,18 +201,24 @@ async def async_main(
             else:
                 await loader.run(links, input_file, expected_checksums)
 
+                # sys.exit(ExitCode.SUCCESS)
+
     except (Exception, ExceptionGroup) as e:
+        raise
         await handle_crash(ui, e)
+        codes = []
         if isinstance(e, ExceptionGroup):
             codes = [
                 err.exit_code for err in e.exceptions if isinstance(err, HydraError)
             ]
-            sys.exit(max(codes) if codes else 1)
-        else:
-            sys.exit(getattr(e, "exit_code", 1))
+        elif isinstance(e, HydraError):
+            codes = [e.exit_code]
+
+        exit_code = max(codes) if codes else ExitCode.GENERAL_ERROR
+        sys.exit(exit_code)
 
     finally:
-        await ui_stop(ui)
+        await log_stop(ui)
 
 
 async def handle_crash(ui: UIState, error: Exception | ExceptionGroup) -> None:
@@ -210,8 +231,7 @@ async def handle_crash(ui: UIState, error: Exception | ExceptionGroup) -> None:
         for e in error.exceptions:
             await handle_crash(ui, e)
     elif isinstance(error, HydraError):
-        await error.report(ui)
-    else:
+        await report(ui, error)
         await log(ui, f"FATAL ERROR: {error!r}", status=LogStatus.CRITICAL)
 
 

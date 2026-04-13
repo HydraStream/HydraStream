@@ -12,6 +12,7 @@ from typing import Any, Self, TextIO
 from urllib.parse import urlparse
 
 from hydrastream.exceptions import FileReadError, InvalidParameterError, ValidationError
+from hydrastream.monitor import log_start, log_stop, report
 
 from .engine import run_downloads, stream_all, teardown_engine
 from .interfaces import LocalStorageManager, StorageBackend
@@ -65,8 +66,10 @@ class HydraClient:
                 client_kwargs=client_kwargs,
             )
         if ui:
+            self.ui_init = False
             self.ui = ui
         else:
+            self.ui_init = True
             self.ui = UIState(
                 display=DisplayConfig(
                     no_ui=self.config.no_ui,
@@ -85,6 +88,8 @@ class HydraClient:
             self.fs = LocalStorageManager(output_dir=Path(self.config.output_dir))
 
     async def __aenter__(self) -> Self:
+        if self.ui_init:
+            await log_start(self.ui)
         return self
 
     async def __aexit__(
@@ -96,6 +101,8 @@ class HydraClient:
         if self.state is not None:
             loop = asyncio.get_running_loop()
             await teardown_engine(self.state, loop)
+        if self.ui_init:
+            await log_stop(self.ui)
 
     async def run(
         self,
@@ -207,9 +214,12 @@ async def parse_urls(
             if is_valid_url(url):
                 all_links.append(url)
             else:
-                await InvalidParameterError(
-                    param="url", value=url, reason="Invalid HTTP/HTTPS format"
-                ).report(ctx)
+                await report(
+                    ctx,
+                    InvalidParameterError(
+                        param="url", value=url, reason="Invalid HTTP/HTTPS format"
+                    ),
+                )
 
     if filepath:
         with get_input_stream(filepath) as stream:
@@ -222,8 +232,13 @@ async def parse_urls(
                 if is_valid_url(url):
                     all_links.append(url)
                 else:
-                    await InvalidParameterError(
-                        param="file_link", value=url, reason="Invalid URL in input file"
-                    ).report(ctx)
+                    await report(
+                        ctx,
+                        InvalidParameterError(
+                            param="file_link",
+                            value=url,
+                            reason="Invalid URL in input file",
+                        ),
+                    )
 
     return list(dict.fromkeys(all_links))

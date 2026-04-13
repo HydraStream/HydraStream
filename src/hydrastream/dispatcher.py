@@ -13,10 +13,16 @@ from typing import cast
 from curl_cffi import CurlOpt, Response
 from curl_cffi.requests import RequestsError
 
-from hydrastream.exceptions import DownloadFailedError, HydraError, WorkerScaleDown
+from hydrastream.exceptions import (
+    DownloadFailedError,
+    HydraError,
+    LogStatus,
+    WorkerScaleDown,
+)
+from hydrastream.utils import format_size
 
 from .models import Chunk, HydraContext
-from .monitor import LogStatus, done, format_size, log, update
+from .monitor import done, log, update
 from .network import stream_chunk, try_scale_up
 
 
@@ -29,11 +35,17 @@ async def telemetry_worker(ctx: HydraContext) -> None:
     current_limit = 2
 
     # Безопасные границы для адаптивного окна
-    TAU = 2.0
-    MIN_WINDOW = 1024  # 1 КБ (чтобы не сжечь CPU)
+    tau = 2.0
+    min_window = 1024  # 1 КБ (чтобы не сжечь CPU)
 
-    while True:
+    while not ctx.sync.all_complete.is_set():
         try:
+            # Ждем пульса от Монитора (или пинка перед смертью)
+            await ctx.ui.speed.checkpoint_event.wait()
+
+            # Сразу проверяем: а не нажали ли рубильник пока мы спали?
+            if ctx.sync.all_complete.is_set():
+                break  # Выходим из цикла! Функция завершается, TaskGroup счастлив.
             await ctx.ui.speed.checkpoint_event.wait()
             ctx.ui.speed.checkpoint_event.clear()
 
@@ -77,14 +89,14 @@ async def telemetry_worker(ctx: HydraContext) -> None:
                 smoothed_speed = speed_now
             else:
                 # Магия: вычисляем вес нового замера на основе физического времени
-                alpha = 1.0 - math.exp(-elapsed / TAU)
+                alpha = 1.0 - math.exp(-elapsed / tau)
                 smoothed_speed = (alpha * speed_now) + ((1.0 - alpha) * smoothed_speed)
 
             coef = 1 / speed_now**0.2
             # Пересчитываем, когда мы хотим проснуться в следующий раз
             new_bytes_to_check = int(ctx.ui.speed.bytes_to_check * (1 - coef + elapsed))
 
-            ctx.ui.speed.bytes_to_check = max(MIN_WINDOW, new_bytes_to_check)
+            ctx.ui.speed.bytes_to_check = max(min_window, new_bytes_to_check)
             # Анализируем результат нашего предыдущего шага
             if smoothed_speed > prev_speed * 1.05:
                 prev_speed = smoothed_speed
@@ -159,8 +171,7 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
                 status=LogStatus.SUCCESS,
             )
 
-    except HydraError as e:
-        await e.report(ctx.ui)
+    except HydraError:
         raise
 
     ctx.fs.close_file(fd_or_conn=file_obj.fd)
@@ -171,6 +182,13 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
     async with ctx.sync.current_files:
         ctx.sync.current_files.notify()
 
+    if not ctx.files:
+        ctx.sync.all_complete.set()
+        ctx.ui.speed.checkpoint_event.set()
+        ctx.dynamic_limit = sys.maxsize
+        async with ctx.sync.dynamic_limit:
+            ctx.sync.dynamic_limit.notify_all()
+
 
 async def get_chunk(ctx: HydraContext) -> Chunk | None:
     if ctx.stream:
@@ -180,6 +198,7 @@ async def get_chunk(ctx: HydraContext) -> Chunk | None:
     chunk = cast(Chunk, chunk)
     if _ == sys.maxsize:
         raise asyncio.CancelledError
+
     file_obj = chunk.file
     if not file_obj or file_obj.is_failed:
         return None
@@ -257,9 +276,6 @@ async def download_worker(ctx: HydraContext, worker_id: int) -> None:
             if chunk:
                 await requeue_chunk(ctx, chunk)
 
-        except HydraError as e:
-            await e.report(ctx.ui)
-            raise
         except Exception as e:
             await log(
                 ctx.ui, f"Worker internal crash: {e!r}", status=LogStatus.CRITICAL

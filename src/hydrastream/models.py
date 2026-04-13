@@ -3,7 +3,6 @@
 
 import asyncio
 import contextlib
-import re
 import sys
 import typing
 import weakref
@@ -310,6 +309,7 @@ class ProgressState:
 class LogState:
     """Всё, что касается записи логов на жесткий диск."""
 
+    is_running: bool = False
     log_file: Path
     log_throttle: dict[str, float] = field(default_factory=dict[str, float])
     log_fd: typing.TextIO | None = field(default=None, init=False, repr=False)
@@ -342,7 +342,7 @@ class SpeedLimiterState:
     bytes_to_check: int = field(init=False)
     prev_bytes: int = 0
     last_checkpoint_time: float = 0.0
-    target_time: float = field(init=False)
+    target_time: float = 0.0
 
     limit_event: asyncio.Event = field(default_factory=asyncio.Event)
     checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -382,7 +382,7 @@ class RichUIState:
 
 @entity
 class UIState:
-    is_running: bool = True
+    is_running: bool = False
     display: DisplayConfig
     progress: ProgressState = field(default_factory=ProgressState)
     log: LogState
@@ -506,20 +506,6 @@ def validate_links(links: list[str] | None) -> None:
     return
 
 
-def validate_hash_format(value: str | None) -> None:
-    if value is None:
-        return
-    clean_hash = value.strip().lower()
-
-    if not clean_hash:
-        raise ValidationError(param="hash", value="", reason="Hash cannot be empty")
-    if not re.fullmatch(r"[0-9a-f]+", clean_hash):
-        raise ValidationError(
-            param="hash", value=value, reason="Should only contain hex (0-9, a-f)"
-        )
-    return
-
-
 @value_object
 class HydraConfig:
     threads: int = 128
@@ -597,6 +583,7 @@ class SyncSet:
     current_files: asyncio.Condition = field(default_factory=asyncio.Condition)
     chunk_from_future: asyncio.Condition = field(default_factory=asyncio.Condition)
     dynamic_limit: asyncio.Condition = field(default_factory=asyncio.Condition)
+    all_complete: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @entity
@@ -627,7 +614,6 @@ class HydraContext:
     def __post_init__(self) -> None:
         # Инициализируем UI, собирая его из настроек конфига
         self.ui = UIState(
-            is_running=not self.is_stopping,
             display=DisplayConfig(
                 no_ui=self.config.no_ui,
                 quiet=self.config.quiet,

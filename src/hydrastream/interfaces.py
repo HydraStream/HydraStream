@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from hydrastream.exceptions import (
+from .exceptions import (
     FileSizeMismatchError,
     HashMismatchError,
     HydraFileNotFoundError,

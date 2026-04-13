@@ -5,9 +5,10 @@ import asyncio
 import shutil
 import sys
 import time
+from dataclasses import asdict
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import orjson
 from rich.console import Group
@@ -30,18 +31,9 @@ from rich.rule import Rule
 from rich.table import Column, Table
 from rich.text import Text
 
-from hydrastream.exceptions import LogFileError
-
+from .exceptions import HydraError, LogFileError, LogStatus
 from .models import File, UIState
-
-
-class LogStatus(StrEnum):
-    SUCCESS = "SUCCESS"
-    INFO = "INFO"
-    WARNING = "WARNING"
-    ERROR = "ERROR"
-    CRITICAL = "CRITICAL"
-    INTERRUPT = "INTERRUPT"
+from .utils import format_size
 
 
 def truncate_filename(name: str, w: int = 30) -> str:
@@ -84,6 +76,25 @@ async def date_print(ctx: UIState) -> None:
     if not (ctx.display.no_ui or ctx.display.quiet):
         ctx.rich.console.print(Rule(date_header))
     await log(ctx, f"--- {current_date} ---")
+
+
+async def report(ctx: UIState, error: HydraError, **log_extra: Any) -> None:  # noqa: ANN401
+    """
+    Передаем данные ошибки в логгер.
+    asdict() превратит поля датакласса в ключи для JSON-лога.
+    """
+    # Убираем системные поля, которые не нужны в JSON-атрибутах
+    data = asdict(error)
+    for key in ["exit_code", "log_status", "message_tpl", "formatted_msg"]:
+        data.pop(key, None)
+
+    await log(
+        ctx,
+        f"[{error.error_id}] {error.formatted_msg}",
+        status=error.log_status,
+        **data,  # Все поля (filename, required и т.д.) попадут в JSON!
+        **log_extra,  # Дополнительные флаги типа throttle_key
+    )
 
 
 def formatting_log(
@@ -294,7 +305,7 @@ def make_panel(ctx: UIState) -> Panel | str:
     if not ctx.rich.progress:
         return ""
 
-    if not ctx.rich.tasks and len(ctx.rich.tasks) == 0:
+    if not ctx.rich.tasks and ctx.is_running:
         return ""
 
     elapsed = time.monotonic() - ctx.progress.start_time
@@ -500,16 +511,10 @@ async def print_dry_run_report(
             )
 
 
-def format_size(size_bytes: float) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(size_bytes) < 1024:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.2f} PB"
-
-
 async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
+    ctx.is_running = False
     if ctx.rich.live:
+        ctx.rich.live.refresh()
         ctx.rich.live.stop()
         if ctx.rich.refresh:
             ctx.rich.refresh.cancel()
@@ -546,21 +551,13 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
 
 
 async def ui_start(ctx: UIState) -> None:
+    if ctx.is_running:
+        return
+
+    ctx.is_running = True
     # 1. ОТКРЫВАЕМ ФАЙЛ ЛОГОВ И ЗАПУСКАЕМ ВОРКЕРА
     if ctx.log.log_file:
-        try:
-            # Открываем в режиме Append (дозапись)
-            ctx.log.log_fd = ctx.log.log_file.open("a", encoding="utf-8")
-            ctx.log.log_task = asyncio.create_task(log_worker(ctx))
-        except OSError as e:
-            ctx.log.log_fd = None
-
-            err = LogFileError(path=str(ctx.log.log_file), original_err=str(e))
-            await log(
-                ctx,
-                f"[bold yellow]LOGGING DISABLED:[/] {err.formatted_msg}",
-                status=LogStatus.WARNING,
-            )
+        await log_start(ctx)
 
     if not (ctx.display.no_ui or ctx.display.quiet):
         ctx.rich.progress = Progress(
@@ -605,13 +602,37 @@ async def ui_stop(ctx: UIState) -> None:
     await log(ctx, "--- Session Finished ---")
 
     # 2. КОРРЕКТНО ГАСИМ ЛОГГЕР
-    if ctx.log.log_task:
-        # Отправляем ядовитую пилюлю
-        ctx.log.log_queue.put_nowait(None)
-        # Ждем, пока логгер допишет все оставшиеся в очереди строки на диск
-        await ctx.log.log_task
+    await log_stop(ctx)
 
     # 3. ЗАКРЫВАЕМ ФАЙЛОВЫЙ ДЕСКРИПТОР
     if ctx.log.log_fd:
         ctx.log.log_fd.close()
         ctx.log.log_fd = None
+
+
+async def log_start(ctx: UIState) -> None:
+    """Запускает фонового воркера (вызывать внутри async_main)"""
+    if ctx.log.is_running:
+        return
+
+    ctx.log.is_running = True
+
+    try:
+        ctx.log.safe_init()
+        ctx.log.log_fd = ctx.log.log_file.open("a", encoding="utf-8")
+        ctx.log.log_task = asyncio.create_task(log_worker(ctx))
+    except OSError as e:
+        ctx.log.log_fd = None
+
+        err = LogFileError(path=str(ctx.log.log_file), original_err=str(e))
+        await log(
+            ctx,
+            f"[bold yellow]LOGGING DISABLED:[/] {err.formatted_msg}",
+            status=LogStatus.WARNING,
+        )
+
+
+async def log_stop(ctx: UIState) -> None:
+    if ctx.log.log_task:
+        ctx.log.log_queue.put_nowait(None)
+        await ctx.log.log_task
