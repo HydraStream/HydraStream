@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import sys
@@ -10,6 +12,7 @@ from collections import defaultdict
 from dataclasses import InitVar, dataclass, field, replace
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Any,
     Literal,
     Self,
@@ -45,7 +48,10 @@ from hydrastream.exceptions import (
     ValidationError,
 )
 
-from .interfaces import StorageBackend
+from .interfaces import HashProvider, StorageBackend
+
+if TYPE_CHECKING:
+    from hydrastream.providers import ProviderRouter
 
 TypeHash = Literal[
     "md5",
@@ -77,12 +83,6 @@ class BaseSessionParams(TypedDict, total=False):
     curl_options: dict[CurlOpt, int] | None
 
 
-DEFAULT_OPTIONS: BaseSessionParams = {
-    "impersonate": "chrome120",
-    "timeout": 30.0,
-}
-
-
 _T = TypeVar("_T")
 
 
@@ -106,11 +106,14 @@ class Chunk:
     current_pos: int
     start: int = field(compare=False)
     end: int = field(compare=False)
-    _file_ref: weakref.ReferenceType["File"] = field(repr=False, compare=False)
+    _file_ref: weakref.ReferenceType[File] | None = field(
+        repr=False, compare=False, default=None
+    )
 
     @property
-    def file(self) -> "File":
-        obj = self._file_ref()
+    def file(self) -> File:
+        if self._file_ref:
+            obj = self._file_ref()
         if obj is None:
             # Выбрасываем структурированную ошибку вместо безликого RuntimeError
             raise OrphanedChunkError(start_pos=self.start, end_pos=self.end)
@@ -269,7 +272,12 @@ class File:
     @classmethod
     def from_json(cls, content: bytes) -> Self:
         data = orjson.loads(content)
-        meta = FileMeta(**data.pop("meta"))
+        meta = data.pop("meta")
+        checksum_data = meta.get("expected_checksum")
+        if isinstance(checksum_data, dict):
+            meta["expected_checksum"] = Checksum(**checksum_data)
+
+        meta = FileMeta(**meta)
         chunks_data = data.pop("chunks", [])
 
         file_obj = cls(meta=meta, **data)
@@ -290,6 +298,7 @@ class DisplayConfig:
     dry_run: bool = False
     json_logs: bool = False
     verify: bool = True
+    debug: bool = False
 
 
 @entity
@@ -415,6 +424,7 @@ class AMIDState:
 class NetworkState:
     threads: int
     monitor: UIState
+    impersonate: BrowserTypeLiteral
     client_kwargs: dict[str, Any] | None = None
     max_retries: int = 3
 
@@ -424,16 +434,18 @@ class NetworkState:
     def __post_init__(self) -> None:
         self.rate_limiter = AMIDState(max_rps=self.threads * 2, monitor=self.monitor)
 
-        options = cast(
-            dict[str, Any], {**DEFAULT_OPTIONS, **(self.client_kwargs or {})}
-        )
+        options = cast(dict[str, Any], self.client_kwargs or {}).copy()
+
         user_headers = options.pop("headers", None)
         headers_obj = Headers(user_headers)
         headers_obj.setdefault("Accept-Encoding", "identity")
         headers_obj.setdefault("Connection", "keep-alive")
+        options["headers"] = headers_obj
+        options.setdefault("max_clients", self.threads)
+        options.setdefault("impersonate", self.impersonate)
+        options.setdefault("timeout", 30.0)
 
         self.client = AsyncSession(
-            max_clients=self.threads,
             **options,
         )
 
@@ -503,7 +515,16 @@ def validate_links(links: list[str] | None) -> None:
             raise ValidationError(
                 param="link", value=url, reason="Only HTTP/HTTPS are supported"
             )
-    return
+
+
+def validate_browser(value: str) -> None:
+    allowed = get_args(BrowserTypeLiteral)
+    if value not in allowed:
+        raise ValidationError(
+            param="browser",
+            value=value,
+            reason=f"Unsupported browser. Supported: {', '.join(allowed)}",
+        )
 
 
 @value_object
@@ -516,11 +537,15 @@ class HydraConfig:
     dry_run: bool = False
     json_logs: bool = False
     verify: bool = True
+    impersonate: BrowserTypeLiteral = "chrome120"
+    debug: bool = False
 
     min_chunk_size_mb: InitVar[int] = 1
     max_stream_chunk_size_mb: InitVar[int] = 5
     stream_buffer_size_mb: InitVar[int | None] = None
     client_kwargs: dict[str, Any] | None = None
+
+    custom_providers: dict[str, HashProvider] | None = None
 
     MIN_CHUNK: int = field(init=False)  # 1MB
     STREAM_CHUNK_SIZE: int = field(init=False)  # 5MB
@@ -538,6 +563,7 @@ class HydraConfig:
         validate_positive_int("min_chunk_size_mb", min_chunk_size_mb)
         validate_positive_int("max_stream_chunk_size_mb", max_stream_chunk_size_mb)
         validate_positive_int("stream_buffer_size_mb", stream_buffer_size_mb)
+        validate_browser(self.impersonate)
 
         object.__setattr__(self, "MIN_CHUNK", min_chunk_size_mb * 1024**2)
         object.__setattr__(
@@ -589,7 +615,9 @@ class SyncSet:
 @entity
 class HydraContext:
     config: HydraConfig
+
     fs: StorageBackend
+    provider: ProviderRouter
 
     is_stopping: bool = False
     stream: bool = False
@@ -628,5 +656,6 @@ class HydraContext:
         self.net = NetworkState(
             threads=self.config.threads,
             monitor=self.ui,
+            impersonate=self.config.impersonate,
             client_kwargs=self.config.client_kwargs,
         )

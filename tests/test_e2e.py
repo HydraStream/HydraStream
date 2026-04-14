@@ -208,7 +208,7 @@ def cli_fuzz_strategy(draw) -> dict[str, Any]:
 
 @given(data=cli_fuzz_strategy())
 @settings(
-    max_examples=5,
+    max_examples=20,
     deadline=None,
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
@@ -252,6 +252,8 @@ def test_hypothesis_nuclear_fuzzer(
         final_args.extend(["--input", str(urls_txt)])
     # 3. УДАР! (Запускаем CLI)
     num_file = len(list(out_dir.glob("*")))
+    final_args.append("--debug")
+
     print(final_args)
     result = runner.invoke(app, final_args)
 
@@ -284,6 +286,6 @@ def test_hypothesis_nuclear_fuzzer(
     if not data["is_stream"] and not data["is_dry_run"] and result.exit_code == 0:
         # Количество скачанных файлов должно совпадать с количеством уникальных ссылок
         num = 1 if data["existing_copies"] else 0
-        assert len(leftovers) <= len(data["paths"]) + num_file, (
+        assert len(leftovers) == len(data["paths"]) + num_file, (
             f"Файлы не скачались! Лог терминала:\n{result.stdout}"
         )

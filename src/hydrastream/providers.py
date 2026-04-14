@@ -3,17 +3,11 @@
 
 import base64
 import binascii
-from typing import Protocol
+
+from hydrastream.interfaces import HashProvider
 
 from .models import Checksum, NetworkState
 from .network import safe_request
-
-
-# 1. КОНТРАКТ: Любой класс, у которого есть метод resolve, считается Провайдером!
-class HashProvider(Protocol):
-    async def resolve(
-        self, ctx: NetworkState, url: str, filename: str
-    ) -> Checksum | None: ...
 
 
 # 2. КОНКРЕТНЫЙ ПРОВАЙДЕР ДЛЯ NCBI

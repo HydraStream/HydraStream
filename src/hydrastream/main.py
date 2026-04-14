@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from curl_cffi import BrowserTypeLiteral
 
 from hydrastream.__init__ import __version__
 from hydrastream.exceptions import (
@@ -78,6 +79,8 @@ async def async_main(  # noqa: C901, PLR0912
     max_stream_chunk_size_mb: int,
     stream_buffer_size_mb: int | None,
     speed_limit: float | None,
+    impersonate: BrowserTypeLiteral,
+    debug: bool,
 ) -> None:
     """
     Core asynchronous orchestrator for downloading or streaming files.
@@ -143,6 +146,8 @@ async def async_main(  # noqa: C901, PLR0912
             json_logs=json_logs,
             verify=verify,
             client_kwargs=None,
+            impersonate=impersonate,
+            debug=debug,
         )
 
         async with HydraClient(config=config, ui=ui) as loader:
@@ -201,10 +206,11 @@ async def async_main(  # noqa: C901, PLR0912
             else:
                 await loader.run(links, input_file, expected_checksums)
 
-                # sys.exit(ExitCode.SUCCESS)
+                sys.exit(ExitCode.SUCCESS)
 
     except (Exception, ExceptionGroup) as e:
-        raise
+        if debug:
+            raise
         await handle_crash(ui, e)
         codes = []
         if isinstance(e, ExceptionGroup):
@@ -380,10 +386,20 @@ def cli(
             default_factory=partial(get_cfg, "verify", True),
         ),
     ],
+    browser: Annotated[
+        BrowserTypeLiteral,
+        typer.Option(
+            "-B",
+            "--browser",
+            help="Browser TLS fingerprint to impersonate (e.g., chrome120, safari153).",
+            default_factory=partial(get_cfg, "browser", "chrome120"),
+        ),
+    ],
     version: Annotated[
         bool | None,
         typer.Option("--version", "-v", callback=version_callback, is_eager=True),
     ] = None,
+    debug: Annotated[bool, typer.Option("--debug", "-d")] = False,
 ) -> None:
     """
     HydraStream: Concurrent HTTP downloader with in-memory stream reordering
@@ -395,6 +411,8 @@ def cli(
 
             uvloop.install()
         except ImportError:
+            if debug:
+                raise
             pass
 
     if threads is None:
@@ -422,6 +440,8 @@ def cli(
             stream_buffer_size_mb=stream_buffer_size_mb,
             json_logs=json_logs,
             verify=verify,
+            impersonate=browser,
+            debug=debug,
         )
     )
 

@@ -195,6 +195,8 @@ async def log_worker(ctx: UIState) -> None:
             ctx.log.log_fd.write(f"{msg}\n")
             ctx.log.log_fd.flush()  # Гарантируем, что строка сразу упала на диск
         except OSError as e:
+            if ctx.display.debug:
+                raise
             err = LogFileError(path=str(ctx.log.log_file), original_err=str(e))
             await log(ctx, f"{err.formatted_msg}", status=LogStatus.WARNING)
 
@@ -268,6 +270,8 @@ async def refresh_loop(ctx: UIState) -> None:
 
                 await asyncio.sleep(ctx.rich.renewal_rate)
             except Exception as e:
+                if ctx.display.debug:
+                    raise
                 await log(ctx, f"UI Refresh Error: {e!r}", status=LogStatus.ERROR)
 
 
@@ -504,6 +508,8 @@ async def print_dry_run_report(
                     f"({format_size(free_space)} free).[/]\n"
                 )
         except OSError as e:
+            if ctx.display.debug:
+                raise
             await log(
                 ctx,
                 f"Warning: Could not check disk space: {e}",
@@ -622,6 +628,8 @@ async def log_start(ctx: UIState) -> None:
         ctx.log.log_fd = ctx.log.log_file.open("a", encoding="utf-8")
         ctx.log.log_task = asyncio.create_task(log_worker(ctx))
     except OSError as e:
+        if ctx.display.debug:
+            raise
         ctx.log.log_fd = None
 
         err = LogFileError(path=str(ctx.log.log_file), original_err=str(e))

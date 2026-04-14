@@ -6,105 +6,18 @@ on:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-
-    env:
-      TEST_URL: "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz"
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install uv & HydraStream
-        uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v4
+      
+      - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          
       - run: uv python install 3.11
       - run: uv tool install .
-
+      
       - name: Install aria2
         run: sudo apt-get update && sudo apt-get install -y aria2
-
-      - name: Benchmark 1 - WGET (Single connection)
-        run: |
-          echo "Testing wget..."
-          time wget -q $TEST_URL -O wget_test.gz
-          rm wget_test.gz
         
-      - name: Benchmark 2 - ARIA2 (1 connections)
-        run: |
-          echo "Testing aria2c..."
-          time aria2c -q $TEST_URL -o aria_test.gz
-          rm aria_test.gz
-
-      - name: Benchmark 3 - ARIA2 (5 connections)
-        run: |
-          echo "Testing aria2c..."
-          time aria2c -x 5 -s 5 -q $TEST_URL -o aria_test.gz
-          rm aria_test.gz
-
-      - name: Benchmark 4 - ARIA2 (10 connections)
-        run: |
-          echo "Testing aria2c..."
-          time aria2c -x 10 -s 10 -q $TEST_URL -o aria_test.gz
-          rm aria_test.gz
-
-      - name: Benchmark 5 - ARIA2 (16 connections)
-        run: |
-          echo "Testing aria2c..."
-          time aria2c -x 16 -s 16 -q $TEST_URL -o aria_test.gz
-          rm aria_test.gz
-        
-      - name: Benchmark 6 - HydraStream (1 connections)
-        run: |
-          echo "Testing HydraStream..."
-          time hs $TEST_URL -q -N -o ./hs_out
-          rm -rf ./hs_out
-
-      - name: Benchmark 7 - HydraStream (5 connections)
-        run: |
-          echo "Testing HydraStream..."
-          time hs $TEST_URL -t 5 -N -q -o ./hs_out
-          rm -rf ./hs_out
-
-      - name: Benchmark 8 - HydraStream (10 connections)
-        run: |
-          echo "Testing HydraStream..."
-          time hs $TEST_URL -t 10 -N -q -o ./hs_out
-          rm -rf ./hs_out
-
-      - name: Benchmark 9 - HydraStream (15 connections)
-        run: |
-          echo "Testing HydraStream..."
-          time hs $TEST_URL -t 15 -N -q -o ./hs_out
-          rm -rf ./hs_out
-
-      - name: Benchmark 10 - HydraStream (20 connections)
-        run: |
-          echo "Testing HydraStream..."
-          time hs $TEST_URL -t 20 -N -q -o ./hs_out
-          rm -rf ./hs_out
-      
-      - name: Benchmark 11 - HydraStream (1 connections, stream)
-        run: |
-          echo "Testing HydraStream..."
-          time hs $TEST_URL -q -N  > /dev/null 
-
-      - name: Benchmark 12 - HydraStream (5 connections, stream)
-        run: |
-          echo "Testing HydraStream..."
-          time hs $TEST_URL -t 5 -N -q  > /dev/null 
-
-      - name: Benchmark 13 - HydraStream (10 connections, stream)
-        run: |
-          echo "Testing HydraStream..."
-          time hs $TEST_URL -t 10 -N -q  > /dev/null 
-
-      - name: Benchmark 14 - HydraStream (15 connections, stream)
-        run: |
-          echo "Testing HydraStream..."
-          time hs $TEST_URL -t 15 -N -q  > /dev/null 
-
-      - name: Benchmark 15 - HydraStream (20 connections, stream)
-        run: |
-          echo "Testing HydraStream..."
-          time hs $TEST_URL -t 20 -N -q  > /dev/null 
+      - name: Run Automated Averaged Benchmark
+        run: python scripts/benchmark.py

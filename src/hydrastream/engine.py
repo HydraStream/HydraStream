@@ -47,6 +47,8 @@ async def autosave(ctx: HydraContext, interval: float) -> None:
             try:
                 await loop.run_in_executor(None, save_all_states, ctx, ctx.files)
             except Exception as e:
+                if ctx.config.debug:
+                    raise
                 await log(
                     ctx.ui, f"Auto-save operation failed: {e}", status=LogStatus.ERROR
                 )
@@ -102,7 +104,7 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
             ctx.queues.file_discovery.put_nowait(-1)
 
 
-async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
+async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[memoryview]:
     file_obj = ctx.files[file_id]
     total_size = file_obj.meta.content_length
 
@@ -115,14 +117,14 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
         while ctx.next_offset < total_size:
             if ctx.heap and ctx.heap[0][0] == ctx.next_offset:
                 _, chunk_data = heapq.heappop(ctx.heap)
-                chunk_bytes = bytes(chunk_data)
+                view = memoryview(chunk_data)
 
                 if hasher:
-                    hasher.update(chunk_bytes)
+                    hasher.update(view)
 
-                yield chunk_bytes
+                yield view
 
-                length = len(chunk_bytes)
+                length = len(view)
                 ctx.next_offset += length
 
                 async with ctx.sync.chunk_from_future:
@@ -135,14 +137,13 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
                 break
 
             if chunk_start == ctx.next_offset:
-                chunk_bytes = bytes(chunk_data)
-
+                view = memoryview(chunk_data)
                 if hasher:
-                    hasher.update(chunk_bytes)
+                    hasher.update(view)
 
-                yield chunk_bytes
+                yield view
 
-                length = len(chunk_bytes)
+                length = len(view)
                 ctx.next_offset += length
                 async with ctx.sync.chunk_from_future:
                     ctx.sync.chunk_from_future.notify_all()
@@ -226,20 +227,21 @@ async def create_tasks(
                 delayed_task(ctx, download_worker, i),
                 name=f"Worker: {i}",
             )
-        for i in range(ctx.tasks.creators):
-            tg.create_task(
-                delayed_task(ctx, chunk_producer),
-                name=f"Task creator: {i}",
-            )
-
-        tg.create_task(telemetry_worker(ctx), name="Telemetry")
-        ctx.tasks.telemetry = 1
+    for i in range(ctx.tasks.creators):
+        tg.create_task(
+            delayed_task(ctx, chunk_producer),
+            name=f"Task creator: {i}",
+        )
+    if not ctx.config.dry_run:
+        if ctx.config.threads > 1:
+            tg.create_task(telemetry_worker(ctx), name="Telemetry")
+            ctx.tasks.telemetry = 1
         if not ctx.stream:
             tg.create_task(autosave(ctx, interval=60), name="Autosaver")
             ctx.tasks.autosave = 1
 
-    tg.create_task(dispatch_chunks(ctx), name="Dispather")
-    ctx.tasks.dispatcher = 1
+        tg.create_task(dispatch_chunks(ctx), name="Dispather")
+        ctx.tasks.dispatcher = 1
     tg.create_task(dispatch_links(ctx, links, expected_checksums))
     ctx.tasks.dispatch_links = 1
 
@@ -260,8 +262,8 @@ async def dispatch_links(
             expected_checksums = None
         await ctx.queues.links.put((i, link, checksums))
 
-    for _ in range(ctx.tasks.creators):
-        await ctx.queues.links.put((sys.maxsize, "", None))
+    for i in range(ctx.tasks.creators - 1, -1, -1):
+        await ctx.queues.links.put((sys.maxsize - i, "", None))
 
 
 async def session_killer(ctx: HydraContext) -> None:
@@ -276,7 +278,7 @@ async def stream_all(
     ctx: HydraContext,
     links: list[str],
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
-) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
+) -> AsyncGenerator[tuple[str, AsyncGenerator[memoryview]]]:
 
     ctx.stream = True
     loop = asyncio.get_running_loop()
@@ -304,6 +306,8 @@ async def stream_all(
                 )
             raise
     except (asyncio.CancelledError, GeneratorExit):
+        if ctx.config.debug:
+            raise
         # Логируем через твой статус и останавливаем контекст
         await log(ctx.ui, "Operation cancelled by user.", status=LogStatus.INTERRUPT)
         await stop(ctx)
@@ -325,10 +329,10 @@ async def run_downloads(
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(session_killer(ctx), name="SessionKiller")
                 await create_tasks(ctx, tg, loop, links, expected_checksums)
-                if ctx.config.dry_run:
-                    await print_dry_run_report(
-                        ctx.ui, ctx.files, ctx.stream, ctx.config.output_dir
-                    )
+            if ctx.config.dry_run:
+                await print_dry_run_report(
+                    ctx.ui, ctx.files, ctx.stream, ctx.config.output_dir
+                )
         except* Exception as eg:
             await log(
                 ctx.ui,

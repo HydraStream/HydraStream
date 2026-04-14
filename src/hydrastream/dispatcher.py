@@ -137,6 +137,8 @@ async def telemetry_worker(ctx: HydraContext) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            if ctx.config.debug:
+                raise
             await log(ctx.ui, f"Telemetry failed: {e}", status=LogStatus.ERROR)
 
 
@@ -179,8 +181,9 @@ async def file_done(ctx: HydraContext, chunk: Chunk) -> None:
     await done(ctx.ui, filename)
     del ctx.files[chunk.file.meta.id]
     ctx.current_files_id.remove(chunk.file.meta.id)
+
     async with ctx.sync.current_files:
-        ctx.sync.current_files.notify()
+        ctx.sync.current_files.notify_all()
 
     if not ctx.files:
         ctx.sync.all_complete.set()
@@ -231,7 +234,10 @@ async def download_worker(ctx: HydraContext, worker_id: int) -> None:
 
         except WorkerScaleDown:
             if chunk:
-                await ctx.queues.chunk.put((-1, chunk))
+                if ctx.stream:
+                    await ctx.queues.chunk.put((-1, chunk))
+                else:
+                    await ctx.queues.chunk.put((chunk, -1))
 
         except asyncio.CancelledError:
             break
@@ -330,7 +336,10 @@ async def requeue_chunk(
                 await loop.run_in_executor(
                     None, os.ftruncate, fd, file_obj.meta.content_length
                 )
-    await ctx.queues.chunk.put((-1, chunk))
+    if ctx.stream:
+        await ctx.queues.chunk.put((-1, chunk))
+    else:
+        await ctx.queues.chunk.put((chunk, -1))
     delay = random.uniform(*delay_range)
     await asyncio.sleep(delay)
 
@@ -340,6 +349,7 @@ async def disk_process_chunk(
 ) -> None:
     buffer = bytearray()
     fd = chunk.file.fd
+
     if fd is None:
         fd = ctx.fs.open_file(chunk.file.meta.filename)
     buffer_size = 1_048_576

@@ -10,7 +10,7 @@ from curl_cffi.requests import RequestsError
 
 from hydrastream.exceptions import LogStatus, SystemContextError
 
-from .models import Checksum, File, FileMeta, HydraContext, TypeHash
+from .models import Checksum, Chunk, File, FileMeta, HydraContext, TypeHash
 from .monitor import add_file, done, log, update
 from .network import extract_filename, safe_request, stream_chunk
 from .providers import ProviderRouter
@@ -23,7 +23,11 @@ async def chunk_producer(  # noqa
     while True:
         try:
             id, url, checksum = await ctx.queues.links.get()
-            if id == sys.maxsize:
+            if sys.maxsize - ctx.tasks.creators < id:
+                if id == sys.maxsize:
+                    await ctx.queues.dispatch_file.put((sys.maxsize, None))
+                    if ctx.config.dry_run:
+                        ctx.sync.all_complete.set()
                 break
 
             meta = await _fetch_metadata(ctx, url)
@@ -87,8 +91,6 @@ async def chunk_producer(  # noqa
                 status=LogStatus.CRITICAL,
             )
             raise
-
-    await ctx.queues.dispatch_file.put((sys.maxsize, None))
 
 
 async def requeue_chunk(
@@ -247,9 +249,9 @@ async def dispatch_chunks(ctx: HydraContext) -> None:
                 await ctx.sync.current_files.wait_for(
                     lambda: len(ctx.current_files_id) < ctx.config.threads
                 )
-
+    c = Chunk(current_pos=sys.maxsize, start=sys.maxsize, end=sys.maxsize)
     for _ in range(ctx.tasks.workers):
         if ctx.stream:
-            await ctx.queues.chunk.put((sys.maxsize, c))
+            await ctx.queues.chunk.put((sys.maxsize, c))  # type: ignore
         else:
             await ctx.queues.chunk.put((c, sys.maxsize))  # type: ignore
