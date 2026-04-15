@@ -31,9 +31,9 @@ from rich.rule import Rule
 from rich.table import Column, Table
 from rich.text import Text
 
-from .exceptions import HydraError, LogFileError, LogStatus
-from .models import File, UIState
-from .utils import format_size
+from hydrastream.exceptions import HydraError, LogFileError, LogStatus
+from hydrastream.models import File, UIState
+from hydrastream.utils import format_size
 
 
 def truncate_filename(name: str, w: int = 30) -> str:
@@ -538,7 +538,6 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
     time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
 
     status_word = "CANCELLED" if cancelled else "SUCCESS"
-
     report = (
         f"\n--- Final Report ({status_word}) ---\n"
         f"Total files:   {ctx.progress.files_completed}/{ctx.progress.total_files}\n"

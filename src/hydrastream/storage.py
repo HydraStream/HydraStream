@@ -9,14 +9,14 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .exceptions import (
+from hydrastream.exceptions import (
     FileSizeMismatchError,
     HashMismatchError,
     HydraFileNotFoundError,
     InsufficientSpaceError,
     StateSaveError,
 )
-from .models import File, TypeHash
+from hydrastream.models import File, TypeHash
 
 
 class LocalStorageManager:

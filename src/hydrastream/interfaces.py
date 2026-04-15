@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from .models import Checksum, File, NetworkState, TypeHash
+    from hydrastream.models import Checksum, File, NetworkState, TypeHash
 
 
 class StorageBackend(Protocol):

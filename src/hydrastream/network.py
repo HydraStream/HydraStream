@@ -19,9 +19,8 @@ from curl_cffi.requests import RequestsError
 from curl_cffi.requests.session import HttpMethod, RequestParams
 
 from hydrastream.exceptions import LogStatus
-
-from .models import AMIDState, NetworkState
-from .monitor import log
+from hydrastream.models import AMIDState, NetworkState
+from hydrastream.monitor import log
 
 
 async def report_429(

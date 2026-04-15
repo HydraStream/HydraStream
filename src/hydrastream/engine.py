@@ -14,12 +14,15 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TypeVarTuple, Unpack
 
+from hydrastream.actors.autosaver import autosaver
+from hydrastream.actors.controller import adaptive_controller
+from hydrastream.actors.dispatcher import chunk_dispatcher
+from hydrastream.actors.resolver import metadata_resolver
+from hydrastream.actors.throttler import throttle_controller
+from hydrastream.actors.worker import DownloadWorker
 from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
-
-from .dispatcher import download_worker, telemetry_worker
-from .models import Checksum, File, HydraContext, TypeHash
-from .monitor import done, log, print_dry_run_report, ui_start, ui_stop
-from .producer import chunk_producer, dispatch_chunks
+from hydrastream.models import Checksum, File, HydraContext, TypeHash
+from hydrastream.monitor import done, log, print_dry_run_report, ui_start, ui_stop
 
 Ts = TypeVarTuple("Ts")
 
@@ -34,29 +37,6 @@ async def delayed_task(
     await task(ctx, *args)
 
 
-async def autosave(ctx: HydraContext, interval: float) -> None:
-    loop = asyncio.get_running_loop()
-
-    while not ctx.sync.all_complete.is_set():
-        try:
-            async with asyncio.timeout(interval):
-                await ctx.sync.all_complete.wait()
-
-            break
-        except TimeoutError:
-            try:
-                await loop.run_in_executor(None, save_all_states, ctx, ctx.files)
-            except Exception as e:
-                if ctx.config.debug:
-                    raise
-                await log(
-                    ctx.ui, f"Auto-save operation failed: {e}", status=LogStatus.ERROR
-                )
-
-        except asyncio.CancelledError:
-            break
-
-
 async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
     if (
         not ctx.is_stopping
@@ -69,6 +49,8 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
             status=LogStatus.SUCCESS,
             progress=True,
         )
+    else:
+        return
 
     await stop(ctx, complete=True)
 
@@ -77,7 +59,6 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
         for file_obj in ctx.files.values():
             if file_obj.fd:
                 ctx.fs.close_file(file_obj.fd)
-
     await ui_stop(ctx.ui)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -177,13 +158,6 @@ async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[memoryv
         ctx.current_files_id.remove(file_id)
         async with ctx.sync.current_files:
             ctx.sync.current_files.notify()
-        if not ctx.files and ctx.discovery_completed:
-            await ctx.queues.file_discovery.put(-1)
-            ctx.sync.all_complete.set()
-            ctx.ui.speed.checkpoint_event.set()
-            ctx.dynamic_limit = sys.maxsize
-            async with ctx.sync.dynamic_limit:
-                ctx.sync.dynamic_limit.notify_all()
 
 
 async def create_tasks(
@@ -211,8 +185,8 @@ async def create_tasks(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, handle_signal)
 
-    ctx.tasks.creators = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
-    ctx.tasks.creators = min(ctx.tasks.creators, 20)
+    ctx.tasks.resolvers = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
+    ctx.tasks.resolvers = min(ctx.tasks.resolvers, 20)
 
     if ctx.stream:
         ctx.tasks.workers = ctx.config.threads
@@ -225,30 +199,36 @@ async def create_tasks(
 
     if not ctx.config.dry_run:
         for i in range(ctx.tasks.workers):
-            tg.create_task(
-                delayed_task(ctx, download_worker, i),
-                name=f"Worker: {i}",
-            )
-    for i in range(ctx.tasks.creators):
-        tg.create_task(
-            delayed_task(ctx, chunk_producer),
-            name=f"Task creator: {i}",
-        )
+            worker = DownloadWorker(worker_id=i)
+            tg.create_task(worker.run(ctx), name=f"Worker: {i}")
+
     if not ctx.config.dry_run:
-        if ctx.config.threads > 1:
-            tg.create_task(telemetry_worker(ctx), name="Telemetry")
-            ctx.tasks.telemetry = 1
-        if not ctx.stream:
-            tg.create_task(autosave(ctx, interval=60), name="Autosaver")
-            ctx.tasks.autosave = 1
-
-        tg.create_task(dispatch_chunks(ctx), name="Dispather")
+        tg.create_task(chunk_dispatcher(ctx), name="Dispatcher")
         ctx.tasks.dispatcher = 1
-    tg.create_task(dispatch_links(ctx, links, expected_checksums))
-    ctx.tasks.dispatch_links = 1
+
+    for i in range(ctx.tasks.resolvers):
+        tg.create_task(
+            delayed_task(ctx, metadata_resolver),
+            name=f"Resolver: {i}",
+        )
+
+    tg.create_task(link_feeder(ctx, links, expected_checksums), name="Feeder")
+    ctx.tasks.feeder = 1
+
+    if not ctx.config.dry_run:
+        tg.create_task(throttle_controller(ctx), name="Throttler")
+        ctx.tasks.throttler = 1
+
+        if ctx.config.threads > 1:
+            tg.create_task(adaptive_controller(ctx), name="Controller")
+            ctx.tasks.controller = 1
+
+        if not ctx.stream:
+            tg.create_task(autosaver(ctx, interval=60), name="Autosaver")
+            ctx.tasks.autosaver = 1
 
 
-async def dispatch_links(
+async def link_feeder(
     ctx: HydraContext,
     links: str | Iterable[str],
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
@@ -264,7 +244,7 @@ async def dispatch_links(
             expected_checksums = None
         await ctx.queues.links.put((i, link, checksums))
 
-    for i in range(ctx.tasks.creators - 1, -1, -1):
+    for i in range(ctx.tasks.resolvers - 1, -1, -1):
         await ctx.queues.links.put((sys.maxsize - i, "", None))
 
 

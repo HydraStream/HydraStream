@@ -9,24 +9,22 @@ from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
 from hydrastream.exceptions import LogStatus, SystemContextError
+from hydrastream.models import Checksum, File, FileMeta, HydraContext, TypeHash
+from hydrastream.monitor import add_file, done, log, update
+from hydrastream.network import extract_filename, safe_request, stream_chunk
+from hydrastream.providers import ProviderRouter
 
-from .models import Checksum, Chunk, File, FileMeta, HydraContext, TypeHash
-from .monitor import add_file, done, log, update
-from .network import extract_filename, safe_request, stream_chunk
-from .providers import ProviderRouter
 
-
-async def chunk_producer(  # noqa
+async def metadata_resolver(  # noqa
     ctx: HydraContext,
 ) -> None:
 
     while True:
         try:
             id, url, checksum = await ctx.queues.links.get()
-            if sys.maxsize - ctx.tasks.creators < id:
+            if sys.maxsize - ctx.tasks.resolvers < id:
                 if id == sys.maxsize:
                     await ctx.queues.dispatch_file.put((sys.maxsize, None))
-                    ctx.discovery_completed = True
                     if ctx.config.dry_run:
                         ctx.sync.all_complete.set()
                 break
@@ -225,37 +223,3 @@ async def _register_file(
         if downloaded - len(chunks) > 0:
             update(ctx.ui, filename, downloaded)
     await ctx.queues.dispatch_file.put((priority_index, file_obj))
-
-
-async def dispatch_chunks(ctx: HydraContext) -> None:
-    while True:
-        priority_index, file = await ctx.queues.dispatch_file.get()
-        if priority_index == sys.maxsize or file is None:
-            break
-        if ctx.stream:
-            await ctx.queues.file_discovery.put(priority_index)
-        file.create_chunks()
-        for c in file.chunks:
-            if c.current_pos <= c.end:
-                if ctx.stream:
-                    await ctx.queues.chunk.put((priority_index, c))
-                else:
-                    await ctx.queues.chunk.put((c, priority_index))  # type: ignore
-        ctx.current_files_id.add(priority_index)
-
-        async with ctx.sync.current_files:
-            if ctx.stream:
-                await ctx.sync.current_files.wait_for(lambda: not ctx.current_files_id)
-            else:
-                await ctx.sync.current_files.wait_for(
-                    lambda: len(ctx.current_files_id) < ctx.config.threads
-                )
-
-    c = Chunk(current_pos=sys.maxsize, start=sys.maxsize, end=sys.maxsize)
-    await log(ctx.ui, f"{ctx.tasks.workers}", status=LogStatus.WARNING)
-    if ctx.stream:
-        for i in range(ctx.tasks.workers - 1, -1, -1):
-            await ctx.queues.chunk.put((sys.maxsize - i, c))  # type: ignore
-    else:
-        for i in range(ctx.tasks.workers - 1, -1, -1):
-            await ctx.queues.chunk.put((c, sys.maxsize - i))  # type: ignore

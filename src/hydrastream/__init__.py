@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
-from .facade import HydraClient
+from hydrastream.facade import HydraClient
 
 __all__ = ["HydraClient"]
 

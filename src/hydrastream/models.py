@@ -47,8 +47,7 @@ from hydrastream.exceptions import (
     OrphanedChunkError,
     ValidationError,
 )
-
-from .interfaces import HashProvider, StorageBackend
+from hydrastream.interfaces import HashProvider, StorageBackend
 
 if TYPE_CHECKING:
     from hydrastream.providers import ProviderRouter
@@ -601,12 +600,13 @@ class QueueSet:
 
 @entity
 class TaskCounts:
-    dispatch_links: int = 0
-    creators: int = 0
+    feeder: int = 0
+    resolvers: int = 0
     workers: int = 0
     dispatcher: int = 0
-    autosave: int = 0
-    telemetry: int = 0
+    autosaver: int = 0
+    throttler: int = 0
+    controller: int = 0
 
 
 @entity
@@ -614,7 +614,7 @@ class SyncSet:
     current_files: asyncio.Condition = field(default_factory=asyncio.Condition)
     chunk_from_future: asyncio.Condition = field(default_factory=asyncio.Condition)
     dynamic_limit: asyncio.Condition = field(default_factory=asyncio.Condition)
-    stop_telemetry: asyncio.Event = field(default_factory=asyncio.Event)
+    stop_adaptive_controller: asyncio.Event = field(default_factory=asyncio.Event)
     all_complete: asyncio.Event = field(default_factory=asyncio.Event)
 
 

@@ -5,9 +5,8 @@ import base64
 import binascii
 
 from hydrastream.interfaces import HashProvider
-
-from .models import Checksum, NetworkState
-from .network import safe_request
+from hydrastream.models import Checksum, NetworkState
+from hydrastream.network import safe_request
 
 
 # 2. КОНКРЕТНЫЙ ПРОВАЙДЕР ДЛЯ NCBI
