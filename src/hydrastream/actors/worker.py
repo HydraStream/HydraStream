@@ -73,16 +73,17 @@ class DownloadWorker:
         if sys.maxsize - ctx.tasks.workers < id:
             if not ctx.sync.stop_adaptive_controller.is_set():
                 ctx.sync.stop_adaptive_controller.set()
-                ctx.ui.speed.checkpoint_event.set()
+                ctx.ui.speed.controller_checkpoint_event.set()
                 ctx.dynamic_limit = sys.maxsize
                 async with ctx.sync.dynamic_limit:
                     ctx.sync.dynamic_limit.notify_all()
-                    ctx.sync.all_complete.set()
 
             if id == sys.maxsize:
-                await log(ctx.ui, f"{ctx.tasks.workers}", status=LogStatus.WARNING)
                 if ctx.stream:
                     await ctx.queues.file_discovery.put(-1)
+
+                ctx.sync.all_complete.set()
+                ctx.ui.speed.throttler_checkpoint_event.set()
 
             raise asyncio.CancelledError
 

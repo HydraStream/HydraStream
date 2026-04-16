@@ -27,13 +27,13 @@ async def adaptive_controller(ctx: HydraContext) -> None:
     while not ctx.sync.all_complete.is_set():
         try:
             # Ждем пульса от Монитора (или пинка перед смертью)
-            await ctx.ui.speed.checkpoint_event.wait()
+            await ctx.ui.speed.controller_checkpoint_event.wait()
 
             # Сразу проверяем: а не нажали ли рубильник пока мы спали?
             if ctx.sync.stop_adaptive_controller.is_set():
                 break  # Выходим из цикла! Функция завершается, TaskGroup счастлив.
 
-            ctx.ui.speed.checkpoint_event.clear()
+            ctx.ui.speed.controller_checkpoint_event.clear()
 
             now = time.monotonic()
             elapsed = min(1, now - ctx.ui.speed.last_checkpoint_time)

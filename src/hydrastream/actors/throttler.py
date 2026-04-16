@@ -19,20 +19,18 @@ async def throttle_controller(ctx: HydraContext) -> None:
 
     while not ctx.sync.all_complete.is_set():
         try:
-            await ctx.ui.speed.checkpoint_event.wait()
+            await ctx.ui.speed.throttler_checkpoint_event.wait()
 
             if ctx.sync.all_complete.is_set():
                 break
-            ctx.ui.speed.checkpoint_event.clear()
+            ctx.ui.speed.throttler_checkpoint_event.clear()
 
             now = time.monotonic()
             elapsed = min(1, now - ctx.ui.speed.last_checkpoint_time)
 
             if elapsed <= 0:
                 continue
-            # =========================================================
-            # ФАЗА 1: ЛОГИКА ОГРАНИЧИТЕЛЯ СКОРОСТИ (Global Valve)
-            # =========================================================
+
             if ctx.ui.speed.speed_limit:
                 target_time = ctx.ui.speed.bytes_to_check / ctx.ui.speed.speed_limit
 

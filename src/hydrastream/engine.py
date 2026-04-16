@@ -14,14 +14,18 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TypeVarTuple, Unpack
 
-from hydrastream.actors.autosaver import autosaver
+from hydrastream.actors.autosaver import autosaver, save_all_states
 from hydrastream.actors.controller import adaptive_controller
 from hydrastream.actors.dispatcher import chunk_dispatcher
 from hydrastream.actors.resolver import metadata_resolver
 from hydrastream.actors.throttler import throttle_controller
 from hydrastream.actors.worker import DownloadWorker
-from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
-from hydrastream.models import Checksum, File, HydraContext, TypeHash
+from hydrastream.exceptions import (
+    FileSizeMismatchError,
+    HashMismatchError,
+    LogStatus,
+)
+from hydrastream.models import Checksum, HydraContext, TypeHash
 from hydrastream.monitor import done, log, print_dry_run_report, ui_start, ui_stop
 
 Ts = TypeVarTuple("Ts")
@@ -38,20 +42,11 @@ async def delayed_task(
 
 
 async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
-    if (
-        not ctx.is_stopping
-        and ctx.ui.progress.total_files > 0
-        and ctx.ui.progress.total_files == ctx.ui.progress.files_completed
-    ):
-        await log(
-            ctx.ui,
-            "All downloads completed successfully!",
-            status=LogStatus.SUCCESS,
-            progress=True,
-        )
-    else:
+
+    if not ctx.is_running:
         return
 
+    ctx.is_running = False
     await stop(ctx, complete=True)
 
     if not ctx.stream:
@@ -73,6 +68,7 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
     ctx.is_stopping = True
 
     if not complete:
+        ctx.ui.cancelled = True
         await log(
             ctx.ui,
             "Interrupt signal received. Initiating graceful shutdown...",
@@ -330,12 +326,6 @@ async def run_downloads(
 
     finally:
         await teardown_engine(ctx, loop)
-
-
-def save_all_states(ctx: HydraContext, files: dict[int, File]) -> None:
-    for file in list(files.values()):
-        if file.chunks and not all(c.current_pos > c.end for c in (file.chunks or [])):
-            ctx.fs.save_state(file)
 
 
 def verify_stream(

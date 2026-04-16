@@ -356,7 +356,8 @@ class SpeedLimiterState:
     target_time: float = 0.0
 
     limit_event: asyncio.Event = field(default_factory=asyncio.Event)
-    checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
+    controller_checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
+    throttler_checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     def __post_init__(self) -> None:
         self.time_speed_limit = 1 / self.frequency_speed_limit
@@ -373,9 +374,7 @@ class SpeedLimiterState:
 class RichUIState:
     """Всё, что относится к библиотеке Rich (Прогресс-бары, консоль)."""
 
-    console: Console = field(
-        default_factory=lambda: Console(file=sys.__stderr__, stderr=True)
-    )
+    console: Console = field(default_factory=lambda: Console(stderr=True))
     refresh_per_second: int = 10
     renewal_rate: float = field(init=False)
     dynamic_title: str = ""
@@ -396,11 +395,16 @@ class RichUIState:
 @entity
 class UIState:
     is_running: bool = False
+    cancelled: bool = False
     display: DisplayConfig
     progress: ProgressState = field(default_factory=ProgressState)
     log: LogState
     speed: SpeedLimiterState
     rich: RichUIState = field(default_factory=RichUIState)
+
+    def __post_init__(self) -> None:
+        if self.display.debug:
+            self.rich.console = Console(file=sys.__stderr__, stderr=True)
 
 
 @entity
@@ -625,6 +629,7 @@ class HydraContext:
     fs: StorageBackend
     provider: ProviderRouter
 
+    is_running: bool = True
     is_stopping: bool = False
     stream: bool = False
     next_offset: int = 0

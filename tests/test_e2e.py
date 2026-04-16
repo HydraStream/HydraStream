@@ -20,7 +20,7 @@ from hydrastream.main import app
 
 warnings.filterwarnings("ignore", message=".*chunk_size is ignored.*")
 
-DUMMY_DATA = b"0123456789" * 10000  # 1000 байт
+DUMMY_DATA = b"0123456789" * 10000
 DUMMY_MD5 = hashlib.md5(DUMMY_DATA).hexdigest()
 
 

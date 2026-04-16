@@ -3,9 +3,8 @@
 
 import asyncio
 
-from hydrastream.engine import save_all_states
 from hydrastream.exceptions import LogStatus
-from hydrastream.models import HydraContext
+from hydrastream.models import File, HydraContext
 from hydrastream.monitor import log
 
 
@@ -16,7 +15,6 @@ async def autosaver(ctx: HydraContext, interval: float) -> None:
         try:
             async with asyncio.timeout(interval):
                 await ctx.sync.all_complete.wait()
-
             break
         except TimeoutError:
             try:
@@ -30,3 +28,9 @@ async def autosaver(ctx: HydraContext, interval: float) -> None:
 
         except asyncio.CancelledError:
             break
+
+
+def save_all_states(ctx: HydraContext, files: dict[int, File]) -> None:
+    for file in list(files.values()):
+        if file.chunks and not all(c.current_pos > c.end for c in (file.chunks or [])):
+            ctx.fs.save_state(file)

@@ -247,7 +247,8 @@ def update(ctx: UIState, filename: str, advance_bytes: int) -> None:
     if ctx.progress.download_bytes - ctx.speed.prev_bytes >= ctx.speed.bytes_to_check:
         ctx.speed.prev_bytes += ctx.speed.bytes_to_check
 
-        ctx.speed.checkpoint_event.set()
+        ctx.speed.controller_checkpoint_event.set()
+        ctx.speed.throttler_checkpoint_event.set()
 
 
 async def refresh_loop(ctx: UIState) -> None:
@@ -343,11 +344,10 @@ def make_panel(ctx: UIState) -> Panel | str:
         not ctx.rich.tasks
         and ctx.progress.total_files > 0
         and ctx.progress.total_files == ctx.progress.files_completed
-    ):
+    ) or ctx.cancelled:
         grid = Table.grid(expand=True)
         grid.add_column()
         grid.add_column(justify="center")
-
         content = Group("[green]All downloads completed successfully!\n", grid)
         grid.add_row(
             "[white]Total files:",
@@ -357,7 +357,7 @@ def make_panel(ctx: UIState) -> Panel | str:
         grid.add_row("[white]Average Speed:", f"[bold yellow]{speed_str}[/]")
         grid.add_row("[white]Total Time:", f"[bold magenta]{time_str}[/]")
         return Panel(
-            content,
+            grid if ctx.cancelled else content,
             title="[#2e8b57]Final Report",
             border_style="#2e8b57",
             expand=False,
@@ -517,7 +517,7 @@ async def print_dry_run_report(
             )
 
 
-async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
+async def handle_exit(ctx: UIState) -> None:
     ctx.is_running = False
     if ctx.rich.live:
         ctx.rich.live.refresh()
@@ -537,7 +537,7 @@ async def handle_exit(ctx: UIState, cancelled: bool = False) -> None:
     hours, mins = divmod(mins, 60)
     time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
 
-    status_word = "CANCELLED" if cancelled else "SUCCESS"
+    status_word = "CANCELLED" if ctx.cancelled else "SUCCESS"
     report = (
         f"\n--- Final Report ({status_word}) ---\n"
         f"Total files:   {ctx.progress.files_completed}/{ctx.progress.total_files}\n"

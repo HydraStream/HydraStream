@@ -88,20 +88,22 @@ async def async_main(  # noqa: C901, PLR0912
     Args:
         links: List of target URLs provided via positional arguments.
         input_file: Path to a text file containing URLs, or '-' for stdin.
+        stream: Whether to stream data to stdout instead of writing to disk.
         typehash: Hash algorithm type (e.g., md5, sha256).
         hash: Expected hash checksum (only evaluated if a single valid link is provided).
-        stream: Whether to stream data to stdout instead of writing to disk.
-        threads: Maximum number of concurrent download connections.
-        no_ui: Disable GUI (plain text logs only) if set to True.
-        quiet: Dead silence mode. No console output at all if set to True.
         output_dir: Destination directory for downloaded files.
         dry_run: Simulate the download process (metadata fetch only).
-        min_chunk_size_mb: Minimum chunk size in MB for disk mode.
-        min_stream_chunk_size_mb: Target chunk size in MB for stream mode.
-        stream_buffer_size_mb: Maximum memory buffer size in MB for streaming.
-        speed_limit: Global bandwidth throttle limit in MB/s.
+        no_ui: Disable GUI (plain text logs only) if set to True.
+        quiet: Dead silence mode. No console output at all if set to True.
         json_logs: Output logs in structured JSON Lines format.
         verify: Enable or disable post-download hash verification.
+        threads: Maximum number of concurrent download connections.
+        min_chunk_size_mb: Minimum chunk size in MB for disk mode.
+        max_stream_chunk_size_mb: Target chunk size in MB for stream mode.
+        stream_buffer_size_mb: Maximum memory buffer size in MB for streaming.
+        speed_limit: Global bandwidth throttle limit in MB/s.
+        browser: Browser TLS fingerprint to impersonate.
+        debug: Enable debug mode to propagate full tracebacks on failure.
     """  # noqa: E501
     try:
         ui = UIState(
@@ -191,8 +193,7 @@ async def async_main(  # noqa: C901, PLR0912
                                 ),
                             ),
                         )
-                sys.__stdout__.write("-3\n")
-                sys.__stdout__.flush()
+
                 async for _, file_gen in await loader.stream(
                     links, input_file, expected_checksums
                 ):
@@ -208,8 +209,13 @@ async def async_main(  # noqa: C901, PLR0912
                 await loader.run(links, input_file, expected_checksums)
 
                 sys.exit(ExitCode.SUCCESS)
-        sys.__stdout__.write("100\n")
-        sys.__stdout__.flush()
+
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        if debug:
+            raise
+
+        sys.exit(ExitCode.INTERRUPTED)
+
     except (Exception, ExceptionGroup) as e:
         if debug:
             raise
