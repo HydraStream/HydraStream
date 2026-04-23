@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
-import asyncio
 import math
 import time
 from dataclasses import dataclass, field
@@ -38,8 +37,6 @@ class AdaptiveEngine:
                 # Просто делаем шаг
                 await self._step()
 
-            except asyncio.CancelledError:
-                raise
             except Exception as e:
                 if self.ctx.config.debug:
                     raise

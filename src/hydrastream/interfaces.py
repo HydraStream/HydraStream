@@ -14,8 +14,8 @@ class StorageBackend(Protocol):
 
     def open_file(self, filename: str) -> Any: ...
 
-    async def write_chunk_data(
-        self, fd_or_conn: Any, data: bytearray, offset: int
+    def write_chunk_data(
+        self, fd_or_conn: Any, data_bytes: list[bytes], len_data: int, offset: int
     ) -> None: ...
 
     def close_file(self, fd_or_conn: Any) -> None: ...

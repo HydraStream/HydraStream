@@ -16,10 +16,10 @@ from hydrastream._curl_shim import aiter_bytes, get_error_response
 from hydrastream.exceptions import (
     DownloadFailedError,
     LogStatus,
-    RangeRequestNotSupportedError,
+    StreamError,
     WorkerScaleDown,
 )
-from hydrastream.models import Chunk, HydraContext
+from hydrastream.models import Chunk, Envelope, HydraContext, StreamChunk, WriteChunk
 from hydrastream.monitor import done, log, update
 from hydrastream.network import stream_chunk, try_scale_up
 
@@ -28,56 +28,42 @@ from hydrastream.network import stream_chunk, try_scale_up
 class DownloadWorker:
     ctx: HydraContext
     worker_id: int
-    chunk: Chunk | None = None
 
     async def run(self) -> None:
         while True:
-            try:
-                if self.worker_id >= self.ctx.dynamic_limit:
-                    async with self.ctx.sync.dynamic_limit:
-                        await self.ctx.sync.dynamic_limit.wait_for(
-                            lambda: self.worker_id < self.ctx.dynamic_limit
-                        )
-                await self.get_chunk()
-                if self.chunk is None:
-                    continue
-                await self.process_chunk()
+            if self.worker_id >= self.ctx.dynamic_limit:
+                async with self.ctx.sync.dynamic_limit:
+                    await self.ctx.sync.dynamic_limit.wait_for(
+                        lambda: self.worker_id < self.ctx.dynamic_limit
+                    )
+            envelope, chunk = await self.get_chunk()
+            if envelope is None:
+                break
+            if chunk is None:
+                continue
 
-                if not self.chunk.is_finished:
+            try:
+                await self.process_chunk(chunk)
+
+                if not chunk.is_finished:
                     await log(
                         self.ctx.ui,
-                        f"Truncated read for {self.chunk.file.meta.filename}. "
-                        f"Requeuing remaining {self.chunk.remaining} bytes.",
+                        f"Truncated read for {chunk.file.meta.filename}. "
+                        f"Requeuing remaining {chunk.remaining} bytes.",
                         status=LogStatus.WARNING,
                         throttle_key="truncated_read",
                         throttle_sec=2.0,
                     )
-                    await self.requeue_chunk(delay_range=(0.1, 1.0))
+                    await self.requeue_chunk(envelope, chunk, delay_range=(0.1, 1.0))
                     continue
-
-                await self.file_done()
-            except asyncio.CancelledError:
-                raise
+                await self.file_done(chunk)
             except Exception as e:
-                await self.handle_worker_error(e)
-            finally:
-                self.chunk = None
+                await self.handle_worker_error(envelope, chunk, e)
 
-    async def get_chunk(self) -> None:
-        if self.ctx.stream:
-            id, chunk = await self.ctx.queues.chunk.get()
-        else:
-            chunk, id = await self.ctx.queues.chunk.get()
+    async def get_chunk(self) -> tuple[Envelope[Chunk | None] | None, Chunk | None]:
+        envelope = await self.ctx.queues.chunk.get()
 
-        if not isinstance(chunk, Chunk) or not isinstance(id, int):
-            raise TypeError(
-                f"Expected (Chunk, int), but got "
-                f"({type(chunk).__name__}, {type(id).__name__})"
-            )
-
-        self.chunk = chunk
-
-        if sys.maxsize - self.ctx.tasks.workers < id:
+        if envelope.is_poison_pill:
             if not self.ctx.sync.stop_adaptive_controller.is_set():
                 self.ctx.sync.stop_adaptive_controller.set()
                 self.ctx.ui.speed.controller_checkpoint_event.set()
@@ -85,46 +71,55 @@ class DownloadWorker:
                 async with self.ctx.sync.dynamic_limit:
                     self.ctx.sync.dynamic_limit.notify_all()
 
-            if id == sys.maxsize:
+            if envelope.is_last_survivor:
                 if self.ctx.stream:
                     await self.ctx.queues.file_discovery.put(-1)
 
                 self.ctx.sync.all_complete.set()
                 self.ctx.ui.speed.throttler_checkpoint_event.set()
+                await self.ctx.queues.disk.put(
+                    Envelope(
+                        sort_key=(sys.maxsize,),
+                        is_poison_pill=True,
+                        is_last_survivor=True,
+                    )
+                )
 
-            raise asyncio.CancelledError
+            return None, None
+
+        if not (chunk := envelope.payload):
+            return envelope, None
 
         file_obj = chunk.file
         if not file_obj or file_obj.is_failed:
-            return
+            return envelope, None
 
         if self.ctx.stream:
             async with self.ctx.sync.chunk_from_future:
                 await self.ctx.sync.chunk_from_future.wait_for(
                     lambda: (
-                        self.ctx.next_offset + self.ctx.config.STREAM_BUFFER_SIZE
+                        self.ctx.next_offset + self.ctx.config.BUFFER_SIZE
                         >= chunk.current_pos
                     )
                 )
+        return envelope, chunk
 
-    async def handle_worker_error(self, e: Exception) -> None:
+    async def handle_worker_error(
+        self, envelope: Envelope[Chunk | None], chunk: Chunk, e: Exception
+    ) -> None:
         if isinstance(e, WorkerScaleDown):
-            if self.chunk:
-                await self.ctx.queues.chunk.put(
-                    (-1, self.chunk) if self.ctx.stream else (self.chunk, -1)
-                )
+            await self.ctx.queues.chunk.put(envelope)
             return
 
         if isinstance(e, RequestsError):
-            await self._handle_requests_error(e)
+            await self._handle_requests_error(envelope, chunk, e)
             self.ctx.dynamic_limit = max(self.ctx.dynamic_limit - 1, 1)
             async with self.ctx.sync.dynamic_limit:
                 self.ctx.sync.dynamic_limit.notify_all()
             return
 
         if isinstance(e, TimeoutError):
-            if self.chunk:
-                await self.requeue_chunk()
+            await self.requeue_chunk(envelope, chunk)
             return
 
         tb_str = traceback.format_exc()
@@ -144,14 +139,13 @@ class DownloadWorker:
             )
         raise e
 
-    async def _handle_requests_error(self, e: RequestsError) -> None:
+    async def _handle_requests_error(
+        self, envelope: Envelope[Chunk | None], chunk: Chunk, e: RequestsError
+    ) -> None:
         """Разбирает сетевые ошибки и решает: убить файл или переповторить чанк."""
-        if not self.chunk:
-            return
-
         response = get_error_response(e)
         if not isinstance(response, Response):
-            await self.requeue_chunk()
+            await self.requeue_chunk(envelope, chunk)
             return
 
         status = response.status_code
@@ -160,49 +154,48 @@ class DownloadWorker:
         if status in {400, 401, 403, 404, 410, 416}:
             await log(
                 self.ctx.ui,
-                f"Chunk for {self.chunk.file.meta.filename} "
+                f"Chunk for {chunk.file.meta.filename} "
                 f"failed permanently (HTTP {status}).",
                 status=LogStatus.ERROR,
             )
-            self.chunk.file.is_failed = True
-            self.ctx.fs.delete_file(self.chunk.file.meta.filename)
+            chunk.file.is_failed = True
+            self.ctx.fs.delete_file(chunk.file.meta.filename)
 
             if self.ctx.stream:
                 raise DownloadFailedError(
-                    url=self.chunk.file.meta.url,
+                    url=chunk.file.meta.url,
                     status_code=status,
                     reason=response.reason,
                 )
         else:
-            await self.requeue_chunk(delay_range=(0.5, 2.0))
+            await self.requeue_chunk(envelope, chunk, delay_range=(0.5, 2.0))
 
     async def requeue_chunk(
         self,
+        envelope: Envelope[Chunk | None],
+        chunk: Chunk,
         delay_range: tuple[float, float] = (1.0, 3.0),
     ) -> None:
-        if not self.chunk:
-            return
-
-        file_obj = self.chunk.file
+        file_obj = chunk.file
         supports_ranges = file_obj.meta.supports_ranges
 
         if not supports_ranges:
             if self.ctx.stream:
-                raise RangeRequestNotSupportedError(
-                    url=self.chunk.file.meta.url, filename=self.chunk.file.meta.filename
+                raise StreamError(
+                    url=chunk.file.meta.url, filename=chunk.file.meta.filename
                 )
             await log(
                 self.ctx.ui,
-                f"Connection dropped for {self.chunk.file.meta.filename}. "
+                f"Connection dropped for {chunk.file.meta.filename}. "
                 f"Server does not support resume. Restarting download from 0 bytes.",
                 status=LogStatus.WARNING,
             )
 
-            downloaded_so_far = self.chunk.current_pos - self.chunk.start
+            downloaded_so_far = chunk.current_pos - chunk.start
             if downloaded_so_far > 0:
-                update(self.ctx.ui, self.chunk.file.meta.filename, -downloaded_so_far)
+                update(self.ctx.ui, chunk.file.meta.filename, -downloaded_so_far)
 
-            self.chunk.current_pos = self.chunk.start
+            chunk.current_pos = chunk.start
 
             fd = file_obj.fd
             if fd is not None:
@@ -215,63 +208,71 @@ class DownloadWorker:
                     await loop.run_in_executor(
                         None, os.ftruncate, fd, file_obj.meta.content_length
                     )
-        await self.ctx.queues.chunk.put(
-            (-1, self.chunk) if self.ctx.stream else (self.chunk, -1)
-        )
+        await self.ctx.queues.chunk.put(envelope)
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
-    async def process_chunk(self) -> None:
-        if not self.chunk:
+    async def process_chunk(self, chunk: Chunk) -> None:
+        if chunk.current_pos > chunk.end:
             return
-
-        if self.chunk.current_pos > self.chunk.end:
-            return
-        if self.chunk.file.meta.supports_ranges:
-            headers = {"Range": f"bytes={self.chunk.current_pos}-{self.chunk.end}"}
+        if chunk.file.meta.supports_ranges:
+            headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
         else:
             headers = None
 
         if not self.ctx.stream:
-            await self.disk_process_chunk(headers)
+            await self.disk_process_chunk(chunk, headers)
         else:
-            await self.stream_process_chunk(headers)
+            await self.stream_process_chunk(chunk, headers)
 
     async def disk_process_chunk(
         self,
+        chunk: Chunk,
         headers: dict[str, str] | None,
     ) -> None:
-        if not self.chunk:
-            return
+        buffer_list: list[bytes] = []
+        current_buffer_size = 0
 
-        buffer = bytearray()
-        fd = self.chunk.file.fd
+        fd = chunk.file.fd
 
         if fd is None:
-            fd = self.ctx.fs.open_file(self.chunk.file.meta.filename)
+            fd = self.ctx.fs.open_file(chunk.file.meta.filename)
         buffer_size = 1_048_576
         async with stream_chunk(
             self.ctx.net,
-            self.chunk.file.meta.url,
+            chunk.file.meta.url,
             headers=headers,
         ) as r:
             try:
                 self.ctx.active_stream.add(r)
-                bytes_to_read = self.chunk.end - self.chunk.current_pos + 1
+                bytes_to_read = chunk.end - chunk.current_pos + 1
 
                 async for data in aiter_bytes(r, chunk_size=131072):
                     if len(data) > bytes_to_read:
                         data = data[:bytes_to_read]  # noqa: PLW2901
 
-                    buffer.extend(data)
+                    buffer_list.append(data)
+                    current_buffer_size += len(data)
+
                     bytes_to_read -= len(data)
-                    update(self.ctx.ui, self.chunk.file.meta.filename, len(data))
-                    if len(buffer) >= buffer_size:
-                        await self.ctx.fs.write_chunk_data(
-                            fd, buffer, self.chunk.current_pos
+                    update(self.ctx.ui, chunk.file.meta.filename, len(data))
+
+                    if current_buffer_size >= buffer_size:
+                        await self.ctx.queues.disk.put(
+                            Envelope(
+                                sort_key=(fd, chunk.current_pos),
+                                payload=WriteChunk(
+                                    fd=fd,
+                                    offset=chunk.current_pos,
+                                    length=current_buffer_size,
+                                    data=buffer_list,
+                                ),
+                            )
                         )
-                        self.chunk.current_pos += len(buffer)
-                        buffer = bytearray()
+                        chunk.current_pos += current_buffer_size
+
+                        buffer_list.clear()
+                        current_buffer_size = 0
                         if random.random() < 0.1:
                             await try_scale_up(self.ctx.net.rate_limiter)
 
@@ -282,37 +283,49 @@ class DownloadWorker:
 
             finally:
                 self.ctx.active_stream.remove(r)
-                if buffer:
-                    await self.ctx.fs.write_chunk_data(
-                        fd, buffer, self.chunk.current_pos
-                    )
-                    self.chunk.current_pos += len(buffer)
+                if buffer_list:
+                    with contextlib.suppress(asyncio.QueueFull):
+                        self.ctx.queues.disk.put_nowait(
+                            Envelope(
+                                sort_key=(fd, chunk.current_pos),
+                                payload=WriteChunk(
+                                    fd=fd,
+                                    offset=chunk.current_pos,
+                                    length=current_buffer_size,
+                                    data=buffer_list,
+                                ),
+                            )
+                        )
 
     async def stream_process_chunk(
         self,
+        chunk: Chunk,
         headers: dict[str, str] | None,
     ) -> None:
-        if not self.chunk:
-            return
         data = b""
         async with stream_chunk(
             self.ctx.net,
-            self.chunk.file.meta.url,
+            chunk.file.meta.url,
             headers=headers,
         ) as r:
             try:
                 self.ctx.active_stream.add(r)
-                bytes_to_read = self.chunk.end - self.chunk.current_pos + 1
+                bytes_to_read = chunk.end - chunk.current_pos + 1
 
                 async for data in aiter_bytes(r, chunk_size=131072):
                     if len(data) > bytes_to_read:
                         data = data[:bytes_to_read]  # noqa: PLW2901
 
                     bytes_to_read -= len(data)
-                    update(self.ctx.ui, self.chunk.file.meta.filename, len(data))
+                    update(self.ctx.ui, chunk.file.meta.filename, len(data))
 
-                    await self.ctx.queues.stream.put((self.chunk.current_pos, data))
-                    self.chunk.current_pos = self.chunk.current_pos + len(data)
+                    await self.ctx.queues.stream.put(
+                        Envelope(
+                            sort_key=(chunk.current_pos,),
+                            payload=StreamChunk(start=chunk.current_pos, data=data),
+                        )
+                    )
+                    chunk.current_pos = chunk.current_pos + len(data)
 
                     if self.ctx.dynamic_limit <= self.worker_id:
                         raise WorkerScaleDown
@@ -320,41 +333,28 @@ class DownloadWorker:
                     if bytes_to_read <= 0:
                         break
 
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                if self.ctx.stream and data:
-                    with contextlib.suppress(asyncio.QueueFull):
-                        self.ctx.queues.stream.put_nowait((
-                            self.chunk.current_pos,
-                            data,
-                        ))
-                        self.chunk.current_pos = self.chunk.current_pos + len(data)
-                raise
             finally:
                 self.ctx.active_stream.remove(r)
 
     async def file_done(
         self,
+        chunk: Chunk,
     ) -> None:
-        if not self.chunk:
-            return
-
         if self.ctx.stream:
             return
 
-        filename = self.chunk.file.meta.filename
-        file_obj = self.chunk.file
-        if self.chunk.file.meta.content_length:
-            if self.chunk.file.verified or not self.chunk.file.is_complete:
+        filename = chunk.file.meta.filename
+        file_obj = chunk.file
+        if chunk.file.meta.content_length:
+            if chunk.file.verified or not chunk.file.is_complete:
                 return
-            self.chunk.file.verified = True
+            chunk.file.verified = True
             if not self.ctx.fs.verify_size(filename, file_obj.meta.content_length):
                 return
         if file_obj.meta.expected_checksum:
             await log(
                 self.ctx.ui,
-                f"Verifying Hash checksum for {self.chunk.file.meta.filename}...",
+                f"Verifying Hash checksum for {chunk.file.meta.filename}...",
                 status=LogStatus.INFO,
             )
             await self.ctx.fs.verify_file_hash(
@@ -364,13 +364,13 @@ class DownloadWorker:
             )
             await log(
                 self.ctx.ui,
-                f"Integrity confirmed: {self.chunk.file.meta.filename}",
+                f"Integrity confirmed: {chunk.file.meta.filename}",
                 status=LogStatus.SUCCESS,
             )
         self.ctx.fs.close_file(fd_or_conn=file_obj.fd)
         self.ctx.fs.delete_state(filename)
         await done(self.ctx.ui, filename)
-        del self.ctx.files[self.chunk.file.meta.id]
-        self.ctx.current_files_id.remove(self.chunk.file.meta.id)
+        del self.ctx.files[chunk.file.meta.id]
+        self.ctx.current_files_id.remove(chunk.file.meta.id)
         async with self.ctx.sync.current_files:
             self.ctx.sync.current_files.notify_all()

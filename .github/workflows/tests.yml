@@ -7,7 +7,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  # 1. Джоба для линтеров и безопасности (быстрая)
+  # 1. Линтеры (запускаем один раз на Linux, чтобы сэкономить ресурсы)
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -18,15 +18,29 @@ jobs:
       - name: Run pre-commit
         run: uv run pre-commit run --all-files
 
-  # 2. Джоба для тестов (может идти дольше)
+  # 2. Матричные тесты
   test:
-    runs-on: ubuntu-latest
-    # Запускать тесты, только если линтеры прошли (опционально)
-    # needs: lint
+    needs: lint # Тесты запустятся только если линтеры прошли успешно
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
       - name: Install dependencies
         run: uv sync --all-groups
+
       - name: Run pytest
         run: uv run pytest -v --cov=src

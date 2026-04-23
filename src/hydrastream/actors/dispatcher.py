@@ -3,37 +3,63 @@
 
 import sys
 
-from hydrastream.models import Chunk, HydraContext
+from hydrastream.models import Envelope, HydraContext
 
 
-async def chunk_dispatcher(ctx: HydraContext) -> None:
+async def chunk_dispatcher(ctx: HydraContext) -> None:  # noqa: C901
+    if ctx.stream:
+
+        def make_key(f_id: int, pos: int) -> tuple[int, int]:
+            return (f_id, pos)
+
+        def can_continue() -> bool:
+            return not ctx.current_files_id
+
+    else:
+
+        def make_key(f_id: int, pos: int) -> tuple[int, int]:
+            return (pos, f_id)
+
+        limit = ctx.config.threads  # кэшируем лимит для скорости
+
+        def can_continue() -> bool:
+            return len(ctx.current_files_id) < limit
+
     while True:
-        priority_index, file = await ctx.queues.dispatch_file.get()
-        if priority_index == sys.maxsize or file is None:
+        envelope = await ctx.queues.dispatch_file.get()
+
+        if envelope.is_poison_pill:
             break
+
+        if not (file := envelope.payload):
+            continue
+
         if ctx.stream:
-            await ctx.queues.file_discovery.put(priority_index)
+            await ctx.queues.file_discovery.put(file.meta.id)
+
         file.create_chunks()
         for c in file.chunks:
             if c.current_pos <= c.end:
                 await ctx.queues.chunk.put(
-                    (priority_index, c) if ctx.stream else (c, priority_index)
+                    Envelope(
+                        sort_key=make_key(file.meta.id, c.current_pos),
+                        payload=c,
+                    )
                 )
 
-        ctx.current_files_id.add(priority_index)
+        ctx.current_files_id.add(file.meta.id)
 
         async with ctx.sync.current_files:
-            await ctx.sync.current_files.wait_for(
-                lambda: (
-                    not ctx.current_files_id
-                    if ctx.stream
-                    else len(ctx.current_files_id) < ctx.config.threads
-                )
-            )
+            await ctx.sync.current_files.wait_for(can_continue)
 
-    c = Chunk(current_pos=sys.maxsize, start=sys.maxsize, end=sys.maxsize)
-
-    for i in range(ctx.tasks.workers - 1, -1, -1):
+    for i in range(ctx.tasks.workers - 1, 0, -1):
         await ctx.queues.chunk.put(
-            (sys.maxsize - i, c) if ctx.stream else (c, sys.maxsize - i)
+            Envelope(sort_key=(sys.maxsize - i,), is_poison_pill=True)
         )
+    await ctx.queues.chunk.put(
+        Envelope(
+            sort_key=(sys.maxsize,),
+            is_poison_pill=True,
+            is_last_survivor=True,
+        )
+    )

@@ -10,37 +10,54 @@ from curl_cffi.requests import RequestsError
 
 from hydrastream._curl_shim import get_error_response
 from hydrastream.exceptions import LogStatus, SystemContextError
-from hydrastream.models import Checksum, File, FileMeta, HydraContext, TypeHash
+from hydrastream.models import (
+    Checksum,
+    Envelope,
+    File,
+    FileMeta,
+    HydraContext,
+    LinkData,
+    TypeHash,
+)
 from hydrastream.monitor import add_file, done, log, update
 from hydrastream.network import extract_filename, safe_request, stream_chunk
 from hydrastream.providers import ProviderRouter
 from hydrastream.utils import redact_url
 
 
-async def metadata_resolver(  # noqa
+async def metadata_resolver(
     ctx: HydraContext,
 ) -> None:
-    id, url, checksum = None, None, None
+    checksum = None
     while True:
-        try:
-            id, url, checksum = await ctx.queues.links.get()
-            if sys.maxsize - ctx.tasks.resolvers < id:
-                if id == sys.maxsize:
-                    await ctx.queues.dispatch_file.put((sys.maxsize, None))
-                    if ctx.config.dry_run:
-                        ctx.sync.all_complete.set()
-                break
+        envelope = await ctx.queues.links.get()
 
-            meta = await _fetch_metadata(ctx, url)
+        if envelope.is_poison_pill:
+            if envelope.is_last_survivor:
+                await ctx.queues.dispatch_file.put(
+                    Envelope(
+                        sort_key=(sys.maxsize,),
+                        is_poison_pill=True,
+                        is_last_survivor=True,
+                    )
+                )
+                if ctx.config.dry_run:
+                    ctx.sync.all_complete.set()
+            break
+
+        if not (data := envelope.payload):
+            continue
+
+        try:
+            meta = await _fetch_metadata(ctx, data.url)
 
             filename, total_size, supports_ranges = meta
 
-            if ctx.config.verify and not checksum:
-                checksum = await _resolve_hash(ctx, url, filename, checksum)
+            if ctx.config.verify and not data.checksum:
+                checksum = await _resolve_hash(ctx, data.url, filename, data.checksum)
             file_obj = await _prepare_file_object(
                 ctx,
-                id=id,
-                url=url,
+                data=data,
                 filename=filename,
                 total_size=total_size,
                 supports_ranges=supports_ranges,
@@ -49,61 +66,64 @@ async def metadata_resolver(  # noqa
             if not ctx.stream and not ctx.config.dry_run:
                 file_obj.fd = ctx.fs.open_file(filename=file_obj.meta.filename)
 
-            await _register_file(ctx, file_obj, id)
-
-        except asyncio.CancelledError:
-            break
-
-        except RequestsError as e:
-            response = get_error_response(e)
-
-            if isinstance(response, Response):
-                status = response.status_code
-
-                if url and status in {400, 401, 403, 404, 410, 416}:
-                    await log(
-                        ctx.ui,
-                        f"Link {redact_url(url)} failed permanently (HTTP {status}).",
-                        status=LogStatus.ERROR,
-                    )
-                    continue
-
-                # Остальные ошибки сервера (5xx, 429) — пробуем перекинуть ссылку
-                # в очередь
-                await requeue_chunk(ctx, id, url, checksum, delay_range=(0.5, 2.0))
-            # 2. Если ответа нет (Сетевая ошибка / CurlError / Timeout)
-            else:
-                await requeue_chunk(ctx, id, url, checksum)
-
-        except TimeoutError:
-            await requeue_chunk(ctx, id, url, checksum)
-        except OSError as e:
-            err = SystemContextError(
-                operation="task creation",
-                original_error=str(e),
-                path=str(ctx.config.output_dir),  # Добавляем контекст пути
-            )
-            raise err from e
+            await _register_file(ctx, file_obj)
 
         except Exception as e:
-            await log(
-                ctx.ui,
-                f"Critical Task Creator crash: {e!r}",
-                status=LogStatus.CRITICAL,
-            )
-            raise
+            if await handle_error(ctx, e, envelope, data):
+                ctx.queues.links.task_done()  # Важно закрыть задачу перед continue
+                continue
+
+
+async def handle_error(
+    ctx: HydraContext, e: Exception, envelope: Envelope[LinkData | None], data: LinkData
+) -> bool:
+    """Возвращает True, если нужно пропустить итерацию (continue)."""
+
+    if isinstance(e, RequestsError):
+        response = get_error_response(e)
+
+        if isinstance(response, Response):
+            status = response.status_code
+            # Постоянные ошибки: логируем и забываем
+            if status in {400, 401, 403, 404, 410, 416}:
+                await log(
+                    ctx.ui,
+                    f"Link {redact_url(data.url)} failed permanently (HTTP {status}).",
+                    status=LogStatus.ERROR,
+                )
+                return True  # Нужно сделать continue в цикле
+
+            # Временные ошибки сервера (5xx, 429) — в очередь
+            await requeue_chunk(ctx, envelope, delay_range=(0.5, 2.0))
+        else:
+            # Сетевая ошибка без ответа
+            await requeue_chunk(ctx, envelope)
+        return True
+
+    if isinstance(e, TimeoutError):
+        await requeue_chunk(ctx, envelope)
+        return True
+
+    if isinstance(e, OSError):
+        raise SystemContextError(
+            operation="task creation",
+            original_error=str(e),
+            path=str(ctx.config.output_dir),
+        ) from e
+
+    # Если мы здесь, значит ошибка критическая (Exception)
+    await log(ctx.ui, f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL)
+    raise e
 
 
 async def requeue_chunk(
     ctx: HydraContext,
-    id: int | None,
-    url: str | None,
-    checksum: Checksum | None,
+    envelope: Envelope[LinkData | None] | None,
     delay_range: tuple[float, float] = (1.0, 3.0),
 ) -> None:
-    if id is None or url is None:
+    if envelope is None:
         return
-    await ctx.queues.links.put((id, url, checksum))
+    await ctx.queues.links.put(envelope)
     delay = random.uniform(*delay_range)
     await asyncio.sleep(delay)
 
@@ -153,10 +173,9 @@ async def _resolve_hash(
     return checksum
 
 
-async def _prepare_file_object(  # noqa
+async def _prepare_file_object(
     ctx: HydraContext,
-    id: int,
-    url: str,
+    data: LinkData,
     filename: str,
     total_size: int,
     supports_ranges: bool,
@@ -170,9 +189,9 @@ async def _prepare_file_object(  # noqa
     if ctx.stream:
         return File(
             meta=FileMeta(
-                id=id,
+                id=data.id,
                 filename=filename,
-                url=url,
+                url=data.url,
                 content_length=total_size,
                 supports_ranges=supports_ranges,
                 expected_checksum=checksum,
@@ -202,9 +221,9 @@ async def _prepare_file_object(  # noqa
             filename = new_filename
     return File(
         meta=FileMeta(
-            id=id,
+            id=data.id,
             filename=filename,
-            url=url,
+            url=data.url,
             content_length=total_size,
             supports_ranges=supports_ranges,
             expected_checksum=checksum,
@@ -213,11 +232,9 @@ async def _prepare_file_object(  # noqa
     )
 
 
-async def _register_file(
-    ctx: HydraContext, file_obj: File, priority_index: int
-) -> None:
+async def _register_file(ctx: HydraContext, file_obj: File) -> None:
     filename = file_obj.meta.filename
-    ctx.files[priority_index] = file_obj
+    ctx.files[file_obj.meta.id] = file_obj
     chunks = file_obj.chunks or []
 
     add_file(ctx.ui, filename, file_obj.meta.content_length)
@@ -225,4 +242,6 @@ async def _register_file(
         downloaded = sum(c.uploaded for c in chunks)
         if downloaded - len(chunks) > 0:
             update(ctx.ui, filename, downloaded)
-    await ctx.queues.dispatch_file.put((priority_index, file_obj))
+    await ctx.queues.dispatch_file.put(
+        Envelope(sort_key=(file_obj.meta.id,), payload=file_obj)
+    )

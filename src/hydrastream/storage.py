@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import os
 import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from hydrastream.exceptions import (
@@ -39,8 +41,14 @@ class LocalStorageManager:
         if filepath.is_file():
             filepath = self.get_unique_path(filepath)
 
-        with filepath.open("wb") as f:
-            f.truncate(size)
+        fd = os.open(filepath, os.O_RDWR | os.O_CREAT)
+        try:
+            if hasattr(os, "posix_fallocate") and size > 0:
+                os.posix_fallocate(fd, 0, size)
+            else:
+                os.ftruncate(fd, size)
+        finally:
+            os.close(fd)
 
         if filepath.name != filename:
             return filepath.name
@@ -50,11 +58,95 @@ class LocalStorageManager:
         filepath = self.output_dir / filename
         return os.open(filepath, os.O_RDWR)
 
-    async def write_chunk_data(
-        self, fd_or_conn: int, data: bytearray, offset: int
+    def write_chunk_data(
+        self, fd_or_conn: int, data_bytes: list[bytes], len_data: int, offset: int
     ) -> None:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, os.pwrite, fd_or_conn, data, offset)
+        """Главный диспетчер записи."""
+        if hasattr(os, "pwritev"):
+            self._write_posix_vectored(fd_or_conn, data_bytes, len_data, offset)
+
+            # Сброс кэша (только для POSIX)
+            if hasattr(os, "posix_fadvise"):
+                with contextlib.suppress(Exception):
+                    os.posix_fadvise(
+                        fd_or_conn, offset, len_data, os.POSIX_FADV_DONTNEED
+                    )
+        else:
+            self._write_windows_merged(fd_or_conn, data_bytes, len_data, offset)
+
+    def _write_posix_vectored(
+        self, fd: int, data_bytes: list[bytes], len_data: int, offset: int
+    ) -> None:
+        """Сложная векторная запись (Zero-Copy) для
+        Linux/macOS с обработкой частичной записи."""
+        views = [memoryview(b) for b in data_bytes]
+        written = 0
+        retries = 0
+
+        # Флаг RWF_DSYNC есть только в новых версиях Python/Linux
+        flags = os.RWF_DSYNC if hasattr(os, "RWF_DSYNC") else 0
+
+        while written < len_data:
+            try:
+                if flags:
+                    n = os.pwritev(fd, views, offset + written, flags)
+                else:
+                    n = os.pwritev(fd, views, offset + written)
+
+                if n <= 0:
+                    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+                written += n
+
+                # Если ядро не смогло записать всё за один раз, перестраиваем векторы
+                if written < len_data:
+                    views = self._rebuild_memoryviews(views, n)
+
+            except OSError as e:
+                self._handle_io_retry(e, retries)
+                retries += 1
+
+    def _write_windows_merged(
+        self, fd: int, data_bytes: list[bytes], len_data: int, offset: int
+    ) -> None:
+        """Классическая запись склеенным куском для Windows."""
+        merged_data = b"".join(data_bytes)
+        view = memoryview(merged_data)
+        written = 0
+        retries = 0
+
+        while written < len_data:
+            try:
+                n = os.pwrite(fd, view[written:], offset + written)
+                if n <= 0:
+                    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+                written += n
+            except OSError as e:
+                self._handle_io_retry(e, retries)
+                retries += 1
+
+    def _rebuild_memoryviews(
+        self, views: list[memoryview], bytes_skipped: int
+    ) -> list[memoryview]:
+        """Утилита для обрезки записанных кусков из массива векторов."""
+        new_views: list[memoryview] = []
+        skip = bytes_skipped
+        for v in views:
+            if skip >= len(v):
+                skip -= len(v)
+            else:
+                new_views.append(v[skip:])
+                skip = 0
+        return new_views
+
+    def _handle_io_retry(self, e: OSError, retries: int) -> None:
+        """Обрабатывает системные прерывания (EAGAIN, EINTR)."""
+        if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+            if retries > 5:
+                raise RuntimeError(f"Too many retries on EAGAIN/EINTR: {e}") from e
+            time.sleep(0.01 * (2**retries))  # Exponential backoff
+        else:
+            raise e
 
     def close_file(self, fd_or_conn: int) -> None:
         with contextlib.suppress(OSError):

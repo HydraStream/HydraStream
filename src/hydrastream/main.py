@@ -84,7 +84,7 @@ async def async_main(  # noqa: C901, PLR0912
     threads: int,
     min_chunk_size_mb: int,
     max_stream_chunk_size_mb: int,
-    stream_buffer_size_mb: int | None,
+    buffer_size_mb: int | None,
     speed_limit: float | None,
     impersonate: BrowserTypeLiteral,
     debug: bool,
@@ -107,7 +107,7 @@ async def async_main(  # noqa: C901, PLR0912
         threads: Maximum number of concurrent download connections.
         min_chunk_size_mb: Minimum chunk size in MB for disk mode.
         max_stream_chunk_size_mb: Target chunk size in MB for stream mode.
-        stream_buffer_size_mb: Maximum memory buffer size in MB for streaming.
+        buffer_size_mb: Maximum memory buffer size in MB for streaming.
         speed_limit: Global bandwidth throttle limit in MB/s.
         browser: Browser TLS fingerprint to impersonate.
         debug: Enable debug mode to propagate full tracebacks on failure.
@@ -149,7 +149,7 @@ async def async_main(  # noqa: C901, PLR0912
             no_ui=no_ui,
             quiet=quiet,
             output_dir=output_dir,
-            stream_buffer_size_mb=stream_buffer_size_mb,
+            buffer_size_mb=buffer_size_mb,
             json_logs=json_logs,
             verify=verify,
             client_kwargs=None,
@@ -345,7 +345,7 @@ def cli(
             default_factory=partial(get_cfg, "stream-chunk-mb", 5),
         ),
     ],
-    stream_buffer_size_mb: Annotated[
+    buffer_size_mb: Annotated[
         int | None,
         typer.Option(
             "--buffer",
@@ -441,7 +441,7 @@ def cli(
             no_ui=no_ui,
             quiet=quiet,
             output_dir=output_dir,
-            stream_buffer_size_mb=stream_buffer_size_mb,
+            buffer_size_mb=buffer_size_mb,
             json_logs=json_logs,
             verify=verify,
             impersonate=browser,

@@ -4,7 +4,7 @@
 import asyncio
 
 from hydrastream.exceptions import LogStatus
-from hydrastream.models import File, HydraContext
+from hydrastream.models import Envelope, File, HydraContext
 from hydrastream.monitor import log
 
 
@@ -18,6 +18,9 @@ async def autosaver(ctx: HydraContext, interval: float) -> None:
             break
         except TimeoutError:
             try:
+                ctx.sync.flush_event.clear()
+                await ctx.queues.disk.put(Envelope(sort_key=(-1,), msg=True))
+                await ctx.sync.flush_event.wait()
                 await loop.run_in_executor(None, save_all_states, ctx, ctx.files)
             except Exception as e:
                 if ctx.config.debug:
@@ -25,9 +28,6 @@ async def autosaver(ctx: HydraContext, interval: float) -> None:
                 await log(
                     ctx.ui, f"Auto-save operation failed: {e}", status=LogStatus.ERROR
                 )
-
-        except asyncio.CancelledError:
-            break
 
 
 def save_all_states(ctx: HydraContext, files: dict[int, File]) -> None:

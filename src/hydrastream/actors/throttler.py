@@ -28,8 +28,6 @@ async def throttle_controller(ctx: HydraContext) -> None:
 
             ctx.ui.speed.last_checkpoint_time = time.monotonic()
 
-        except asyncio.CancelledError:
-            raise
         except Exception as e:
             if ctx.config.debug:
                 raise

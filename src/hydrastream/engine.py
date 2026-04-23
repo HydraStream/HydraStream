@@ -3,30 +3,27 @@
 
 import asyncio
 import contextlib
-import hashlib
-import heapq
 import math
 import random
 import signal
-import sys
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TypeVarTuple, Unpack
 
 from hydrastream.actors.autosaver import autosaver, save_all_states
 from hydrastream.actors.controller import AdaptiveEngine
 from hydrastream.actors.dispatcher import chunk_dispatcher
+from hydrastream.actors.feeder import link_feeder
 from hydrastream.actors.resolver import metadata_resolver
+from hydrastream.actors.streamer import streamer
 from hydrastream.actors.throttler import throttle_controller
 from hydrastream.actors.worker import DownloadWorker
+from hydrastream.actors.writer import disk_writer
 from hydrastream.exceptions import (
-    FileSizeMismatchError,
-    HashMismatchError,
     LogStatus,
 )
-from hydrastream.interfaces import Hasher
-from hydrastream.models import Checksum, HydraContext, TypeHash
-from hydrastream.monitor import done, log, print_dry_run_report, ui_start, ui_stop
+from hydrastream.models import Checksum, Envelope, HydraContext, TypeHash
+from hydrastream.monitor import log, print_dry_run_report, ui_start, ui_stop
 
 Ts = TypeVarTuple("Ts")
 
@@ -76,80 +73,10 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
 
         if ctx.stream:
             with contextlib.suppress(asyncio.QueueFull):
-                ctx.queues.stream.put_nowait((-1, b""))
+                ctx.queues.stream.put_nowait(
+                    Envelope(sort_key=(-1,), is_poison_pill=True)
+                )
                 ctx.queues.file_discovery.put_nowait(-1)
-
-
-async def _stream_one(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
-    file_obj = ctx.files[file_id]
-    total_size = file_obj.meta.content_length
-
-    checksum = file_obj.meta.expected_checksum
-    hasher: Hasher | None = hashlib.new(checksum.algorithm) if checksum else None
-
-    ctx.next_offset = 0
-    await log(ctx.ui, f"Streaming: {file_obj.meta.filename}", status=LogStatus.INFO)
-    try:
-        while ctx.next_offset < total_size:
-            if ctx.heap and ctx.heap[0][0] == ctx.next_offset:
-                _, data = heapq.heappop(ctx.heap)
-
-                if hasher:
-                    hasher.update(data)
-
-                yield data
-
-                length = len(data)
-                ctx.next_offset += length
-
-                async with ctx.sync.chunk_from_future:
-                    ctx.sync.chunk_from_future.notify_all()
-
-                continue
-
-            chunk_start, data = await ctx.queues.stream.get()
-
-            if chunk_start == -1:
-                break
-
-            if chunk_start == ctx.next_offset:
-                if hasher:
-                    hasher.update(data)
-
-                yield data
-
-                length = len(data)
-                ctx.next_offset += length
-                async with ctx.sync.chunk_from_future:
-                    ctx.sync.chunk_from_future.notify_all()
-
-            else:
-                heapq.heappush(ctx.heap, (chunk_start, data))
-        else:
-            await done(ctx.ui, file_obj.meta.filename)
-
-            if hasher and checksum:
-                try:
-                    verify_stream(
-                        hasher,
-                        file_obj.meta.filename,
-                        checksum,
-                        ctx.next_offset,
-                        total_size,
-                    )
-                    await log(
-                        ctx.ui, "Hash Verified", status=LogStatus.SUCCESS, progress=True
-                    )
-                except Exception as e:
-                    await log(ctx.ui, str(e), status=LogStatus.ERROR)
-                    raise
-
-    finally:
-        ctx.heap.clear()
-        del ctx.files[file_id]
-        ctx.current_files_id.remove(file_id)
-        async with ctx.sync.current_files:
-            ctx.sync.current_files.notify()
 
 
 async def prepare_runtime(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
@@ -183,6 +110,7 @@ async def create_tasks(
     if ctx.stream:
         ctx.tasks.workers = ctx.config.threads
     else:
+        tg.create_task(disk_writer(ctx), name="Writer")
         ctx.tasks.workers = (
             math.ceil(ctx.config.threads * 1.2)
             if ctx.config.threads > 1
@@ -221,25 +149,6 @@ async def create_tasks(
             ctx.tasks.autosaver = 1
 
 
-async def link_feeder(
-    ctx: HydraContext,
-    links: str | Iterable[str],
-    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
-) -> None:
-    checksums = None
-    for i, link in enumerate(links):
-        if expected_checksums is not None:
-            checksums = expected_checksums.get(link)
-            if checksums and not isinstance(checksums, Checksum):
-                checksums = Checksum(algorithm=checksums[0], value=checksums[1])
-        else:
-            expected_checksums = None
-        await ctx.queues.links.put((i, link, checksums))
-
-    for i in range(ctx.tasks.resolvers - 1, -1, -1):
-        await ctx.queues.links.put((sys.maxsize - i, "", None))
-
-
 async def session_killer(ctx: HydraContext) -> None:
     try:
         await ctx.sync.all_complete.wait()
@@ -262,17 +171,19 @@ async def stream_all(
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(session_killer(ctx), name="SessionKiller")
                 await create_tasks(ctx, tg, links, expected_checksums)
-                file_gen = None
-                while True:
-                    file_id = await ctx.queues.file_discovery.get()
 
-                    if file_id == -1:
-                        break
-                    filename = ctx.files[file_id].meta.filename
+                if not ctx.config.dry_run:
+                    file_gen = None
+                    while True:
+                        file_id = await ctx.queues.file_discovery.get()
 
-                    file_gen = _stream_one(ctx, file_id)
+                        if file_id == -1:
+                            break
+                        filename = ctx.files[file_id].meta.filename
 
-                    yield filename, file_gen
+                        file_gen = streamer(ctx, file_id)
+
+                        yield filename, file_gen
 
         except* Exception as eg:
             for e in eg.exceptions:
@@ -324,28 +235,3 @@ async def run_downloads(
 
     finally:
         await teardown_engine(ctx, loop)
-
-
-def verify_stream(
-    hasher: Hasher,
-    filename: str,
-    expected_checksum: Checksum,
-    next_offset: int,
-    total_size: int,
-) -> None:
-    if next_offset != total_size:
-        raise FileSizeMismatchError(
-            filename=filename,
-            expected=total_size,
-            actual=next_offset,
-            message_tpl="Incomplete stream data! Yielded {actual} of {expected} bytes.",
-        )
-
-    calculated = hasher.hexdigest()
-    if calculated != expected_checksum.value:
-        raise HashMismatchError(
-            filename=filename,
-            algorithm=expected_checksum.algorithm,
-            expected=expected_checksum.value,
-            actual=calculated,
-        )

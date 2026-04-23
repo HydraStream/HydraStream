@@ -245,7 +245,7 @@ class InvalidParameterError(HydraError):
 
 
 @dataclass(kw_only=True)
-class RangeRequestNotSupportedError(HydraError):
+class StreamError(HydraError):
     url: str
     filename: str
 

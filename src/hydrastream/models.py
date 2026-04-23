@@ -8,16 +8,16 @@ import contextlib
 import sys
 import typing
 from collections import defaultdict
-from dataclasses import InitVar, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
+    Generic,
     Literal,
     Self,
-    TypedDict,
     TypeVar,
-    dataclass_transform,
     get_args,
 )
 from urllib.parse import urlparse
@@ -26,12 +26,21 @@ import orjson
 from aiolimiter import AsyncLimiter
 from curl_cffi import (
     BrowserTypeLiteral,
-    CurlHttpVersion,
-    CurlOpt,
     Headers,
-    HeaderTypes,
     Response,
 )
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    StringConstraints,
+    TypeAdapter,
+    computed_field,
+    field_validator,
+    model_validator,
+)
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from rich.console import Console
 from rich.live import Live
 from rich.progress import (
@@ -41,7 +50,6 @@ from rich.progress import (
 
 from hydrastream._curl_shim import AsyncSession
 from hydrastream.exceptions import (
-    InvalidChecksumError,
     OrphanedChunkError,
     ValidationError,
 )
@@ -67,43 +75,15 @@ TypeHash = Literal[
     "shake_256",
 ]
 
-
-class BaseSessionParams(TypedDict, total=False):
-    headers: HeaderTypes | None
-    verify: bool
-    timeout: float | tuple[float, float]
-    allow_redirects: bool
-    max_redirects: int
-    impersonate: BrowserTypeLiteral | None
-    default_headers: bool
-    http_version: CurlHttpVersion | str | None
-    curl_options: dict[CurlOpt, int] | None
-
-
 _T = TypeVar("_T")
 
 
-@dataclass_transform(kw_only_default=True)
-def entity(cls: type[_T]) -> type[_T]:
-    return dataclass(slots=True, kw_only=True, weakref_slot=True)(cls)
-
-
-@dataclass_transform(kw_only_default=True)
-def ordered_entity(cls: type[_T]) -> type[_T]:
-    return dataclass(slots=True, kw_only=True, order=True, weakref_slot=True)(cls)
-
-
-@dataclass_transform(kw_only_default=True, frozen_default=True)
-def value_object(cls: type[_T]) -> type[_T]:
-    return dataclass(slots=True, kw_only=True, frozen=True, weakref_slot=True)(cls)
-
-
-@ordered_entity
+@dataclass(kw_only=True, slots=True)
 class Chunk:
     current_pos: int
-    start: int = field(compare=False)
-    end: int = field(compare=False)
-    _file: File | None = field(repr=False, compare=False, default=None)
+    start: int
+    end: int
+    _file: File | None = field(repr=False, default=None)
 
     @property
     def file(self) -> File:
@@ -143,70 +123,80 @@ def validate_typehash(value: TypeHash) -> None:
         )
 
 
-@value_object
-class Checksum:
+# 1. Список алгоритмов и их длин
+EXPECTED_LENGTHS = {
+    "md5": 32,
+    "sha1": 40,
+    "sha224": 56,
+    "sha256": 64,
+    "sha384": 96,
+    "sha512": 128,
+    "blake2b": 128,
+    "blake2s": 64,
+    "sha3_224": 56,
+    "sha3_256": 64,
+    "sha3_384": 96,
+    "sha3_512": 128,
+}
+
+# Алгоритмы с переменной длиной (просто проверяем на четность hex-строки)
+VARIABLE_LENGTH = {"shake_128", "shake_256"}
+
+# Валидатор строки: чистит пробелы, в нижний регистр, проверка на hex
+HashStr = Annotated[
+    str, StringConstraints(pattern=r"^[0-9a-f]+$", strip_whitespace=True, to_lower=True)
+]
+
+
+class Checksum(BaseModel):
+    # Настройки как в твоем value_object
+    model_config = ConfigDict(frozen=True)
+
     algorithm: TypeHash
-    value: str
+    value: HashStr
 
-    def __post_init__(self) -> None:
-        validate_typehash(self.algorithm)
-        normalized = self.value.strip().lower()
-        object.__setattr__(self, "value", normalized)
+    @model_validator(mode="after")
+    def validate_hash_logic(self) -> Checksum:
+        algo = self.algorithm
+        length = len(self.value)
 
-        expected_lengths = {
-            "md5": 32,
-            "sha1": 40,
-            "sha224": 56,
-            "sha3_224": 56,
-            "sha256": 64,
-            "sha3_256": 64,
-            "blake2s": 64,
-            "sha384": 96,
-            "sha3_384": 96,
-            "sha512": 128,
-            "sha3_512": 128,
-            "blake2b": 128,
-        }
-
-        # Проверка на HEX
-        if not all(c in "0123456789abcdef" for c in normalized):
-            raise InvalidChecksumError(
-                algorithm=self.algorithm,
-                value=normalized,
-                reason="Contains non-hex characters",
-            )
-
-        # Проверка длины
-        if self.algorithm in expected_lengths:
-            expected = expected_lengths[self.algorithm]
-            if len(normalized) != expected:
-                raise InvalidChecksumError(
-                    algorithm=self.algorithm,
-                    value=normalized,
-                    reason=(
-                        f"Invalid length: expected {expected}, got {len(normalized)}"
-                    ),
+        # Если длина фиксирована — проверяем строго
+        if algo in EXPECTED_LENGTHS:
+            expected = EXPECTED_LENGTHS[algo]
+            if length != expected:
+                raise ValueError(
+                    f"Invalid length for {algo}: expected {expected}, got {length}"
                 )
 
+        # Если это SHAKE — проверяем только, что это полные байты
+        # (четное кол-во символов)
+        elif algo in VARIABLE_LENGTH:
+            if length % 2 != 0:
+                raise ValueError(
+                    f"Invalid length for {algo}: must be even, got {length}"
+                )
 
-@value_object
+        return self
+
+
+@dataclass(kw_only=True, slots=True, frozen=True)
 class FileMeta:
     id: int
-    filename: str = field(compare=False)
-    url: str = field(compare=False)
-    content_length: int = field(compare=False)
-    expected_checksum: Checksum | None = field(default=None, compare=False)
-    supports_ranges: bool = field(compare=False)
+    filename: str
+    url: str
+    content_length: int
+    expected_checksum: Checksum | None = field(default=None)
+    supports_ranges: bool
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class File:
     meta: FileMeta
-    chunk_size: int = field(compare=False)
-    chunks: list[Chunk] = field(default_factory=list[Chunk], compare=False)
-    fd: int | None = field(default=None, repr=False, compare=False)
-    verified: bool = field(default=False, compare=False)
-    is_failed: bool = field(default=False, compare=False)
+    chunk_size: int
+    chunks: list[Chunk] = field(default_factory=list[Chunk])
+    fd: int | None = field(default=None, repr=False)
+    verified: bool = field(default=False)
+    is_failed: bool = field(default=False)
 
     def create_chunks(self) -> None:
         if self.chunks:
@@ -264,33 +254,22 @@ class File:
 
     @classmethod
     def from_json(cls, content: bytes) -> Self:
-        data: dict[str, Any] = orjson.loads(content)
-        meta: dict[str, Any] = data.pop("meta")
-        checksum_data: dict[str, TypeHash] | None = meta.pop("expected_checksum")
-        if isinstance(checksum_data, dict):
-            meta["expected_checksum"] = Checksum(
-                algorithm=checksum_data.pop("algorithm"),
-                value=checksum_data.pop("value"),
-            )
-        file_meta = FileMeta(**meta)
+        # 1. Сначала превращаем JSON в один большой словарь (через fast orjson)
+        raw_data = orjson.loads(content)
 
-        chunks_data = data.pop("chunks", [])
+        # 2. Используем TypeAdapter для автоматической сборки всей вложенности.
+        # Он сам создаст FileMeta, внутри него Checksum, и список Chunk.
+        file_obj = TypeAdapter(cls).validate_python(raw_data)
 
-        file_obj = cls(meta=file_meta, **data)
+        # 3. Единственное, что Pydantic не сделает сам —
+        # не проставит обратную ссылку _file в каждый чанк (т.к. это цикл)
+        for chunk in file_obj.chunks:
+            chunk._file = file_obj  # pyright: ignore[reportPrivateUsage]
 
-        file_obj.chunks = [
-            Chunk(
-                current_pos=c["current_pos"],
-                start=c["start"],
-                end=c["end"],
-                _file=file_obj,
-            )
-            for c in chunks_data
-        ]
         return file_obj
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class DisplayConfig:
     """Настройки отображения, переданные юзером."""
 
@@ -306,7 +285,7 @@ class DisplayConfig:
             self.quiet = False
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class ProgressState:
     """Чисто статистика и счетчики загрузки."""
 
@@ -319,7 +298,7 @@ class ProgressState:
     files_completed: int = 0
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class LogState:
     """Всё, что касается записи логов на жесткий диск."""
 
@@ -346,7 +325,7 @@ class LogState:
             self.log_file = fallback
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class SpeedLimiterState:
     """Логика глобального ограничения скорости."""
 
@@ -373,7 +352,7 @@ class SpeedLimiterState:
         self.limit_event.set()
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class RichUIState:
     """Всё, что относится к библиотеке Rich (Прогресс-бары, консоль)."""
 
@@ -395,7 +374,7 @@ class RichUIState:
         self.renewal_rate = 1 / self.refresh_per_second
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class UIState:
     is_running: bool = False
     cancelled: bool = False
@@ -410,7 +389,7 @@ class UIState:
             self.rich.console = Console(file=sys.__stderr__, stderr=True)
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class AMIDState:
     max_rps: int
     min_rps: int = 1
@@ -431,7 +410,7 @@ class AMIDState:
         self.limiter = AsyncLimiter(self.current_rps, 1)
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class NetworkState:
     threads: int
     monitor: UIState
@@ -465,158 +444,136 @@ class NetworkState:
             await self.client.close()
 
 
-def validate_threads(value: int | None) -> None:
-    if value is not None and (value < 1 or value > 128):
-        raise ValidationError(
-            param="threads", value=value, reason="Must be between 1 and 128"
-        )
+class HydraConfig(BaseSettings):
+    # Настройки загрузки из окружения и .env
+    model_config = SettingsConfigDict(
+        env_prefix="HYDRA_",
+        env_file=".env",
+        extra="ignore",
+        frozen=True,
+        arbitrary_types_allowed=True,
+    )
 
-
-def validate_speed_limit(value: float | None) -> None:
-    if value is not None and value <= 0.0:
-        raise ValidationError(
-            param="speed-limit", value=value, reason="Must be greater than 0.0 MB/s"
-        )
-
-
-def validate_positive_int(param_name: str, value: int | None, min: int = 0) -> None:
-    if value is None:
-        return
-
-    if min > 0:
-        if value < min:
-            raise ValidationError(
-                param=param_name,
-                value=value,
-                reason=f"Value must be a positive integer (greater than {min}).",
-            )
-
-        return
-
-    if value <= min:
-        raise ValidationError(
-            param=param_name,
-            value=value,
-            reason=f"Value must be a positive integer (greater than {min}).",
-        )
-
-
-def validate_input_file(value: str | None) -> None:
-    if value is None or value == "-":
-        return
-
-    path = Path(value)
-    if not path.exists():
-        raise ValidationError(param="input", value=value, reason="File does not exist")
-    if not path.is_file():
-        raise ValidationError(param="input", value=value, reason="Target is not a file")
-
-
-def validate_output_dir(value: str) -> None:
-    path = Path(value)
-    if path.exists() and not path.is_dir():
-        raise ValidationError(
-            param="output", value=value, reason="Path exists but is not a directory"
-        )
-    try:
-        path.resolve()
-    except Exception as e:
-        raise ValidationError(
-            param="output", value=value, reason="Invalid path format"
-        ) from e
-
-
-def validate_links(links: list[str] | None) -> None:
-    if not links:
-        return
-    for url in links:
-        result = urlparse(url)
-        if not (result.scheme in ("http", "https") and result.netloc):
-            raise ValidationError(
-                param="link", value=url, reason="Only HTTP/HTTPS are supported"
-            )
-
-
-def validate_browser(value: str) -> None:
-    allowed = get_args(BrowserTypeLiteral)
-    if value not in allowed:
-        raise ValidationError(
-            param="browser",
-            value=value,
-            reason=f"Unsupported browser. Supported: {', '.join(allowed)}",
-        )
-
-
-@value_object
-class HydraConfig:
-    threads: int = 128
+    # --- Поля с базовой валидацией Pydantic ---
+    threads: int = Field(default=128, ge=1, le=128)
     no_ui: bool = False
     quiet: bool = False
     output_dir: str = "download"
-    speed_limit: float | None = None
+    speed_limit: float | None = Field(default=None, gt=0.0)
     dry_run: bool = False
     json_logs: bool = False
     verify: bool = True
     impersonate: BrowserTypeLiteral = "chrome120"
     debug: bool = False
 
-    min_chunk_size_mb: InitVar[int] = 1
-    max_stream_chunk_size_mb: InitVar[int] = 5
-    stream_buffer_size_mb: InitVar[int | None] = None
-    client_kwargs: dict[str, Any] | None = None
+    # Входные параметры в МБ (аналог InitVar)
+    min_chunk_size_mb: PositiveInt = 1
+    max_stream_chunk_size_mb: PositiveInt = 5
+    buffer_size_mb: int | None = Field(default=None, ge=50)
 
-    custom_providers: dict[str, HashProvider] | None = None
+    links: list[str] = Field(default_factory=list)
+    client_kwargs: dict[str, Any] | None = Field(default=None, exclude=True)
 
-    MIN_CHUNK: int = field(init=False)  # 1MB
-    STREAM_CHUNK_SIZE: int = field(init=False)  # 5MB
-    STREAM_BUFFER_SIZE: int = field(init=False)
-
-    def __post_init__(
-        self,
-        min_chunk_size_mb: int,
-        max_stream_chunk_size_mb: int,
-        stream_buffer_size_mb: int | None,
-    ) -> None:
-        validate_threads(self.threads)
-        validate_output_dir(self.output_dir)
-        validate_speed_limit(self.speed_limit)
-        validate_positive_int("min_chunk_size_mb", min_chunk_size_mb)
-        validate_positive_int("max_stream_chunk_size_mb", max_stream_chunk_size_mb)
-        validate_positive_int("stream_buffer_size_mb", stream_buffer_size_mb, 50)
-        validate_browser(self.impersonate)
-
-        object.__setattr__(self, "MIN_CHUNK", min_chunk_size_mb * 1024**2)
-        object.__setattr__(
-            self, "STREAM_CHUNK_SIZE", max_stream_chunk_size_mb * 1024**2
-        )
-        if stream_buffer_size_mb:
-            object.__setattr__(
-                self, "STREAM_BUFFER_SIZE", stream_buffer_size_mb * 1024**2
-            )
-        else:
-            object.__setattr__(
-                self, "STREAM_BUFFER_SIZE", self.STREAM_CHUNK_SIZE * self.threads
-            )
-
-
-@entity
-class QueueSet:
-    links: asyncio.PriorityQueue[tuple[int, str, Checksum | None]] = field(
-        default_factory=asyncio.PriorityQueue[tuple[int, str, Checksum | None]]
+    custom_providers: dict[str, HashProvider] | None = Field(
+        default=None, repr=False, exclude=True
     )
-    dispatch_file: asyncio.PriorityQueue[tuple[int, File | None]] = field(
-        default_factory=asyncio.PriorityQueue[tuple[int, File | None]]
+
+    @field_validator("output_dir")
+    @classmethod
+    def validate_output(cls, v: str) -> str:
+        path = Path(v)
+        if path.exists() and not path.is_dir():
+            raise ValueError(f"Path '{v}' exists but is not a directory")
+        try:
+            path.resolve()
+        except Exception as e:
+            raise ValueError(f"Invalid path format: {v}") from e
+        return v
+
+    @field_validator("links")
+    @classmethod
+    def validate_links_logic(cls, v: list[str]) -> list[str]:
+        for url in v:
+            result = urlparse(url)
+            if not (result.scheme in ("http", "https") and result.netloc):
+                raise ValueError(f"Only HTTP/HTTPS are supported: {url}")
+        return v
+
+    @computed_field
+    @property
+    def MIN_CHUNK(self) -> int:  # noqa: N802
+        return self.min_chunk_size_mb * 1024**2
+
+    @computed_field
+    @property
+    def STREAM_CHUNK_SIZE(self) -> int:  # noqa: N802
+        return self.max_stream_chunk_size_mb * 1024**2
+
+    @computed_field
+    @property
+    def BUFFER_SIZE(self) -> int:  # noqa: N802
+        if self.buffer_size_mb:
+            return self.buffer_size_mb * 1024**2
+        return 50 * 1024**2
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class LinkData:
+    id: int
+    url: str
+    checksum: Checksum | None
+
+
+@dataclass(order=True, frozen=True, kw_only=True, slots=True)
+class WriteChunk:
+    fd: int
+    offset: int
+    length: int = field(compare=False)
+    data: list[bytes] = field(compare=False)
+
+
+@dataclass(order=True, frozen=True, kw_only=True, slots=True)
+class StreamChunk:
+    start: int
+    data: bytes = field(compare=False)
+
+
+T_co = TypeVar("T_co", covariant=True)
+
+
+@dataclass(order=True, frozen=True, kw_only=True, slots=True)
+class Envelope(Generic[T_co]):
+    sort_key: tuple[int, ...]
+
+    payload: T_co | None = field(compare=False, default=None)
+
+    msg: bool = field(compare=False, default=False)
+
+    is_poison_pill: bool = field(compare=False, default=False)
+    is_last_survivor: bool = field(compare=False, default=False)
+
+
+@dataclass(kw_only=True, slots=True)
+class QueueSet:
+    links: asyncio.PriorityQueue[Envelope[LinkData | None]] = field(
+        default_factory=asyncio.PriorityQueue[Envelope[LinkData | None]]
+    )
+    dispatch_file: asyncio.PriorityQueue[Envelope[File | None]] = field(
+        default_factory=asyncio.PriorityQueue[Envelope[File | None]]
+    )
+    disk: asyncio.PriorityQueue[Envelope[WriteChunk | None]] = field(
+        default_factory=asyncio.PriorityQueue[Envelope[WriteChunk | None]]
     )
     file_discovery: asyncio.Queue[int] = field(default_factory=asyncio.Queue[int])
-    chunk: asyncio.PriorityQueue[tuple[int, Chunk] | tuple[Chunk, int]] = field(
-        default_factory=asyncio.PriorityQueue[tuple[int, Chunk] | tuple[Chunk, int]]
+    chunk: asyncio.PriorityQueue[Envelope[Chunk | None]] = field(
+        default_factory=asyncio.PriorityQueue[Envelope[Chunk | None]]
     )
-    stream: asyncio.Queue[tuple[int, bytes]] = field(
-        default_factory=asyncio.Queue[tuple[int, bytes]]
+    stream: asyncio.PriorityQueue[Envelope[StreamChunk | None]] = field(
+        default_factory=asyncio.PriorityQueue[Envelope[StreamChunk | None]]
     )
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class TaskCounts:
     feeder: int = 0
     resolvers: int = 0
@@ -627,16 +584,17 @@ class TaskCounts:
     controller: int = 0
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class SyncSet:
     current_files: asyncio.Condition = field(default_factory=asyncio.Condition)
     chunk_from_future: asyncio.Condition = field(default_factory=asyncio.Condition)
     dynamic_limit: asyncio.Condition = field(default_factory=asyncio.Condition)
+    flush_event: asyncio.Event = field(default_factory=asyncio.Event)
     stop_adaptive_controller: asyncio.Event = field(default_factory=asyncio.Event)
     all_complete: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-@entity
+@dataclass(kw_only=True, slots=True)
 class HydraContext:
     config: HydraConfig
 
@@ -652,7 +610,7 @@ class HydraContext:
     current_files_id: set[int] = field(default_factory=set[int])
     active_stream: set[Response] = field(default_factory=set[Response])
     files: dict[int, File] = field(default_factory=dict[int, File])
-    heap: list[tuple[int, bytes]] = field(default_factory=list[tuple[int, bytes]])
+    heap: list[StreamChunk] = field(default_factory=list[StreamChunk])
 
     # Вложенные домены
     queues: QueueSet = field(default_factory=QueueSet)
