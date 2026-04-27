@@ -9,55 +9,80 @@ from curl_cffi import CurlOpt
 from hydrastream.exceptions import (
     LogStatus,
 )
-from hydrastream.models import HydraContext
+from hydrastream.models import UIState, my_dataclass
 from hydrastream.monitor import log
 
 
-async def throttle_controller(ctx: HydraContext) -> None:
-    ctx.ui.speed.last_checkpoint_time = time.monotonic()
+@my_dataclass
+class ThrottleController:
+    speed_limit: float | None
+    frequency_speed_limit: int = 10
+    time_speed_limit: float
+    bytes_to_check: int
+    prev_bytes: int = 0
+    last_checkpoint_time: float = 0.0
+    target_time: float = 0.0
+    is_debug: bool
+    ui: UIState
 
-    while not ctx.sync.all_complete.is_set():
-        try:
-            await ctx.ui.speed.throttler_checkpoint_event.wait()
-            if ctx.sync.all_complete.is_set():
-                break
-            ctx.ui.speed.throttler_checkpoint_event.clear()
+    all_complete: asyncio.Event
+    limit_event: asyncio.Event
+    controller_checkpoint_event: asyncio.Event
+    throttler_checkpoint_event: asyncio.Event
 
-            # Вся логика теперь в отдельной функции
-            await enforce_throttling(ctx)
+    def __post_init__(self) -> None:
+        self.time_speed_limit = 1 / self.frequency_speed_limit
+        if self.speed_limit:
+            self.speed_limit = self.speed_limit * 1024**2
+            self.bytes_to_check = int(self.speed_limit / self.frequency_speed_limit)
+            self.target_time = self.bytes_to_check / self.speed_limit
+        else:
+            self.bytes_to_check = 5 * 1024**2
+        self.limit_event.set()
 
-            ctx.ui.speed.last_checkpoint_time = time.monotonic()
+    async def throttle_controller(self) -> None:
+        self.last_checkpoint_time = time.monotonic()
 
-        except Exception as e:
-            if ctx.config.debug:
-                raise
-            await log(
-                ctx.ui, f"Throttle controller failed: {e}", status=LogStatus.ERROR
-            )
+        while not self.all_complete.is_set():
+            try:
+                await self.throttler_checkpoint_event.wait()
+                if self.all_complete.is_set():
+                    break
+                self.throttler_checkpoint_event.clear()
 
+                # Вся логика теперь в отдельной функции
+                await self.enforce_throttling()
 
-async def enforce_throttling(ctx: HydraContext) -> None:
-    """Вычисляет задержку и временно ограничивает поток данных."""
-    now = time.monotonic()
-    elapsed = min(1, now - ctx.ui.speed.last_checkpoint_time)
+                self.last_checkpoint_time = time.monotonic()
 
-    if elapsed <= 0 or not ctx.ui.speed.speed_limit:
-        return
+            except Exception as e:
+                if self.is_debug:
+                    raise
+                await log(
+                    self.ui, f"Throttle controller failed: {e}", status=LogStatus.ERROR
+                )
 
-    target_time = ctx.ui.speed.bytes_to_check / ctx.ui.speed.speed_limit
+    async def enforce_throttling(self) -> None:
+        """Вычисляет задержку и временно ограничивает поток данных."""
+        now = time.monotonic()
+        elapsed = min(1, now - self.last_checkpoint_time)
 
-    if elapsed < target_time:
-        sleep_duration = target_time - elapsed
+        if elapsed <= 0 or not self.speed_limit:
+            return
 
-        # Ставим на паузу (через curl)
-        _set_curl_speed_limit(ctx, limit=1)
-        await asyncio.sleep(sleep_duration)
-        # Снимаем паузу
-        _set_curl_speed_limit(ctx, limit=0)
+        target_time = self.bytes_to_check / self.speed_limit
 
+        if elapsed < target_time:
+            sleep_duration = target_time - elapsed
 
-def _set_curl_speed_limit(ctx: HydraContext, limit: int) -> None:
-    """Вспомогательная функция для прохода по активным потокам."""
-    for r in ctx.active_stream:
-        if r.curl is not None:
-            r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, limit)
+            # Ставим на паузу (через curl)
+            _set_curl_speed_limit(limit=1)
+            await asyncio.sleep(sleep_duration)
+            # Снимаем паузу
+            _set_curl_speed_limit(limit=0)
+
+    def _set_curl_speed_limit(self, limit: int) -> None:
+        """Вспомогательная функция для прохода по активным потокам."""
+        for r in ctx.active_stream:
+            if r.curl is not None:
+                r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, limit)

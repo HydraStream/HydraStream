@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Protocol
 
 from typing_extensions import Buffer, runtime_checkable
@@ -37,6 +39,16 @@ class StorageBackend(Protocol):
     def get_unique_path(self, file_path: Any) -> Any: ...
 
     def get_state_path(self, filename: str) -> Any: ...
+
+
+@runtime_checkable
+class NetworkBackend(Protocol):
+    async def request(self, method: str, url: str, **kwargs) -> Any: ...
+
+    @asynccontextmanager
+    async def stream(
+        self, url: str, headers: dict[str, str] | None
+    ) -> AsyncIterator[Any]: ...
 
 
 @runtime_checkable

@@ -1,32 +1,39 @@
-import sys
+import asyncio
 from collections.abc import Iterable
 
-from hydrastream.models import Checksum, Envelope, HydraContext, LinkData, TypeHash
+from hydrastream.engine import send_poison_pills
+from hydrastream.models import (
+    Checksum,
+    Envelope,
+    LinkData,
+    TypeHash,
+    my_dataclass,
+)
 
 
-async def link_feeder(
-    ctx: HydraContext,
-    links: str | Iterable[str],
-    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
-) -> None:
-    checksums = None
-    for id, link in enumerate(links):
-        if expected_checksums is not None:
-            checksums = expected_checksums.get(link)
-            if checksums and not isinstance(checksums, Checksum):
-                checksums = Checksum(algorithm=checksums[0], value=checksums[1])
-        else:
-            expected_checksums = None
-        await ctx.queues.links.put(
-            Envelope(
-                sort_key=(id,), payload=LinkData(id=id, url=link, checksum=checksums)
+@my_dataclass
+class LinkFeeder:
+    links: str | Iterable[str]
+    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None
+    links_q: asyncio.PriorityQueue[Envelope[LinkData | None]]
+    num_resolvers: int
+
+    async def run(
+        self,
+    ) -> None:
+        checksums = None
+        for id, link in enumerate(self.links):
+            if self.expected_checksums is not None:
+                checksums = self.expected_checksums.get(link)
+                if checksums and not isinstance(checksums, Checksum):
+                    checksums = Checksum(algorithm=checksums[0], value=checksums[1])
+            else:
+                self.expected_checksums = None
+            await self.links_q.put(
+                Envelope(
+                    sort_key=(id,),
+                    payload=LinkData(id=id, url=link, checksum=checksums),
+                )
             )
-        )
 
-    for i in range(ctx.tasks.resolvers - 1, 0, -1):
-        await ctx.queues.links.put(
-            Envelope(sort_key=(sys.maxsize - i,), is_poison_pill=True)
-        )
-    await ctx.queues.links.put(
-        Envelope(sort_key=(sys.maxsize,), is_poison_pill=True, is_last_survivor=True)
-    )
+        await send_poison_pills(self.links_q, self.num_resolvers)

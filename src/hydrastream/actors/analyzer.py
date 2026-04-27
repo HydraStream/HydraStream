@@ -1,46 +1,45 @@
 import asyncio
 import math
 import time
-from dataclasses import field
 
 from hydrastream.actors.controller import ScaleDownSignal, ScaleUpSignal
 from hydrastream.exceptions import LogStatus
-from hydrastream.models import HydraContext, my_dataclass
+from hydrastream.models import UIState, my_dataclass
 from hydrastream.monitor import log
 from hydrastream.utils import format_size
 
 
 @my_dataclass
 class TelemetryAnalyzer:
-    ctx: HydraContext
-    current_limit: int = field(init=False)
+    threads: int
+    current_limit: int
     controller_outbox: asyncio.Queue[object]
-    worker_events: list[asyncio.Event]
     smoothed_speed: float = 0.0
     prev_speed: float = 0.0
     tau: float = 1.0
     min_window: int = 1024
     sensitivity: float = 0.05
+    is_debug: bool
 
-    def __post_init__(self) -> None:
-        self.current_limit = self.ctx.dynamic_limit
+    ui: UIState
+
+    all_complete: asyncio.Event
 
     async def run(self) -> None:
-        while not self.ctx.sync.all_complete.is_set():
+        while not self.all_complete.is_set():
             try:
-                await self.ctx.ui.speed.controller_checkpoint_event.wait()
-                if self.ctx.sync.stop_adaptive_controller.is_set():
-                    break
-                self.ctx.ui.speed.controller_checkpoint_event.clear()
+                await self.ui.speed.controller_checkpoint_event.wait()
+
+                self.ui.speed.controller_checkpoint_event.clear()
 
                 # Просто делаем шаг
                 await self._step()
 
             except Exception as e:
-                if self.ctx.config.debug:
+                if self.is_debug:
                     raise
                 await log(
-                    self.ctx.ui,
+                    self.ui,
                     f"Adaptive controller failed: {e}",
                     status=LogStatus.ERROR,
                 )
@@ -54,8 +53,8 @@ class TelemetryAnalyzer:
     def _update_window(self, speed_now: float, elapsed: float) -> None:
         safe_speed = max(speed_now, 0.001)
         coef = 1 / safe_speed**0.25
-        new_bytes = int(self.ctx.ui.speed.bytes_to_check * (1 - coef + elapsed))
-        self.ctx.ui.speed.bytes_to_check = max(self.min_window, new_bytes)
+        new_bytes = int(self.ui.speed.bytes_to_check * (1 - coef + elapsed))
+        self.ui.speed.bytes_to_check = max(self.min_window, new_bytes)
 
     async def _log_scale_event(self, direction: str, speed: float) -> None:
         """Вспомогательный метод для чистого логирования."""
@@ -71,22 +70,22 @@ class TelemetryAnalyzer:
             status = LogStatus.WARNING
             key = "scale_down"
 
-        await log(self.ctx.ui, msg, status=status, throttle_key=key, throttle_sec=5.0)
+        await log(self.ui, msg, status=status, throttle_key=key, throttle_sec=5.0)
 
     async def _step(self) -> None:
         """Один шаг адаптации."""
         now = time.monotonic()
-        elapsed = min(1, now - self.ctx.ui.speed.last_checkpoint_time)
+        elapsed = min(1, now - self.ui.speed.last_checkpoint_time)
         if elapsed <= 0:
             return
 
-        speed_now = self.ctx.ui.speed.bytes_to_check / elapsed
+        speed_now = self.ui.speed.bytes_to_check / elapsed
         self.smoothed_speed = self._calculate_ema(speed_now, elapsed)
         self._update_window(speed_now, elapsed)
 
         # Логика изменения лимита
         if self.smoothed_speed > self.prev_speed * (1 + self.sensitivity):
-            if self.current_limit < self.ctx.config.threads:
+            if self.current_limit < self.threads:
                 self.current_limit += 1
                 self.prev_speed = self.smoothed_speed
                 await self._log_scale_event("up", speed_now)
@@ -100,18 +99,12 @@ class TelemetryAnalyzer:
             await self._log_scale_event("down", speed_now)
 
         # Применяем изменения
-        if self.ctx.dynamic_limit != self.current_limit:
+        if self.dynamic_limit != self.current_limit:
             await self.controller_outbox.put(
                 ScaleUpSignal()
-                if self.current_limit > self.ctx.dynamic_limit
+                if self.current_limit > self.dynamic_limit
                 else ScaleDownSignal()
             )
-            self.ctx.dynamic_limit = self.current_limit
+            self.dynamic_limit = self.current_limit
 
-        self.ctx.ui.speed.last_checkpoint_time = time.monotonic()
-
-        # if self.worker_id >= self.ctx.dynamic_limit:
-        #     async with self.ctx.sync.dynamic_limit:
-        #         await self.ctx.sync.dynamic_limit.wait_for(
-        #             lambda: self.worker_id < self.ctx.dynamic_limit
-        #         )
+        self.ui.speed.last_checkpoint_time = time.monotonic()
