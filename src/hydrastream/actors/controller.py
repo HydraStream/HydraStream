@@ -2,37 +2,18 @@
 # Licensed under the MIT License.
 
 import asyncio
-from typing import TypeAlias
 
-from hydrastream.models import my_dataclass
-
-
-@my_dataclass(frozen=True)
-class NetworkCongestionSignal:
-    pass
-
-
-@my_dataclass(frozen=True)
-class MaxLimitSignal:
-    pass
-
-
-@my_dataclass(frozen=True)
-class ScaleUpSignal:
-    pass
-
-
-@my_dataclass(frozen=True)
-class ScaleDownSignal:
-    pass
-
-
-TrafficSignal: TypeAlias = (
-    NetworkCongestionSignal | MaxLimitSignal | ScaleUpSignal | ScaleDownSignal
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
+from hydrastream.messages.traffic import (
+    MaxLimitSignal,
+    NetworkCongestionSignal,
+    ScaleDownSignal,
+    ScaleUpSignal,
+    TrafficSignal,
 )
 
 
-@my_dataclass
+@hydra_dataclass
 class TrafficController:
     reg_events_q: asyncio.Queue[TrafficSignal]
     worker_events: list[asyncio.Event]

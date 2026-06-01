@@ -1,10 +1,11 @@
 import asyncio
-import sys
 
-from hydrastream.models import Chunk, Envelope, StopMsg, my_dataclass
+from hydrastream.domain.entities import Chunk
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
+from hydrastream.messages.base import Envelope, StopMsg
 
 
-@my_dataclass
+@hydra_dataclass
 class MemoryThrottler:
     chunk_inbox: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
     chunk_outbox: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
@@ -29,7 +30,5 @@ class MemoryThrottler:
                     await self.chunk_outbox.put(envelope)
 
                 case StopMsg():
-                    await self.chunk_outbox.put(
-                        Envelope(sort_key=(sys.maxsize,), payload=StopMsg())
-                    )
+                    await self.chunk_outbox.put(Envelope.poison_pill())
                     break

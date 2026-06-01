@@ -11,42 +11,37 @@ from typing import cast
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
 
-from hydrastream._curl_shim import aiter_bytes, get_error_response
+from hydrastream._curl_shim import get_error_response
 from hydrastream.actors.controller import (
     MaxLimitSignal,
     NetworkCongestionSignal,
     TrafficSignal,
 )
 from hydrastream.actors.dispatcher import FileCompleted
-from hydrastream.actors.stater import ProgressDeltaCmd, RemoveFileCmd, StateKeeperCmd
-from hydrastream.actors.throttler import (
-    RegisterStreamCmd,
-    RemoveStreamCmd,
-    ThrottlerMsg,
-)
+from hydrastream.domain.entities import Chunk, File
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     DownloadFailedError,
     LogStatus,
     StreamError,
     WorkerScaleDown,
 )
-from hydrastream.interfaces import StorageBackend
-from hydrastream.models import (
-    Chunk,
-    Envelope,
-    File,
-    NetworkState,
-    StopMsg,
-    StreamChunk,
-    UIState,
-    WriteChunk,
-    my_dataclass,
+from hydrastream.interfaces import (
+    MonitorBackend,
+    NetworkBackend,
+    StorageBackend,
 )
-from hydrastream.monitor import done, log
-from hydrastream.network import stream_chunk, try_scale_up
+from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.io import StreamChunk, WriteChunk
+from hydrastream.messages.state import ProgressDeltaCmd, RemoveFileCmd, StateKeeperCmd
+from hydrastream.messages.traffic import (
+    RegisterStreamCmd,
+    RemoveStreamCmd,
+    ThrottlerMsg,
+)
 
 
-@my_dataclass
+@hydra_dataclass
 class BaseDownloadWorker(ABC):
     chunks_inbox: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
     throttler_outbox: asyncio.Queue[ThrottlerMsg] | None = None
@@ -58,8 +53,8 @@ class BaseDownloadWorker(ABC):
 
     barrier: asyncio.Barrier
 
-    ui: UIState
-    net: NetworkState
+    ui: MonitorBackend
+    net: NetworkBackend
 
     is_debug: bool
 
@@ -77,8 +72,7 @@ class BaseDownloadWorker(ABC):
                     await self.process_chunk(chunk)
 
                 if not chunk.is_finished:
-                    await log(
-                        self.ui,
+                    await self.ui.log(
                         f"Truncated read for {chunk.file.actual_filename}. "
                         f"Requeuing remaining {chunk.remaining} bytes.",
                         status=LogStatus.WARNING,
@@ -119,8 +113,7 @@ class BaseDownloadWorker(ABC):
                     raise RuntimeError(
                         f"Unknown message type in links_inbox: {type(msg)}"
                     )
-                await log(
-                    self.ui,
+                await self.ui.log(
                     f"Received unknown message: {msg}",
                     status=LogStatus.ERROR,
                 )
@@ -150,11 +143,10 @@ class BaseDownloadWorker(ABC):
         tb_str = traceback.format_exc()
 
         if self.is_debug:
-            await log(self.ui, f"CRITICAL CRASH:\n{tb_str}", status=LogStatus.CRITICAL)
+            await self.ui.log(f"CRITICAL CRASH:\n{tb_str}", status=LogStatus.CRITICAL)
 
         else:
-            await log(
-                self.ui,
+            await self.ui.log(
                 f"Worker internal crash: {e!r}",
                 status=LogStatus.CRITICAL,
                 traceback=tb_str,
@@ -173,8 +165,7 @@ class BaseDownloadWorker(ABC):
         status = response.status_code
 
         if status in {400, 401, 403, 404, 410, 416}:
-            await log(
-                self.ui,
+            await self.ui.log(
                 f"Chunk for {chunk.file.actual_filename} "
                 f"failed permanently (HTTP {status}).",
                 status=LogStatus.ERROR,
@@ -210,7 +201,7 @@ class BaseDownloadWorker(ABC):
         pass
 
 
-@my_dataclass
+@hydra_dataclass
 class StreamDownloadWorker(BaseDownloadWorker):
     stream_chunks_outbox: asyncio.PriorityQueue[Envelope[StreamChunk | StopMsg]]
     file_discovery_outbox: asyncio.Queue[File | StopMsg]
@@ -254,8 +245,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
         buffer_list: list[bytes] = []
         current_buffer_size = 0
 
-        async with stream_chunk(
-            self.net,
+        async with self.net.stream(
             chunk.file.meta.url,
             headers=headers,
         ) as r:
@@ -264,7 +254,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
                     await self.throttler_outbox.put(RegisterStreamCmd(stream=r))
                 bytes_to_read = chunk.end - chunk.current_pos + 1
 
-                async for data in aiter_bytes(r, chunk_size=131072):
+                async for data in r.aiter_bytes(chunk_size=131072):
                     if len(data) > bytes_to_read:
                         data = data[:bytes_to_read]  # noqa: PLW2901
 
@@ -309,7 +299,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
         pass
 
 
-@my_dataclass
+@hydra_dataclass
 class DiskDownloadWorker(BaseDownloadWorker):
     disk_outbox: asyncio.Queue[WriteChunk | StopMsg]
     reg_events_outbox: asyncio.Queue[StateKeeperCmd]
@@ -337,8 +327,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
         supports_ranges = file_obj.meta.supports_ranges
 
         if not supports_ranges:
-            await log(
-                self.ui,
+            await self.ui.log(
                 f"Connection dropped for {chunk.file.actual_filename}. "
                 f"Server does not support resume. Restarting download from 0 bytes.",
                 status=LogStatus.WARNING,
@@ -383,8 +372,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
         if fd is None:
             fd = self.fs.open_file(chunk.file.actual_filename)
         buffer_size = 1_048_576
-        async with stream_chunk(
-            self.net,
+        async with self.net.stream(
             chunk.file.meta.url,
             headers=headers,
         ) as r:
@@ -393,7 +381,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
                     await self.throttler_outbox.put(RegisterStreamCmd(stream=r))
                 bytes_to_read = chunk.end - chunk.current_pos + 1
 
-                async for data in aiter_bytes(r, chunk_size=131072):
+                async for data in r.aiter_bytes(chunk_size=131072):
                     if len(data) > bytes_to_read:
                         data = data[:bytes_to_read]  # noqa: PLW2901
 
@@ -457,8 +445,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
             if not self.fs.verify_size(filename, file_obj.meta.content_length):
                 return
         if file_obj.meta.expected_checksum:
-            await log(
-                self.ui,
+            await self.ui.log(
                 f"Verifying Hash checksum for {chunk.file.actual_filename}...",
                 status=LogStatus.INFO,
             )
@@ -467,13 +454,12 @@ class DiskDownloadWorker(BaseDownloadWorker):
                 file_obj.meta.expected_checksum.value,
                 file_obj.meta.expected_checksum.algorithm,
             )
-            await log(
-                self.ui,
+            await self.ui.log(
                 f"Integrity confirmed: {chunk.file.actual_filename}",
                 status=LogStatus.SUCCESS,
             )
         self.fs.close_file(fd_or_conn=file_obj.fd)
         self.fs.delete_state(filename)
-        await done(self.ui, file_obj.meta.id, filename)
+        await self.ui.done(file_obj.meta.id, filename)
         await self.reg_events_outbox.put(RemoveFileCmd(file_id=chunk.file.meta.id))
         await self.file_limit_outbox.put(FileCompleted())

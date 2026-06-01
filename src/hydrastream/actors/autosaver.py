@@ -3,21 +3,17 @@
 
 import asyncio
 
-from hydrastream.actors.aggregator import FlushCmd
-from hydrastream.actors.stater import GetSnapshotCmd, StateKeeperCmd
+from hydrastream.domain.entities import File
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.interfaces import StorageBackend
-from hydrastream.models import (
-    File,
-    StopMsg,
-    UIState,
-    WriteChunk,
-    my_dataclass,
-)
-from hydrastream.monitor import log
+from hydrastream.interfaces import MonitorBackend, StorageBackend
+from hydrastream.messages.base import StopMsg
+from hydrastream.messages.io import WriteChunk
+from hydrastream.messages.state import GetSnapshotCmd, StateKeeperCmd
+from hydrastream.messages.traffic import FlushCmd
 
 
-@my_dataclass
+@hydra_dataclass
 class FileAutosaver:
     all_complete: asyncio.Event
     flush_event: asyncio.Event
@@ -25,7 +21,7 @@ class FileAutosaver:
     reg_events_q: asyncio.Queue[StateKeeperCmd]
     get_shapshot: asyncio.Queue[dict[int, File]]
     fs: StorageBackend
-    ui: UIState
+    ui: MonitorBackend
 
     is_debug: bool
 
@@ -51,8 +47,7 @@ class FileAutosaver:
                 except Exception as e:
                     if self.is_debug:
                         raise
-                    await log(
-                        self.ui,
+                    await self.ui.log(
                         f"Auto-save operation failed: {e}",
                         status=LogStatus.ERROR,
                     )

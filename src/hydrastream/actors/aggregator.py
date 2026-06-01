@@ -1,23 +1,21 @@
 import asyncio
 from dataclasses import field
 
-from hydrastream.actors.throttler import (
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
+from hydrastream.exceptions import LogStatus
+from hydrastream.interfaces import MonitorBackend
+from hydrastream.messages.base import StopMsg
+from hydrastream.messages.io import WriteChunk
+from hydrastream.messages.traffic import (
     DiskBufferClearedSignal,
     DiskBufferFullSignal,
+    FlushCmd,
     ThrottlerMsg,
+    WriteCompleted,
 )
-from hydrastream.actors.writer import WriteCompleted
-from hydrastream.exceptions import LogStatus
-from hydrastream.models import StopMsg, UIState, WriteChunk, my_dataclass
-from hydrastream.monitor import log
 
 
-@my_dataclass
-class FlushCmd:
-    pass
-
-
-@my_dataclass
+@hydra_dataclass
 class DiskAggregator:
     disk_inbox: asyncio.Queue[WriteChunk | FlushCmd | StopMsg]
     throttler_outbox: asyncio.Queue[ThrottlerMsg]
@@ -26,7 +24,7 @@ class DiskAggregator:
     flush_event: asyncio.Event
     MAX_BUFFER: int
 
-    ui: UIState
+    ui: MonitorBackend
     is_debug: bool
 
     current_buffer: list[WriteChunk] = field(default_factory=list[WriteChunk])
@@ -62,8 +60,7 @@ class DiskAggregator:
                         raise RuntimeError(
                             f"Unknown message type in disk_inbox: {type(msg)}"
                         )
-                    await log(
-                        self.ui,
+                    await self.ui.log(
                         f"Received unknown message: {msg}",
                         status=LogStatus.ERROR,
                     )

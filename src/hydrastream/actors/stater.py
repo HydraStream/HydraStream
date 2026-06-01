@@ -1,51 +1,23 @@
 import asyncio
 from collections import defaultdict
 from dataclasses import field
-from typing import TypeAlias
 
+from hydrastream.domain.entities import File
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.models import File, StopMsg, UIState, my_dataclass
-from hydrastream.monitor import log
-
-
-@my_dataclass(frozen=True)
-class RegisterFileCmd:
-    file_id: int
-    file_obj: File
-
-
-@my_dataclass(frozen=True)
-class RemoveFileCmd:
-    file_id: int
-
-
-@my_dataclass(frozen=True)
-class GetSnapshotCmd:
-    reply_to: asyncio.Queue[dict[int, File]]
-
-
-@my_dataclass(frozen=True)
-class ProgressDeltaCmd:
-    file_id: int
-    delta_bytes: int
-
-
-@my_dataclass(frozen=True)
-class GetUIDeltasCmd:
-    reply_to: asyncio.Queue[dict[int, int]]
-
-
-StateKeeperCmd: TypeAlias = (
-    RegisterFileCmd
-    | RemoveFileCmd
-    | GetSnapshotCmd
-    | ProgressDeltaCmd
-    | GetUIDeltasCmd
-    | StopMsg
+from hydrastream.interfaces import MonitorBackend
+from hydrastream.messages.base import StopMsg
+from hydrastream.messages.state import (
+    GetSnapshotCmd,
+    GetUIDeltasCmd,
+    ProgressDeltaCmd,
+    RegisterFileCmd,
+    RemoveFileCmd,
+    StateKeeperCmd,
 )
 
 
-@my_dataclass
+@hydra_dataclass
 class StateKeeperActor:
     stater_inbox: asyncio.Queue[StateKeeperCmd]
 
@@ -60,7 +32,7 @@ class StateKeeperActor:
     analyzer_checkpoint_event: asyncio.Event
     throttler_checkpoint_event: asyncio.Event
 
-    ui: UIState
+    ui: MonitorBackend
 
     is_debug: bool
 
@@ -102,8 +74,7 @@ class StateKeeperActor:
                         raise RuntimeError(
                             f"Unknown message type in stater_inbox: {type(cmd)}"
                         )
-                    await log(
-                        self.ui,
+                    await self.ui.log(
                         f"Received unknown message: {cmd}",
                         status=LogStatus.ERROR,
                     )

@@ -2,28 +2,17 @@
 # Licensed under the MIT License.
 
 import asyncio
-import sys
 from abc import ABC, abstractmethod
 
+from hydrastream.domain.entities import Chunk, File
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.interfaces import StorageBackend
-from hydrastream.models import (
-    Chunk,
-    Envelope,
-    File,
-    StopMsg,
-    UIState,
-    my_dataclass,
-)
-from hydrastream.monitor import log, update_filename
+from hydrastream.interfaces import MonitorBackend, StorageBackend
+from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.traffic import FileCompleted
 
 
-@my_dataclass(frozen=True)
-class FileCompleted:
-    pass
-
-
-@my_dataclass
+@hydra_dataclass
 class BaseFileDispatcher(ABC):
     limit: int
     current_files: int = 0
@@ -32,7 +21,7 @@ class BaseFileDispatcher(ABC):
     chunks_outbox: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
     file_limit_inbox: asyncio.Queue[FileCompleted]
 
-    ui: UIState
+    ui: MonitorBackend
 
     is_debug: bool
 
@@ -58,8 +47,7 @@ class BaseFileDispatcher(ABC):
 
                         # 2. ОБЩАЯ ЛОГИКА ДЛЯ ВСЕХ (Пишем лог, если имя поменялось)
                         if file_obj.meta.original_filename != file_obj.actual_filename:
-                            await log(
-                                self.ui,
+                            await self.ui.log(
                                 f"{file_obj.meta.original_filename} already exists. "
                                 f"Saving as {file_obj.actual_filename}.",
                                 status=LogStatus.WARNING,
@@ -82,9 +70,7 @@ class BaseFileDispatcher(ABC):
                         pending_file = None
 
                     case StopMsg():
-                        await self.chunks_outbox.put(
-                            Envelope(sort_key=(sys.maxsize,), payload=StopMsg())
-                        )
+                        await self.chunks_outbox.put(Envelope.poison_pill())
                         break
 
                     case _:
@@ -92,8 +78,7 @@ class BaseFileDispatcher(ABC):
                             raise RuntimeError(
                                 f"Unknown message type in files_inbox: {type(msg)}"
                             )
-                        await log(
-                            self.ui,
+                        await self.ui.log(
                             f"Received unknown message: {msg}",
                             status=LogStatus.ERROR,
                         )
@@ -109,7 +94,7 @@ class BaseFileDispatcher(ABC):
         pass
 
 
-@my_dataclass
+@hydra_dataclass
 class StreamFileDispatcher(BaseFileDispatcher):
     file_discovery: asyncio.Queue[File | None]
 
@@ -122,7 +107,7 @@ class StreamFileDispatcher(BaseFileDispatcher):
         return (file_id, current_pos)
 
 
-@my_dataclass
+@hydra_dataclass
 class DiskFileDispatcher(BaseFileDispatcher):
     fs: StorageBackend
 
@@ -137,7 +122,7 @@ class DiskFileDispatcher(BaseFileDispatcher):
         )
         if new_filename:
             file_obj.actual_filename = new_filename
-            update_filename(self.ui, file_obj.meta.id, new_filename)
+            self.ui.update_filename(self.ui, file_obj.meta.id, new_filename)
         else:
             file_obj.actual_filename = file_obj.meta.original_filename
 

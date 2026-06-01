@@ -4,17 +4,11 @@ from collections.abc import AsyncGenerator
 
 from hydrastream.actors.dispatcher import FileCompleted
 from hydrastream.actors.stater import RemoveFileCmd, StateKeeperCmd
+from hydrastream.domain.entities import Checksum, File
 from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
-from hydrastream.interfaces import Hasher
-from hydrastream.models import (
-    Checksum,
-    Envelope,
-    File,
-    StopMsg,
-    StreamChunk,
-    UIState,
-)
-from hydrastream.monitor import done, log
+from hydrastream.interfaces import Hasher, MonitorBackend
+from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.io import StreamChunk
 
 
 async def file_streamer(  # noqa
@@ -23,7 +17,7 @@ async def file_streamer(  # noqa
     credit_outbox: asyncio.Queue[int],
     reg_events_q: asyncio.Queue[StateKeeperCmd],
     file_limit_q: asyncio.Queue[FileCompleted],
-    ui: UIState,
+    ui: MonitorBackend,
     is_debug: bool,
 ) -> AsyncGenerator[bytes, None]:
 
@@ -34,7 +28,7 @@ async def file_streamer(  # noqa
     buffer: dict[int, list[bytes]] = {}
     expected_offset = 0
 
-    await log(ui, f"Streaming: {file_obj.actual_filename}", status=LogStatus.INFO)
+    await ui.log(f"Streaming: {file_obj.actual_filename}", status=LogStatus.INFO)
 
     try:
         while expected_offset < total_size:
@@ -73,8 +67,7 @@ async def file_streamer(  # noqa
                         raise RuntimeError(
                             f"Unknown message type in stream_chunk_inbox: {type(msg)}"
                         )
-                    await log(
-                        ui,
+                    await ui.log(
                         f"Received unknown message: {msg}",
                         status=LogStatus.ERROR,
                     )
@@ -89,14 +82,14 @@ async def file_streamer(  # noqa
                         expected_offset,
                         total_size,
                     )
-                    await log(
-                        ui, "Hash Verified", status=LogStatus.SUCCESS, progress=True
+                    await ui.log(
+                        "Hash Verified", status=LogStatus.SUCCESS, progress=True
                     )
                 except Exception as e:
-                    await log(ui, str(e), status=LogStatus.ERROR)
+                    await ui.log(str(e), status=LogStatus.ERROR)
                     raise
 
-            await done(ui, file_obj.meta.id, file_obj.actual_filename)
+            await ui.done(file_obj.meta.id, file_obj.actual_filename)
 
     finally:
         buffer.clear()

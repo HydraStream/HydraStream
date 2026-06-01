@@ -3,57 +3,28 @@
 
 import asyncio
 import time
-from typing import TypeAlias
 
-from curl_cffi import CurlOpt, Response
-
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     LogStatus,
 )
-from hydrastream.models import StopMsg, UIState, my_dataclass
-from hydrastream.monitor import log
-
-
-@my_dataclass(frozen=True)
-class CheckpointReachedCmd:
-    pass
-
-
-@my_dataclass(frozen=True)
-class RegisterStreamCmd:
-    stream: Response
-
-
-@my_dataclass(frozen=True)
-class RemoveStreamCmd:
-    stream: Response
-
-
-@my_dataclass(frozen=True)
-class DiskBufferFullSignal:
-    pass
-
-
-@my_dataclass(frozen=True)
-class DiskBufferClearedSignal:
-    pass
-
-
-ThrottlerMsg: TypeAlias = (
-    RegisterStreamCmd
-    | RemoveStreamCmd
-    | DiskBufferFullSignal
-    | DiskBufferClearedSignal
-    | CheckpointReachedCmd
-    | StopMsg
+from hydrastream.interfaces import MonitorBackend, NetworkStream
+from hydrastream.messages.base import StopMsg
+from hydrastream.messages.traffic import (
+    CheckpointReachedCmd,
+    DiskBufferClearedSignal,
+    DiskBufferFullSignal,
+    RegisterStreamCmd,
+    RemoveStreamCmd,
+    ThrottlerMsg,
 )
 
 
-@my_dataclass
+@hydra_dataclass
 class ThrottleController:
     throttler_input: asyncio.Queue[ThrottlerMsg]
 
-    active_stream: set[Response]
+    active_stream: set[NetworkStream]
 
     speed_limit: float | None
     frequency_speed_limit: int = 10
@@ -64,7 +35,7 @@ class ThrottleController:
     target_time: float = 0.0
 
     is_debug: bool
-    ui: UIState
+    ui: MonitorBackend
 
     all_complete: asyncio.Event
     throttler_checkpoint_event: asyncio.Event
@@ -92,8 +63,8 @@ class ThrottleController:
                     case RegisterStreamCmd(stream=s):
                         self.active_stream.add(s)
                         # Если диск УЖЕ тупит, сразу режем скорость новичку!
-                        if self.is_disk_choked and s.curl:
-                            s.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, 1)
+                        if self.is_disk_choked:
+                            s.set_speed_limit(1)
 
                     case RemoveStreamCmd(stream=s):
                         self.active_stream.discard(s)
@@ -120,8 +91,7 @@ class ThrottleController:
                             raise RuntimeError(
                                 f"Unknown message type in throttler_input: {type(msg)}"
                             )
-                        await log(
-                            self.ui,
+                        await self.ui.log(
                             f"Received unknown message: {msg}",
                             status=LogStatus.ERROR,
                         )
@@ -129,8 +99,8 @@ class ThrottleController:
             except Exception as e:
                 if self.is_debug:
                     raise
-                await log(
-                    self.ui, f"Throttle controller failed: {e}", status=LogStatus.ERROR
+                await self.ui.log(
+                    f"Throttle controller failed: {e}", status=LogStatus.ERROR
                 )
 
     async def enforce_throttling(self) -> None:
@@ -160,5 +130,4 @@ class ThrottleController:
     def _set_curl_speed_limit(self, limit: int) -> None:
         """Вспомогательная функция для прохода по активным потокам."""
         for r in self.active_stream:
-            if r.curl is not None:
-                r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, limit)
+            r.set_speed_limit(limit)

@@ -2,24 +2,21 @@ import asyncio
 import errno
 import os
 
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.interfaces import StorageBackend
-from hydrastream.models import StopMsg, UIState, WriteChunk, my_dataclass
-from hydrastream.monitor import log
+from hydrastream.interfaces import MonitorBackend, StorageBackend
+from hydrastream.messages.base import StopMsg
+from hydrastream.messages.io import WriteChunk
+from hydrastream.messages.traffic import WriteCompleted
 
 
-@my_dataclass(frozen=True)
-class WriteCompleted:
-    pass
-
-
-@my_dataclass
+@hydra_dataclass
 class DiskWriter:
     writer_inbox: asyncio.Queue[list[WriteChunk] | StopMsg]
     ack_outbox: asyncio.Queue[WriteCompleted | StopMsg]
 
     fs: StorageBackend
-    ui: UIState
+    ui: MonitorBackend
 
     is_debug: bool
 
@@ -37,8 +34,7 @@ class DiskWriter:
 
                     except Exception as e:
                         msg = self._handle_disk_error(e)
-                        await log(
-                            self.ui,
+                        await self.ui.log(
                             f"Disk Write Failure: {msg}",
                             status=LogStatus.CRITICAL,
                         )
@@ -52,8 +48,7 @@ class DiskWriter:
                         raise RuntimeError(
                             f"Unknown message type in writer_inbox: {type(msg)}"
                         )
-                    await log(
-                        self.ui,
+                    await self.ui.log(
                         f"Received unknown message: {msg}",
                         status=LogStatus.ERROR,
                     )

@@ -3,7 +3,6 @@
 
 import asyncio
 import random
-import sys
 from abc import ABC, abstractmethod
 from typing import cast
 
@@ -11,28 +10,22 @@ from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
 from hydrastream._curl_shim import get_error_response
-from hydrastream.actors.stater import ProgressDeltaCmd, RegisterFileCmd, StateKeeperCmd
+from hydrastream.domain.entities import Checksum, File, FileMeta, TypeHash
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.interfaces import StorageBackend
-from hydrastream.models import (
-    Checksum,
-    Envelope,
-    File,
-    FileMeta,
-    LinkData,
-    NetworkState,
-    StopMsg,
-    TypeHash,
-    UIState,
-    my_dataclass,
+from hydrastream.interfaces import (
+    MonitorBackend,
+    NetworkBackend,
+    StorageBackend,
 )
-from hydrastream.monitor import add_file, done, log
-from hydrastream.network import extract_filename, safe_request, stream_chunk
+from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.io import LinkData
+from hydrastream.messages.state import ProgressDeltaCmd, RegisterFileCmd, StateKeeperCmd
 from hydrastream.providers import ProviderRouter
 from hydrastream.utils import redact_url
 
 
-@my_dataclass
+@hydra_dataclass
 class BaseMetadataResolver(ABC):
     threads: int
     MIN_CHUNK: int
@@ -49,8 +42,8 @@ class BaseMetadataResolver(ABC):
     is_verify: bool
     is_debug: bool
 
-    ui: UIState
-    net: NetworkState
+    ui: MonitorBackend
+    net: NetworkBackend
 
     async def run(self) -> None:
         """Это ШАБЛОННЫЙ МЕТОД. Наследники не переопределяют его!"""
@@ -89,9 +82,7 @@ class BaseMetadataResolver(ABC):
                     position = await self.barrier.wait()
 
                     if position == 0:
-                        await self.files_outbox.put(
-                            Envelope(sort_key=(sys.maxsize,), payload=StopMsg())
-                        )
+                        await self.files_outbox.put(Envelope.poison_pill())
                         if self.is_dry_run:
                             self.all_complete.set()
                     break
@@ -101,8 +92,7 @@ class BaseMetadataResolver(ABC):
                         raise RuntimeError(
                             f"Unknown message type in links_inbox: {type(msg)}"
                         )
-                    await log(
-                        self.ui,
+                    await self.ui.log(
                         f"Received unknown message: {msg}",
                         status=LogStatus.ERROR,
                     )
@@ -114,7 +104,7 @@ class BaseMetadataResolver(ABC):
         await self.reg_events_outbox.put(
             RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
         )
-        add_file(self.ui, file_obj.meta.id, filename, file_obj.meta.content_length)
+        self.ui.add_file(file_obj.meta.id, filename, file_obj.meta.content_length)
 
         # ВЫЗЫВАЕМ ХУК (Стрим проигнорирует, Диск - обновит UI)
         await self._on_file_registered(file_obj)
@@ -152,8 +142,7 @@ class BaseMetadataResolver(ABC):
                 status = response.status_code
                 # Постоянные ошибки: логируем и забываем
                 if status in {400, 401, 403, 404, 410, 416}:
-                    await log(
-                        self.ui,
+                    await self.ui.log(
                         f"Link {redact_url(envelope.payload.url)} failed permanently "
                         f"(HTTP {status}).",
                         status=LogStatus.ERROR,
@@ -213,15 +202,14 @@ class BaseMetadataResolver(ABC):
         if checksum_tuple:
             return Checksum(algorithm=checksum_tuple[0], value=checksum_tuple[1])
 
-        add_file(self.ui, id, filename)
+        self.ui.add_file(id, filename)
 
         provider = ProviderRouter()
         checksum = await provider.resolve_hash(self.net, url, filename)
-        await done(self.ui, id, filename)
+        await self.ui.done(self.ui, id, filename)
 
         if checksum is None:
-            await log(
-                self.ui,
+            await self.ui.log(
                 f"Missing MD5 hash for file: {filename}",
                 status=LogStatus.WARNING,
             )
@@ -229,7 +217,7 @@ class BaseMetadataResolver(ABC):
         return checksum
 
 
-@my_dataclass
+@hydra_dataclass
 class StreamMetadataResolver(BaseMetadataResolver):
     # Специфичная зависимость только для стрима!
     STREAM_CHUNK_SIZE: int
@@ -264,7 +252,7 @@ class StreamMetadataResolver(BaseMetadataResolver):
         pass
 
 
-@my_dataclass
+@hydra_dataclass
 class DiskMetadataResolver(BaseMetadataResolver):
     state_outbox: asyncio.Queue[StateKeeperCmd]
 
@@ -286,8 +274,7 @@ class DiskMetadataResolver(BaseMetadataResolver):
         if supports_ranges:
             file_obj, num_states = self.fs.load_state(filename=filename)
             if num_states > 1:
-                await log(
-                    self.ui,
+                await self.ui.log(
                     f"Multiple state files found for {filename}!",
                     status=LogStatus.WARNING,
                 )
@@ -314,7 +301,7 @@ class DiskMetadataResolver(BaseMetadataResolver):
         )
         chunks = file_obj.chunks or []
 
-        add_file(self.ui, file_obj.meta.id, filename, file_obj.meta.content_length)
+        self.ui.add_file(file_obj.meta.id, filename, file_obj.meta.content_length)
         downloaded = sum(c.uploaded for c in chunks)
         if downloaded - len(chunks) > 0:
             await self.state_outbox.put(

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator
+from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, Any, Protocol
 
 from typing_extensions import Buffer, runtime_checkable
 
 if TYPE_CHECKING:
-    from hydrastream.models import Checksum, File, NetworkState, TypeHash
+    from hydrastream.domain.entities import Checksum, File, TypeHash
 
 
 @runtime_checkable
@@ -42,19 +42,58 @@ class StorageBackend(Protocol):
 
 
 @runtime_checkable
-class NetworkBackend(Protocol):
-    async def request(self, method: str, url: str, **kwargs) -> Any: ...
+class MonitorBackend(Protocol):
+    async def log(self, message: str, status: str, **kwargs: Any) -> None:
+        """Записать сообщение в лог/на экран"""
+        ...
 
-    @asynccontextmanager
-    async def stream(
-        self, url: str, headers: dict[str, str] | None
-    ) -> AsyncIterator[Any]: ...
+    def add_file(self, filename: str, total_size: int | None = None) -> None:
+        """Зарегистрировать новый файл в UI"""
+        ...
+
+    def update_progress(self, file_id: int, advance_bytes: int) -> None:
+        """Сдвинуть прогресс-бар"""
+        ...
+
+    async def done(self, filename: str) -> None:
+        """Отметить файл как завершенный"""
+        ...
+
+    async def stop(self) -> None:
+        """Остановить отрисовку и закрыть ресурсы"""
+        ...
+
+
+@runtime_checkable
+class NetworkStream(Protocol):
+    """Абстракция над потоком (response от curl_cffi или httpx)"""
+
+    def aiter_bytes(self, chunk_size: int) -> AsyncGenerator[bytes, None]: ...
+
+    def set_speed_limit(self, limit: int) -> None: ...
+
+
+@runtime_checkable
+class NetworkBackend(Protocol):
+    async def request(self, method: str, url: str, **kwargs: Any) -> Any:
+        """Выполнить разовый запрос (например, HEAD)"""
+        ...
+
+    def stream(
+        self, url: str, headers: dict[str, str] | None = None
+    ) -> AbstractAsyncContextManager[NetworkStream]:
+        """Открыть стрим для скачивания чанка"""
+        ...
+
+    async def close(self) -> None:
+        """Закрыть все соединения"""
+        ...
 
 
 @runtime_checkable
 class HashProvider(Protocol):
     async def resolve(
-        self, ctx: NetworkState, url: str, filename: str
+        self, ctx: NetworkBackend, url: str, filename: str
     ) -> Checksum | None: ...
 
 

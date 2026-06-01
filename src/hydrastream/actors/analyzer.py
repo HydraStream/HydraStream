@@ -2,14 +2,14 @@ import asyncio
 import math
 import time
 
-from hydrastream.actors.controller import ScaleDownSignal, ScaleUpSignal
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.models import UIState, my_dataclass
-from hydrastream.monitor import log
+from hydrastream.interfaces import MonitorBackend
+from hydrastream.messages.traffic import ScaleDownSignal, ScaleUpSignal
 from hydrastream.utils import format_size
 
 
-@my_dataclass
+@hydra_dataclass
 class TelemetryAnalyzer:
     threads: int
     current_limit: int
@@ -22,7 +22,7 @@ class TelemetryAnalyzer:
     sensitivity: float = 0.05
     is_debug: bool
 
-    ui: UIState
+    ui: MonitorBackend
 
     stop_analyzer: asyncio.Event
 
@@ -39,8 +39,7 @@ class TelemetryAnalyzer:
             except Exception as e:
                 if self.is_debug:
                     raise
-                await log(
-                    self.ui,
+                await self.ui.log(
                     f"Adaptive controller failed: {e}",
                     status=LogStatus.ERROR,
                 )
@@ -71,7 +70,7 @@ class TelemetryAnalyzer:
             status = LogStatus.WARNING
             key = "scale_down"
 
-        await log(self.ui, msg, status=status, throttle_key=key, throttle_sec=5.0)
+        await self.ui.log(msg, status=status, throttle_key=key, throttle_sec=5.0)
 
     async def _step(self) -> None:
         """Один шаг адаптации."""

@@ -1,18 +1,13 @@
 import asyncio
-import sys
 from collections.abc import Iterable
 
-from hydrastream.models import (
-    Checksum,
-    Envelope,
-    LinkData,
-    StopMsg,
-    TypeHash,
-    my_dataclass,
-)
+from hydrastream.domain.entities import Checksum, TypeHash
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
+from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.io import LinkData
 
 
-@my_dataclass
+@hydra_dataclass
 class LinkFeeder:
     links: str | Iterable[str]
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None
@@ -35,6 +30,4 @@ class LinkFeeder:
                     payload=LinkData(id=id, url=link, checksum=checksums),
                 )
             )
-        await self.links_outbox.put(
-            Envelope(sort_key=(sys.maxsize,), payload=StopMsg())
-        )
+        await self.links_outbox.put(Envelope.poison_pill())
