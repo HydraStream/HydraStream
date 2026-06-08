@@ -11,6 +11,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from hydrastream.domain.entities import File, TypeHash
 from hydrastream.exceptions import (
     FileSizeMismatchError,
     HashMismatchError,
@@ -18,7 +19,6 @@ from hydrastream.exceptions import (
     InsufficientSpaceError,
     StateSaveError,
 )
-from hydrastream.models import File, TypeHash
 
 
 class LocalStorageManager:

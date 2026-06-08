@@ -274,9 +274,6 @@ class StreamDownloadWorker(BaseDownloadWorker):
                     if bytes_to_read <= 0:
                         break
 
-                if random.random() < 0.1:
-                    await try_scale_up(self.net.rate_limiter)
-
             finally:
                 if self.throttler_outbox is not None:
                     await self.throttler_outbox.put(RemoveStreamCmd(stream=r))
@@ -408,8 +405,6 @@ class DiskDownloadWorker(BaseDownloadWorker):
 
                         buffer_list.clear()
                         current_buffer_size = 0
-                        if random.random() < 0.1:
-                            await try_scale_up(self.net.rate_limiter)
 
                     if bytes_to_read <= 0:
                         break

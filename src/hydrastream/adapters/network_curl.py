@@ -13,6 +13,9 @@ class CurlStreamAdapter(NetworkStream):
     def __init__(self, response: Response) -> None:
         self._response = response
 
+    def response(self) -> Response:
+        return self._response
+
     async def aiter_bytes(self, chunk_size: int) -> AsyncGenerator[bytes, None]:
         iterator = self._response.aiter_content(chunk_size=chunk_size)  # type: ignore
 

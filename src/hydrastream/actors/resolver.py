@@ -22,7 +22,7 @@ from hydrastream.messages.base import Envelope, StopMsg
 from hydrastream.messages.io import LinkData
 from hydrastream.messages.state import ProgressDeltaCmd, RegisterFileCmd, StateKeeperCmd
 from hydrastream.providers import ProviderRouter
-from hydrastream.utils import redact_url
+from hydrastream.utils import extract_filename, redact_url
 
 
 @hydra_dataclass
@@ -158,8 +158,8 @@ class BaseMetadataResolver(ABC):
             await self._requeue_chunk(envelope)
 
         # Если мы здесь, значит ошибка критическая (Exception)
-        await log(
-            self.ui, f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL
+        await self.ui.log(
+            f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL
         )
         raise e
 
@@ -174,13 +174,14 @@ class BaseMetadataResolver(ABC):
 
     async def _fetch_metadata(self, url: str) -> tuple[str, int, bool]:
         # 1. Пробуем HEAD
-        response = await safe_request(self.net, "HEAD", url=url)
+        response = await self.net.request("HEAD", url=url)
         # 2. Если HEAD не дал инфы, используем GET, но ОБЯЗАТЕЛЬНО через stream
         if response is None or int(response.headers.get("content-length", 0)) == 0:
             # Контекстный менеджер 'async with' сам закроет соединение в конце
-            async with stream_chunk(self.net, url) as resp:
-                headers = resp.headers
-                return self._parse_headers(url, headers)
+            async with self.net.stream(url) as connect:
+                if response := connect.response:
+                    headers = connect.response.headers
+                    return self._parse_headers(url, headers)
 
         return self._parse_headers(url, response.headers)
 
@@ -206,7 +207,7 @@ class BaseMetadataResolver(ABC):
 
         provider = ProviderRouter()
         checksum = await provider.resolve_hash(self.net, url, filename)
-        await self.ui.done(self.ui, id, filename)
+        await self.ui.done(id, filename)
 
         if checksum is None:
             await self.ui.log(

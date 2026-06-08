@@ -122,7 +122,7 @@ class DiskFileDispatcher(BaseFileDispatcher):
         )
         if new_filename:
             file_obj.actual_filename = new_filename
-            self.ui.update_filename(self.ui, file_obj.meta.id, new_filename)
+            self.ui.update_filename(file_obj.meta.id, new_filename)
         else:
             file_obj.actual_filename = file_obj.meta.original_filename
 

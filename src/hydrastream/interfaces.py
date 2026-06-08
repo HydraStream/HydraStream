@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from typing_extensions import Buffer, runtime_checkable
 
+from hydrastream.exceptions import LogStatus
+
 if TYPE_CHECKING:
     from hydrastream.domain.entities import Checksum, File, TypeHash
 
@@ -43,11 +45,22 @@ class StorageBackend(Protocol):
 
 @runtime_checkable
 class MonitorBackend(Protocol):
-    async def log(self, message: str, status: str, **kwargs: Any) -> None:
+    async def log(
+        self,
+        message: str,
+        *,
+        status: LogStatus | str,
+        progress: bool = False,
+        throttle_key: str | None = None,
+        throttle_sec: float = 10.0,
+        **kwargs: object,
+    ) -> None:
         """Записать сообщение в лог/на экран"""
         ...
 
-    def add_file(self, filename: str, total_size: int | None = None) -> None:
+    def add_file(
+        self, file_id: int, filename: str, total_size: int | None = None
+    ) -> None:
         """Зарегистрировать новый файл в UI"""
         ...
 
@@ -55,7 +68,10 @@ class MonitorBackend(Protocol):
         """Сдвинуть прогресс-бар"""
         ...
 
-    async def done(self, filename: str) -> None:
+    def update_filename(self, file_id: int, new_filename: str) -> None:
+        pass
+
+    async def done(self, file_id: int, filename: str) -> None:
         """Отметить файл как завершенный"""
         ...
 
@@ -67,6 +83,8 @@ class MonitorBackend(Protocol):
 @runtime_checkable
 class NetworkStream(Protocol):
     """Абстракция над потоком (response от curl_cffi или httpx)"""
+
+    def response(self) -> Any: ...
 
     def aiter_bytes(self, chunk_size: int) -> AsyncGenerator[bytes, None]: ...
 
@@ -93,7 +111,7 @@ class NetworkBackend(Protocol):
 @runtime_checkable
 class HashProvider(Protocol):
     async def resolve(
-        self, ctx: NetworkBackend, url: str, filename: str
+        self, net: NetworkBackend, url: str, filename: str
     ) -> Checksum | None: ...
 
 

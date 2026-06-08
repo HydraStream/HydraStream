@@ -48,7 +48,7 @@ requires-python = ">=3.11"
 
 # Продовые зависимости (то, что скачается у пользователя при установке).
 dependencies =[
-    "aiolimiter>=1.2.1",                 # Для алгоритма AIMD и rate-лимитов
+    # Для алгоритма AIMD и rate-лимитов
     "curl-cffi>=0.15.0",              # Асинхронный HTTP-клиент с поддержкой HTTP/2 (>=0.15.0 fixes CVE-2026-33752 SSRF via redirects)
     "hypothesis-jsonschema>=0.23.1",
     "orjson>=3.11.7",                    # Ультра-быстрый парсер JSON (написан на Rust)

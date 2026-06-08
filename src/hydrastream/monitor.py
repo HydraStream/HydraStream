@@ -5,13 +5,16 @@ import asyncio
 import shutil
 import sys
 import time
-from dataclasses import asdict
+import typing
+from abc import ABC, abstractmethod
+from collections import defaultdict
+from dataclasses import asdict, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import orjson
-from rich.console import Group
+from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
@@ -21,6 +24,7 @@ from rich.progress import (
     ProgressColumn,
     SpinnerColumn,
     Task,
+    TaskID,
     TextColumn,
     TimeRemainingColumn,
     TotalFileSizeColumn,
@@ -32,13 +36,360 @@ from rich.table import Column, Table
 from rich.text import Text
 
 from hydrastream.actors.stater import GetUIDeltasCmd, StateKeeperCmd
+from hydrastream.domain.entities import File
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import HydraError, LogFileError, LogStatus
-from hydrastream.models import File, UIState
+from hydrastream.interfaces import MonitorBackend
 from hydrastream.utils import format_size
 
 
-def truncate_filename(name: str, w: int = 30) -> str:
-    return f"{name[: w // 2 - 1]}...{name[-w // 2 + 2 :]}" if len(name) > w else name
+@hydra_dataclass
+class BaseMonitor(MonitorBackend, ABC):
+    is_running: bool = False
+    is_cancelled: bool = False
+    is_stream: bool = False
+
+    """Всё, что касается записи логов на жесткий диск."""
+
+    log_file: Path
+    log_throttle: dict[str, float] = field(default_factory=dict[str, float])
+    log_fd: typing.TextIO | None = field(default=None, init=False, repr=False)
+    log_queue: asyncio.Queue[str | None] = field(
+        default_factory=asyncio.Queue[str | None], init=False
+    )
+    log_task: asyncio.Task[None] | None = field(default=None, init=False)
+
+    """Чисто статистика и счетчики загрузки."""
+
+    start_time: float = 0.0
+    total_bytes: int = 0
+    download_bytes: int = 0
+    total_files: int = 0
+    files_completed: int = 0
+    buffer: defaultdict[int, int] = field(default_factory=lambda: defaultdict(int))
+
+    is_debug = False
+
+    async def log(
+        self,
+        message: str | Rule,
+        *,
+        status: LogStatus | str = LogStatus.INFO,
+        progress: bool = False,
+        throttle_key: str | None = None,
+        throttle_sec: float = 10.0,
+        **kwargs: object,
+    ) -> None:
+        if throttle_key:
+            now = time.monotonic()
+            last_time = self.log_throttle.get(throttle_key, 0.0)
+            if now - last_time < throttle_sec:
+                return
+            self.log_throttle[throttle_key] = now
+
+        timestamp = datetime.now().strftime("[%H:%M:%S]")
+        final_msg = f"{timestamp} {message}"
+
+        if self.log_file:
+            clean_msg = Text.from_markup(str(final_msg)).plain
+            self.log_queue.put_nowait(clean_msg)
+
+        await self._display_log(message, status, **kwargs)
+
+    async def report(self, error: HydraError, **log_extra: Any) -> None:  # noqa: ANN401
+        """
+        Передаем данные ошибки в логгер.
+        asdict() превратит поля датакласса в ключи для JSON-лога.
+        """
+        # Убираем системные поля, которые не нужны в JSON-атрибутах
+        data = asdict(error)
+        for key in ["exit_code", "log_status", "message_tpl", "formatted_msg"]:
+            data.pop(key, None)
+
+        await self.log(
+            f"[{error.error_id}] {error.formatted_msg}",
+            status=error.log_status,
+            **data,  # Все поля (filename, required и т.д.) попадут в JSON!
+            **log_extra,  # Дополнительные флаги типа throttle_key
+        )
+
+    async def date_print(self) -> None:
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        await self.log(f"--- {current_date} ---")
+
+    async def log_worker(self) -> None:
+        """
+        Фоновый воркер. Живет всё время работы программы.
+        Берет строки из очереди и пишет в ОТКРЫТЫЙ файл.
+        """
+        if not self.log_fd:
+            return
+
+        while True:
+            msg = await self.log_queue.get()
+
+            # Ядовитая пилюля для остановки логгера
+            if msg is None:
+                break
+
+            try:
+                self.log_fd.write(f"{msg}\n")
+                self.log_fd.flush()  # Гарантируем, что строка сразу упала на диск
+            except OSError as e:
+                if self.is_debug:
+                    raise
+                err = LogFileError(path=str(self.log_file), original_err=str(e))
+                await self.log(f"{err.formatted_msg}", status=LogStatus.WARNING)
+
+                self.log_fd.close()
+                self.log_fd = None
+                break
+
+    def add_file(
+        self, file_id: int, filename: str, total_size: int | None = None
+    ) -> None:
+        if total_size is not None:
+            self.total_bytes += total_size
+            self.total_files += 1
+
+    def update_progress(self, file_id: int, advance_bytes: int) -> None:
+        pass
+
+    def update_filename(self, file_id: int, new_filename: str) -> None:
+        pass
+
+    async def done(self, file_id: int, filename: str) -> None:
+
+        if self.buffer.get(file_id, 0):
+            self.files_completed += 1
+            await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
+
+    def safe_init(self) -> None:
+        """Пытается создать папку для лога. Если не выходит - падает на дефолт."""
+        try:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            # Пробуем открыть файл на дозапись (тест прав доступа)
+            with self.log_file.open("a", encoding="utf-8"):
+                pass
+        except OSError:
+            # Если юзер передал /root/secret/dir/ и у нас нет прав,
+            # откатываемся в текущую директорию!
+            fallback = Path.cwd() / "download.log"
+            self.log_file = fallback
+
+    async def start(self) -> None:
+        """Запускает фонового воркера (вызывать внутри async_main)"""
+        if self.is_running:
+            return
+
+        self.is_running = True
+
+        try:
+            self.safe_init()
+            self.log_fd = self.log_file.open("a", encoding="utf-8")
+            self.log_task = asyncio.create_task(self.log_worker())
+            self.start_time = time.monotonic()
+            await self.log("--- Session Started ---")
+            await self.date_print()
+        except OSError as e:
+            if self.is_debug:
+                raise
+            self.log_fd = None
+
+            err = LogFileError(path=str(self.log_file), original_err=str(e))
+            await self.log(
+                f"[bold yellow]LOGGING DISABLED:[/] {err.formatted_msg}",
+                status=LogStatus.WARNING,
+            )
+
+        await self._ui_start()
+
+    async def handle_exit(self) -> None:
+        self.is_running = False
+
+        elapsed = time.monotonic() - self.start_time
+        avg_speed = (
+            f"{format_size(self.download_bytes / elapsed)}/s" if elapsed > 0 else 0
+        )
+
+        size_str = (
+            f"{format_size(self.download_bytes)}" + f"/{format_size(self.total_bytes)}"
+        )
+        mins, secs = divmod(int(elapsed), 60)
+        hours, mins = divmod(mins, 60)
+        time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+
+        status_word = "CANCELLED" if self.is_cancelled else "SUCCESS"
+        report = (
+            f"\n--- Final Report ({status_word}) ---\n"
+            f"Total files:   {self.files_completed}/{self.total_files}\n"
+            f"Total Data:    {size_str}\n"
+            f"Average Speed: {avg_speed}\n"
+            f"Total Time:    {time_str}\n"
+            f"--------------------------------"
+        )
+        report_dict = {
+            "total_files": self.files_completed,
+            "total_bytes": self.download_bytes,
+            "average_speed": avg_speed,
+            "time_elapsed_sec": elapsed,
+        }
+        await self.log(
+            report,
+            status=LogStatus.INFO,
+            progress=False,
+            throttle_key=None,
+            throttle_sec=10.0,
+            **report_dict,
+        )
+
+    async def stop(self) -> None:
+        await self.handle_exit()
+        await self.log("--- Session Finished ---")
+
+        if self.log_task:
+            self.log_queue.put_nowait(None)
+            await self.log_task
+
+        if self.log_fd:
+            self.log_fd.close()
+            self.log_fd = None
+
+        await self._ui_stop()
+
+    async def _check_storage_capacity(self, output_path: str | Path) -> None:
+        """Проверяет наличие свободного места на диске перед началом загрузки."""
+
+        output_dir = Path(output_path).expanduser().resolve()
+        check_dir = output_dir if output_dir.exists() else output_dir.parent
+
+        try:
+            free_space = shutil.disk_usage(check_dir).free
+            required = self.total_bytes
+
+            if free_space < required:
+                await self.log("\n[bold red] DANGER: Insufficient disk space![/]")
+                await self.log(
+                    f"[red]Required: {format_size(required)} | "
+                    f"Available: {format_size(free_space)}[/]",
+                )
+            else:
+                await self.log(
+                    f"\nDisk space check passed ({format_size(free_space)} free).[/]\n",
+                    status=LogStatus.SUCCESS,
+                )
+
+        except OSError as e:
+            if self.is_debug:
+                raise
+            await self.log(
+                f"Warning: Could not check disk space: {e}",
+                status=LogStatus.WARNING,
+            )
+
+    @abstractmethod
+    async def _display_log(
+        self, message: str | Rule, status: LogStatus | str, **kwargs: object
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def _display_dry_run(
+        self, data: dict[str, Any], output_dir: str | Path
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def _ui_start(self) -> None:
+        pass
+
+    @abstractmethod
+    async def _ui_stop(
+        self,
+    ) -> None:
+        pass
+
+
+@hydra_dataclass
+class QuietMonitor(BaseMonitor):
+    async def _display_log(
+        self, message: str | Rule, status: LogStatus | str, **kwargs: object
+    ) -> None:
+        log_record = {
+            "timestamp": datetime.now(UTC),
+            "level": status.upper(),
+            "message": message,
+            **kwargs,  # Распаковываем дополнительные данные!
+        }
+        # Сериализуем в байты, потом в строку
+        sys.stdout.buffer.write(orjson.dumps(log_record) + b"\n")
+
+    async def _display_dry_run(
+        self, data: dict[str, Any], output_dir: str | Path
+    ) -> None:
+        pass
+
+
+@hydra_dataclass
+class JsonMonitor(BaseMonitor):
+    async def _display_log(
+        self,
+        message: str | Rule,
+        status: LogStatus | str,
+        **kwargs: object,
+    ) -> None:
+        pass
+
+    async def _display_dry_run(
+        self, data: dict[str, File], output_dir: str | Path
+    ) -> None:
+        report_data = {
+            "total_files": self.total_files,
+            "total_bytes": self.total_bytes,
+            "files": [
+                {
+                    "filename": f.actual_filename,
+                    "size_bytes": f.meta.content_length,
+                    "chunks": len(f.chunks),
+                    "supports_ranges": f.meta.supports_ranges,
+                    "algorithm": f.meta.expected_checksum.algorithm
+                    if f.meta.expected_checksum
+                    else None,
+                    "expected_hash": f.meta.expected_checksum.value
+                    if f.meta.expected_checksum
+                    else None,
+                }
+                for f in data.values()
+            ],
+        }
+
+        await self.log(
+            "DRY_RUN_REPORT",
+            status=LogStatus.INFO,
+            progress=False,
+            throttle_key=None,
+            throttle_sec=10,
+            **report_data,
+        )
+        if self.is_stream:
+            await self._check_storage_capacity(output_dir)
+
+
+@hydra_dataclass
+class PlainMonitor(BaseMonitor):
+    console: Console = field(default_factory=lambda: Console(stderr=True))
+
+    async def _display_log(
+        self, message: str | Rule, status: LogStatus | str, **kwargs: object
+    ) -> None:
+        timestamp = datetime.now().strftime("[%H:%M:%S]")
+        final_msg = f"{timestamp} {message}"
+        self.console.print(Text.from_markup(str(final_msg)).plain)
+
+    async def _display_dry_run(
+        self, data: dict[str, Any], output_dir: str | Path
+    ) -> None:
+        pass
 
 
 def get_gradient_color(percentage: float) -> str:
@@ -70,513 +421,32 @@ class GradientPercent(ProgressColumn):
         return Text(f"{p:>5.1f}%", style=f"bold {color}")
 
 
-async def date_print(ctx: UIState) -> None:
-    current_date = datetime.now().strftime("%Y-%m-%d")
-    date_header = f"[bold cyan] Date: {current_date}[/]"
+@hydra_dataclass
+class RichMonitor(BaseMonitor):
+    is_dry_run: bool = False
+    is_verify: bool = True
 
-    if not (ctx.display.no_ui or ctx.display.quiet):
-        ctx.rich.console.print(Rule(date_header))
-    await log(ctx, f"--- {current_date} ---")
+    console: Console = field(default_factory=lambda: Console(stderr=True))
 
+    has_hash: int = 0
+    has_ranges: int = 0
 
-async def report(ctx: UIState, error: HydraError, **log_extra: Any) -> None:  # noqa: ANN401
-    """
-    Передаем данные ошибки в логгер.
-    asdict() превратит поля датакласса в ключи для JSON-лога.
-    """
-    # Убираем системные поля, которые не нужны в JSON-атрибутах
-    data = asdict(error)
-    for key in ["exit_code", "log_status", "message_tpl", "formatted_msg"]:
-        data.pop(key, None)
+    refresh_per_second: int = 10
+    renewal_rate: float = field(init=False)
 
-    await log(
-        ctx,
-        f"[{error.error_id}] {error.formatted_msg}",
-        status=error.log_status,
-        **data,  # Все поля (filename, required и т.д.) попадут в JSON!
-        **log_extra,  # Дополнительные флаги типа throttle_key
-    )
+    tasks: dict[int, TaskID] = field(default_factory=dict[int, TaskID])
+    active_files: set[int] = field(default_factory=set[int])
 
+    refresh: asyncio.Task[None] = field(init=False)
+    progress: Progress = field(init=False)
+    live: Live = field(init=False)
 
-def formatting_log(
-    message: str | Rule, formatted_msg: str, status: LogStatus = LogStatus.INFO
-) -> Panel | str | Rule:
-    match status.upper():
-        case "CRITICAL" | "INTERRUPT":
-            renderable = Panel(
-                f"[bold red]{message}[/]\n[dim white]Partial data may have been saved.",
-                title="[bold red]Interrupted",
-                border_style="red",
-                expand=False,
-            )
-        case "ERROR":
-            renderable = Panel(
-                f"[bold red]{message}[/]",
-                title="Error",
-                border_style="red",
-                padding=(0, 1),
-            )
-        case "WARNING":
-            renderable = f"[yellow]{formatted_msg}[/]"
-        case "INFO":
-            renderable = f"[white]{formatted_msg}[/]"
-        case "SUCCESS":
-            renderable = f"[green]{formatted_msg}[/]"
-        case _:
-            renderable = message
-    return renderable
+    state_keeper_q: asyncio.Queue[StateKeeperCmd]
 
+    def __post_init__(self) -> None:
+        self.renewal_rate = 1 / self.refresh_per_second
 
-async def log(
-    ctx: UIState,
-    message: str | Rule,
-    *,
-    status: LogStatus = LogStatus.INFO,
-    progress: bool = False,
-    throttle_key: str | None = None,
-    throttle_sec: float = 10.0,
-    **kwargs: object,
-) -> None:
-    if throttle_key:
-        now = time.monotonic()
-        last_time = ctx.log.log_throttle.get(throttle_key, 0.0)
-        if now - last_time < throttle_sec:
-            return
-        ctx.log.log_throttle[throttle_key] = now
-    if ctx.display.json_logs:
-        # Собираем словарь для JSON
-        log_record = {
-            "timestamp": datetime.now(UTC).isoformat(),
-            "level": status.upper(),
-            "message": message,
-            **kwargs,  # Распаковываем дополнительные данные!
-        }
-        # Сериализуем в байты, потом в строку
-        final_msg = orjson.dumps(log_record).decode("utf-8")
-    else:
-        timestamp = datetime.now().strftime("[%H:%M:%S]")
-        final_msg = f"{timestamp} {message}"
-
-    if ctx.log.log_file:
-        clean_msg = Text.from_markup(str(final_msg)).plain
-        ctx.log.log_queue.put_nowait(clean_msg)
-
-    if ctx.display.quiet:
-        return
-
-    if ctx.display.json_logs:
-        sys.stdout.write(final_msg + "\n")
-        return
-
-    renderable = final_msg
-    if ctx.rich.progress:
-        renderable = formatting_log(message, renderable, status)
-        if progress or status in ["WARNING", "ERROR", "CRITICAL", "INTERRUPT"]:
-            ctx.rich.progress.console.print(renderable)
-    else:
-        ctx.rich.console.print(Text.from_markup(str(renderable)).plain)
-
-
-async def log_worker(ctx: UIState) -> None:
-    """
-    Фоновый воркер. Живет всё время работы программы.
-    Берет строки из очереди и пишет в ОТКРЫТЫЙ файл.
-    """
-    if not ctx.log.log_fd:
-        return
-
-    while True:
-        msg = await ctx.log.log_queue.get()
-
-        # Ядовитая пилюля для остановки логгера
-        if msg is None:
-            break
-
-        try:
-            ctx.log.log_fd.write(f"{msg}\n")
-            ctx.log.log_fd.flush()  # Гарантируем, что строка сразу упала на диск
-        except OSError as e:
-            if ctx.display.debug:
-                raise
-            err = LogFileError(path=str(ctx.log.log_file), original_err=str(e))
-            await log(ctx, f"{err.formatted_msg}", status=LogStatus.WARNING)
-
-            ctx.log.log_fd.close()
-            ctx.log.log_fd = None
-            break
-
-
-def add_file(
-    ctx: UIState, id: int, filename: str, total_size: int | None = None
-) -> None:
-    if total_size is not None:
-        ctx.progress.total_bytes += total_size
-        ctx.progress.total_files += 1
-
-    if ctx.rich.progress:
-        t_filename = truncate_filename(filename)
-        if total_size is None:
-            task_id = ctx.rich.progress.add_task(
-                "Download Hash for", filename=t_filename, total=total_size
-            )
-        else:
-            task_id = ctx.rich.progress.add_task(
-                "Download file", filename=t_filename, total=total_size, visible=False
-            )
-        ctx.rich.tasks[id] = task_id
-        update_panel_title(ctx)
-
-
-def update(ctx: UIState, filename: str, advance_bytes: int) -> None:
-    ctx.rich.buffer[filename] += advance_bytes
-    ctx.progress.download_bytes += advance_bytes
-
-    if ctx.progress.download_bytes - ctx.speed.prev_bytes >= ctx.speed.bytes_to_check:
-        ctx.speed.prev_bytes += ctx.speed.bytes_to_check
-
-        ctx.speed.controller_checkpoint_event.set()
-        ctx.speed.throttler_checkpoint_event.set()
-
-
-def update_filename(ctx: UIState, id: int, new_filename: str) -> None:
-    if ctx.rich.progress:
-        ctx.rich.progress.update(ctx.rich.tasks[id], description=new_filename)
-
-
-async def ui_refresh_actor(
-    ctx: UIState, state_keeper_q: asyncio.Queue[StateKeeperCmd]
-) -> None:
-    reply_q: asyncio.Queue[dict[int, int]] = asyncio.Queue(maxsize=1)
-
-    if not ctx.rich.progress:
-        return
-
-    while ctx.is_running:
-        try:
-            # 1. Засыпаем до следующего "кадра" (например, на 0.1 сек)
-            await asyncio.sleep(ctx.rich.renewal_rate)
-
-            # 2. Запрашиваем дельты у базы данных (StateKeeper)
-            await state_keeper_q.put(GetUIDeltasCmd(reply_to=reply_q))
-            deltas = await reply_q.get()
-
-            # 3. Отрисовываем!
-            for file_id, bytes_to_advance in deltas.items():
-                ctx.rich.buffer[file_id] += bytes_to_advance
-                ctx.progress.download_bytes += bytes_to_advance
-
-                ctx.rich.progress.update(
-                    ctx.rich.tasks[file_id],
-                    advance=bytes_to_advance,
-                    visible=True,
-                )
-
-                if file_id not in ctx.rich.active_files:
-                    ctx.rich.active_files.add(file_id)
-                    update_panel_title(ctx)
-
-        except Exception as e:
-            if ctx.display.debug:
-                raise
-            await log(ctx, f"UI Refresh Error: {e!r}", status=LogStatus.ERROR)
-
-
-def update_panel_title(ctx: UIState) -> None:
-    if not ctx.rich.live:
-        ctx.rich.dynamic_title = ""
-
-    active = len(ctx.rich.active_files)
-    ctx.rich.dynamic_title = (
-        f"[bold white][green]{ctx.progress.files_completed}[/]/"
-        + f"[blue]{ctx.progress.total_files}[/] Files | [yellow]{active} Active[/]"
-    )
-
-
-async def done(ctx: UIState, id: int, filename: str) -> None:
-    if ctx.rich.progress and id in ctx.rich.tasks:
-        task_id = ctx.rich.tasks[id]
-        ctx.rich.progress.update(
-            task_id, completed=ctx.rich.progress.tasks[task_id].total, visible=False
-        )
-        del ctx.rich.tasks[id]
-        ctx.rich.active_files.discard(id)
-
-        if ctx.rich.progress.tasks[task_id].total is not None:
-            ctx.progress.files_completed += 1
-            update_panel_title(ctx)
-            await log(ctx, f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
-
-    elif ctx.rich.buffer.get(id, 0):
-        ctx.progress.files_completed += 1
-        await log(ctx, f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
-
-
-def make_panel(ctx: UIState) -> Panel | str:
-    if not ctx.rich.progress:
-        return ""
-
-    if not ctx.rich.tasks and ctx.is_running:
-        return ""
-
-    elapsed = time.monotonic() - ctx.progress.start_time
-    avg_speed = ctx.progress.download_bytes / elapsed if elapsed > 0 else 0
-    speed_str = f"{format_size(avg_speed)}/s"
-
-    mins, secs = divmod(int(elapsed), 60)
-    hours = 0
-    if mins >= 60:
-        hours, mins = divmod(mins, 60)
-    time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
-
-    remain_time = (
-        (ctx.progress.total_bytes - ctx.progress.download_bytes) / avg_speed
-        if ctx.progress.total_bytes and avg_speed
-        else 0
-    )
-
-    r_mins, r_secs = divmod(int(remain_time), 60)
-    r_hours = 0
-    if r_mins >= 60:
-        r_hours, r_mins = divmod(r_mins, 60)
-    remain_time_str = f"{r_hours:02d}:{r_mins:02d}:{r_secs:02d}"
-
-    size_str = (
-        f"{format_size(ctx.progress.download_bytes)}"
-        + f"/{format_size(ctx.progress.total_bytes)}"
-    )
-
-    if (
-        not ctx.rich.tasks
-        and ctx.progress.total_files > 0
-        and ctx.progress.total_files == ctx.progress.files_completed
-    ) or ctx.cancelled:
-        grid = Table.grid(expand=True)
-        grid.add_column()
-        grid.add_column(justify="center")
-        content = Group("[green]All downloads completed successfully!\n", grid)
-        grid.add_row(
-            "[white]Total files:",
-            f"[green3]{ctx.progress.files_completed}/{ctx.progress.total_files}[/]",
-        )
-        grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
-        grid.add_row("[white]Average Speed:", f"[bold yellow]{speed_str}[/]")
-        grid.add_row("[white]Total Time:", f"[bold magenta]{time_str}[/]")
-        return Panel(
-            grid if ctx.cancelled else content,
-            title="[#2e8b57]Final Report",
-            border_style="#2e8b57",
-            expand=False,
-        )
-
-    if ctx.display.dry_run:
-        size_str = f"{format_size(ctx.progress.total_bytes)}"
-        grid = Table.grid(expand=True)
-        grid.add_column()
-        grid.add_column(justify="center")
-
-        grid.add_row("[white]Total files:", f"[green3]{ctx.progress.total_files}[/]")
-        grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
-        if ctx.display.verify:
-            grid.add_row(
-                "[white]Hash Found:",
-                f"[bold yellow]{ctx.progress.has_hash}/{ctx.progress.total_files}[/]",
-            )
-        grid.add_row(
-            "[white]Ranges:",
-            f"[bold magenta]{ctx.progress.ranges}/{ctx.progress.total_files}[/]",
-        )
-        return Panel(
-            grid,
-            title="[#2e8b57]Final Report",
-            border_style="#2e8b57",
-            expand=False,
-        )
-
-    dynamic_title_full = (
-        f"\nAvg: [yellow]{speed_str}[/] | "
-        f"Remaining Time: [green3]{remain_time_str}[/] | "
-        f"Time: [magenta]{time_str}[/] | Download: [bold cyan]{size_str}[/]"
-    )
-
-    return Panel(
-        ctx.rich.progress,
-        title=ctx.rich.dynamic_title + dynamic_title_full,
-        border_style="blue",
-        padding=(1, 2),
-    )
-
-
-async def print_dry_run_report(
-    ctx: UIState, files: dict[int, File], stream: bool, output_dir: str | Path
-) -> None:
-    """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
-
-    # 1. Если включен режим JSON логов, отдаем структурированные данные
-    if ctx.display.json_logs:
-        report_data = {
-            "total_files": ctx.progress.total_files,
-            "total_bytes": ctx.progress.total_bytes,
-            "files": [
-                {
-                    "filename": f.actual_filename,
-                    "size_bytes": f.meta.content_length,
-                    "chunks": len(f.chunks),
-                    "supports_ranges": f.meta.supports_ranges,
-                    "algorithm": f.meta.expected_checksum.algorithm
-                    if f.meta.expected_checksum
-                    else None,
-                    "expected_hash": f.meta.expected_checksum.value
-                    if f.meta.expected_checksum
-                    else None,
-                }
-                for f in files.values()
-            ],
-        }
-        # Отправляем в твой универсальный логгер
-
-        await log(
-            ctx,
-            "DRY_RUN_REPORT",
-            status=LogStatus.INFO,
-            progress=False,
-            throttle_key=None,
-            throttle_sec=10,
-            **report_data,
-        )
-        return
-
-    # 2. Если режим тишины (без JSON), просто выходим
-    if ctx.display.quiet:
-        return
-
-    # 3. Красивый UI для людей
-    table = Table(title="[bold yellow] DRY RUN REPORT (No data will be downloaded)[/]")
-    table.add_column("Filename", style="cyan", no_wrap=True)
-    table.add_column("Size", justify="right")
-    table.add_column("Chunks", justify="right")
-    if ctx.display.verify:
-        table.add_column("Hash Found", justify="center")
-    table.add_column("Ranges", justify="center")
-
-    for f in files.values():
-        f.create_chunks()
-        str_size = format_size(f.meta.content_length)
-        if ctx.display.verify and f.meta.expected_checksum:
-            ctx.progress.has_hash += 1
-
-        if f.meta.supports_ranges:
-            ranges = "✅"
-            ctx.progress.ranges += 1
-        else:
-            ranges = "❌ (Fallback to 1 thread)"
-
-        if ctx.display.verify:
-            table.add_row(
-                f.meta.original_filename,
-                str_size,
-                str(len(f.chunks)),
-                "✅" if f.meta.expected_checksum else "❌",
-                ranges,
-            )
-        else:
-            table.add_row(
-                f.meta.original_filename, str_size, str(len(f.chunks)), ranges
-            )
-    # Печатаем таблицу в stderr (чтобы не сломать пайпы)
-    ctx.rich.console.print(table)
-    if not stream:
-        await check_storage_capacity(ctx, output_path=output_dir)
-
-
-async def check_storage_capacity(ctx: UIState, output_path: str | Path) -> None:
-    """Проверяет наличие свободного места на диске перед началом загрузки."""
-
-    output_dir = Path(output_path).expanduser().resolve()
-    check_dir = output_dir if output_dir.exists() else output_dir.parent
-
-    try:
-        free_space = shutil.disk_usage(check_dir).free
-        required = ctx.progress.total_bytes
-
-        if free_space < required:
-            ctx.rich.console.print("\n[bold red] DANGER: Insufficient disk space![/]")
-            ctx.rich.console.print(
-                f"[red]Required: {format_size(required)} | "
-                f"Available: {format_size(free_space)}[/]"
-            )
-        else:
-            ctx.rich.console.print(
-                f"\n[bold green] Disk space check passed "
-                f"({format_size(free_space)} free).[/]\n"
-            )
-
-    except OSError as e:
-        if ctx.display.debug:
-            raise
-        await log(
-            ctx,
-            f"Warning: Could not check disk space: {e}",
-            status=LogStatus.WARNING,
-        )
-
-
-async def handle_exit(ctx: UIState) -> None:
-    ctx.is_running = False
-    if ctx.rich.live:
-        ctx.rich.live.refresh()
-        ctx.rich.live.stop()
-        if ctx.rich.refresh:
-            ctx.rich.refresh.cancel()
-    elapsed = time.monotonic() - ctx.progress.start_time
-    avg_speed = (
-        f"{format_size(ctx.progress.download_bytes / elapsed)}/s" if elapsed > 0 else 0
-    )
-
-    size_str = (
-        f"{format_size(ctx.progress.download_bytes)}"
-        + f"/{format_size(ctx.progress.download_bytes)}"
-    )
-    mins, secs = divmod(int(elapsed), 60)
-    hours, mins = divmod(mins, 60)
-    time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
-
-    status_word = "CANCELLED" if ctx.cancelled else "SUCCESS"
-    report = (
-        f"\n--- Final Report ({status_word}) ---\n"
-        f"Total files:   {ctx.progress.files_completed}/{ctx.progress.total_files}\n"
-        f"Total Data:    {size_str}\n"
-        f"Average Speed: {avg_speed}\n"
-        f"Total Time:    {time_str}\n"
-        f"--------------------------------"
-    )
-    report_dict = {
-        "total_files": ctx.progress.files_completed,
-        "total_bytes": ctx.progress.download_bytes,
-        "average_speed": avg_speed,
-        "time_elapsed_sec": elapsed,
-    }
-    await log(
-        ctx,
-        report,
-        status=LogStatus.INFO,
-        progress=False,
-        throttle_key=None,
-        throttle_sec=10.0,
-        **report_dict,
-    )
-
-
-async def ui_start(ctx: UIState) -> None:
-    if ctx.is_running:
-        return
-
-    ctx.is_running = True
-    # 1. ОТКРЫВАЕМ ФАЙЛ ЛОГОВ И ЗАПУСКАЕМ ВОРКЕРА
-    if ctx.log.log_file:
-        await log_start(ctx)
-
-    if not (ctx.display.no_ui or ctx.display.quiet):
-        ctx.rich.progress = Progress(
+        self.rich = Progress(
             SpinnerColumn("aesthetic"),
             TextColumn("[bold yellow]{task.description}"),
             TextColumn(
@@ -594,63 +464,399 @@ async def ui_start(ctx: UIState) -> None:
             TransferSpeedColumn(),
             "•",
             TimeRemainingColumn(),
-            console=ctx.rich.console,
+            console=self.rich.console,
             transient=False,
             expand=True,
         )
 
-        ctx.rich.live = Live(
-            get_renderable=lambda: make_panel(ctx),
-            console=ctx.rich.console,
+        self.live = Live(
+            get_renderable=self.make_panel,
+            console=self.rich.console,
             auto_refresh=True,
             refresh_per_second=10,
             transient=False,
         )
-        ctx.rich.live.start()
-        ctx.rich.refresh = asyncio.create_task(refresh_loop(ctx))
-    ctx.progress.start_time = time.monotonic()
-    await log(ctx, "--- Session Started ---")
-    await date_print(ctx)
 
+    async def _display_log(
+        self, message: str | Rule, status: LogStatus | str, **kwargs: object
+    ) -> None:
+        pass
 
-async def ui_stop(ctx: UIState) -> None:
-    await handle_exit(ctx)
-    await log(ctx, "--- Session Finished ---")
+    async def _display_dry_run(
+        self, data: dict[str, Any], output_dir: str | Path
+    ) -> None:
+        pass
 
-    # 2. КОРРЕКТНО ГАСИМ ЛОГГЕР
-    await log_stop(ctx)
-
-    # 3. ЗАКРЫВАЕМ ФАЙЛОВЫЙ ДЕСКРИПТОР
-    if ctx.log.log_fd:
-        ctx.log.log_fd.close()
-        ctx.log.log_fd = None
-
-
-async def log_start(ctx: UIState) -> None:
-    """Запускает фонового воркера (вызывать внутри async_main)"""
-    if ctx.log.is_running:
-        return
-
-    ctx.log.is_running = True
-
-    try:
-        ctx.log.safe_init()
-        ctx.log.log_fd = ctx.log.log_file.open("a", encoding="utf-8")
-        ctx.log.log_task = asyncio.create_task(log_worker(ctx))
-    except OSError as e:
-        if ctx.display.debug:
-            raise
-        ctx.log.log_fd = None
-
-        err = LogFileError(path=str(ctx.log.log_file), original_err=str(e))
-        await log(
-            ctx,
-            f"[bold yellow]LOGGING DISABLED:[/] {err.formatted_msg}",
-            status=LogStatus.WARNING,
+    def truncate_filename(self, name: str, w: int = 30) -> str:
+        return (
+            f"{name[: w // 2 - 1]}...{name[-w // 2 + 2 :]}" if len(name) > w else name
         )
 
+    async def date_print(self) -> None:
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        date_header = f"[bold cyan] Date: {current_date}[/]"
 
-async def log_stop(ctx: UIState) -> None:
-    if ctx.log.log_task:
-        ctx.log.log_queue.put_nowait(None)
-        await ctx.log.log_task
+        self.rich.console.print(Rule(date_header))
+        await self.log(f"--- {current_date} ---")
+
+    def formatting_log(
+        self,
+        message: str | Rule,
+        formatted_msg: str,
+        status: str | LogStatus = LogStatus.INFO,
+    ) -> Panel | str | Rule:
+        match status.upper():
+            case "CRITICAL" | "INTERRUPT":
+                renderable = Panel(
+                    f"[bold red]{message}[/]\n[dim white]"
+                    f"Partial data may have been saved.",
+                    title="[bold red]Interrupted",
+                    border_style="red",
+                    expand=False,
+                )
+            case "ERROR":
+                renderable = Panel(
+                    f"[bold red]{message}[/]",
+                    title="Error",
+                    border_style="red",
+                    padding=(0, 1),
+                )
+            case "WARNING":
+                renderable = f"[yellow]{formatted_msg}[/]"
+            case "INFO":
+                renderable = f"[white]{formatted_msg}[/]"
+            case "SUCCESS":
+                renderable = f"[green]{formatted_msg}[/]"
+            case _:
+                renderable = message
+        return renderable
+
+    async def log(
+        self,
+        message: str | Rule,
+        *,
+        status: str | LogStatus = LogStatus.INFO,
+        progress: bool = False,
+        throttle_key: str | None = None,
+        throttle_sec: float = 10.0,
+        **kwargs: object,
+    ) -> None:
+        if throttle_key:
+            now = time.monotonic()
+            last_time = self.log_throttle.get(throttle_key, 0.0)
+            if now - last_time < throttle_sec:
+                return
+            self.log_throttle[throttle_key] = now
+
+        timestamp = datetime.now().strftime("[%H:%M:%S]")
+        final_msg = f"{timestamp} {message}"
+
+        if self.log_file:
+            clean_msg = Text.from_markup(str(final_msg)).plain
+            self.log_queue.put_nowait(clean_msg)
+
+        renderable = self.formatting_log(message, final_msg, status)
+        if progress or status in ["WARNING", "ERROR", "CRITICAL", "INTERRUPT"]:
+            self.rich.console.print(renderable)
+
+    async def log_worker(self) -> None:
+        """
+        Фоновый воркер. Живет всё время работы программы.
+        Берет строки из очереди и пишет в ОТКРЫТЫЙ файл.
+        """
+        if not self.log_fd:
+            return
+
+        while True:
+            msg = await self.log_queue.get()
+
+            # Ядовитая пилюля для остановки логгера
+            if msg is None:
+                break
+
+            try:
+                self.log_fd.write(f"{msg}\n")
+                self.log_fd.flush()  # Гарантируем, что строка сразу упала на диск
+            except OSError as e:
+                if self.is_debug:
+                    raise
+                err = LogFileError(path=str(self.log_file), original_err=str(e))
+                await self.log(f"{err.formatted_msg}", status=LogStatus.WARNING)
+
+                self.log_fd.close()
+                self.log_fd = None
+                break
+
+    def add_file(
+        self, file_id: int, filename: str, total_size: int | None = None
+    ) -> None:
+        if total_size is not None:
+            self.total_bytes += total_size
+            self.total_files += 1
+
+        t_filename = self.truncate_filename(filename)
+        if total_size is None:
+            task_id = self.rich.add_task(
+                "Download Hash for", filename=t_filename, total=total_size
+            )
+        else:
+            task_id = self.rich.add_task(
+                "Download file",
+                filename=t_filename,
+                total=total_size,
+                visible=False,
+            )
+        self.tasks[file_id] = task_id
+        self.update_panel_title()
+
+    def update_filename(self, file_id: int, new_filename: str) -> None:
+        if self.rich:
+            self.rich.update(self.tasks[file_id], description=new_filename)
+
+    async def ui_refresh_actor(
+        self, state_keeper_q: asyncio.Queue[StateKeeperCmd]
+    ) -> None:
+        reply_q: asyncio.Queue[dict[int, int]] = asyncio.Queue(maxsize=1)
+
+        if not self.rich:
+            return
+
+        while self.is_running:
+            try:
+                # 1. Засыпаем до следующего "кадра" (например, на 0.1 сек)
+                await asyncio.sleep(self.renewal_rate)
+
+                # 2. Запрашиваем дельты у базы данных (StateKeeper)
+                await state_keeper_q.put(GetUIDeltasCmd(reply_to=reply_q))
+                deltas = await reply_q.get()
+
+                # 3. Отрисовываем!
+                for file_id, bytes_to_advance in deltas.items():
+                    self.buffer[file_id] += bytes_to_advance
+                    self.download_bytes += bytes_to_advance
+
+                    self.rich.update(
+                        self.tasks[file_id],
+                        advance=bytes_to_advance,
+                        visible=True,
+                    )
+
+                    if file_id not in self.active_files:
+                        self.active_files.add(file_id)
+                        self.update_panel_title()
+
+            except Exception as e:
+                if self.is_debug:
+                    raise
+                await self.log(f"UI Refresh Error: {e!r}", status=LogStatus.ERROR)
+
+    def update_panel_title(self) -> None:
+
+        active = len(self.active_files)
+        self.dynamic_title = (
+            f"[bold white][green]{self.files_completed}[/]/"
+            + f"[blue]{self.total_files}[/] Files | [yellow]{active} Active[/]"
+        )
+
+    async def done(self, file_id: int, filename: str) -> None:
+        task_id = self.tasks[file_id]
+        self.rich.update(
+            task_id,
+            completed=self.rich.tasks[task_id].total,
+            visible=False,
+        )
+        del self.rich.tasks[file_id]
+        self.active_files.discard(file_id)
+
+        if self.rich.tasks[task_id].total is not None:
+            self.files_completed += 1
+            self.update_panel_title()
+            await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
+
+        elif self.buffer.get(file_id, 0):
+            self.files_completed += 1
+            await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
+
+    def make_panel(self) -> Panel | str:
+        if not self.rich:
+            return ""
+
+        if not self.rich.tasks and self.is_running:
+            return ""
+
+        elapsed = time.monotonic() - self.start_time
+        avg_speed = self.download_bytes / elapsed if elapsed > 0 else 0
+        speed_str = f"{format_size(avg_speed)}/s"
+
+        mins, secs = divmod(int(elapsed), 60)
+        hours = 0
+        if mins >= 60:
+            hours, mins = divmod(mins, 60)
+        time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+
+        remain_time = (
+            (self.total_bytes - self.download_bytes) / avg_speed
+            if self.total_bytes and avg_speed
+            else 0
+        )
+
+        r_mins, r_secs = divmod(int(remain_time), 60)
+        r_hours = 0
+        if r_mins >= 60:
+            r_hours, r_mins = divmod(r_mins, 60)
+        remain_time_str = f"{r_hours:02d}:{r_mins:02d}:{r_secs:02d}"
+
+        size_str = (
+            f"{format_size(self.download_bytes)}" + f"/{format_size(self.total_bytes)}"
+        )
+
+        if (
+            not self.rich.tasks
+            and self.total_files > 0
+            and self.total_files == self.files_completed
+        ) or self.is_cancelled:
+            grid = Table.grid(expand=True)
+            grid.add_column()
+            grid.add_column(justify="center")
+            content = Group("[green]All downloads completed successfully!\n", grid)
+            grid.add_row(
+                "[white]Total files:",
+                f"[green3]{self.files_completed}/{self.total_files}[/]",
+            )
+            grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
+            grid.add_row("[white]Average Speed:", f"[bold yellow]{speed_str}[/]")
+            grid.add_row("[white]Total Time:", f"[bold magenta]{time_str}[/]")
+            return Panel(
+                grid if self.is_cancelled else content,
+                title="[#2e8b57]Final Report",
+                border_style="#2e8b57",
+                expand=False,
+            )
+
+        if self.is_dry_run:
+            size_str = f"{format_size(self.total_bytes)}"
+            grid = Table.grid(expand=True)
+            grid.add_column()
+            grid.add_column(justify="center")
+
+            grid.add_row("[white]Total files:", f"[green3]{self.total_files}[/]")
+            grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
+            if self.is_verify:
+                grid.add_row(
+                    "[white]Hash Found:",
+                    f"[bold yellow]{self.has_hash}/{self.total_files}[/]",
+                )
+            grid.add_row(
+                "[white]Ranges:",
+                f"[bold magenta]{self.has_ranges}/{self.total_files}[/]",
+            )
+            return Panel(
+                grid,
+                title="[#2e8b57]Final Report",
+                border_style="#2e8b57",
+                expand=False,
+            )
+
+        dynamic_title_full = (
+            f"\nAvg: [yellow]{speed_str}[/] | "
+            f"Remaining Time: [green3]{remain_time_str}[/] | "
+            f"Time: [magenta]{time_str}[/] | Download: [bold cyan]{size_str}[/]"
+        )
+
+        return Panel(
+            self.rich,
+            title=self.dynamic_title + dynamic_title_full,
+            border_style="blue",
+            padding=(1, 2),
+        )
+
+    async def print_dry_run_report(
+        self, files: dict[int, File], stream: bool, output_dir: str | Path
+    ) -> None:
+        """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
+
+        table = Table(
+            title="[bold yellow] DRY RUN REPORT (No data will be downloaded)[/]"
+        )
+        table.add_column("Filename", style="cyan", no_wrap=True)
+        table.add_column("Size", justify="right")
+        table.add_column("Chunks", justify="right")
+        if self.is_verify:
+            table.add_column("Hash Found", justify="center")
+        table.add_column("Ranges", justify="center")
+
+        for f in files.values():
+            f.create_chunks()
+            str_size = format_size(f.meta.content_length)
+            if self.is_verify and f.meta.expected_checksum:
+                self.has_hash += 1
+
+            if f.meta.supports_ranges:
+                ranges = "✅"
+                self.has_ranges += 1
+            else:
+                ranges = "❌ (Fallback to 1 thread)"
+
+            if self.is_verify:
+                table.add_row(
+                    f.meta.original_filename,
+                    str_size,
+                    str(len(f.chunks)),
+                    "✅" if f.meta.expected_checksum else "❌",
+                    ranges,
+                )
+            else:
+                table.add_row(
+                    f.meta.original_filename, str_size, str(len(f.chunks)), ranges
+                )
+        # Печатаем таблицу в stderr (чтобы не сломать пайпы)
+        self.rich.console.print(table)
+        if not stream:
+            await self._check_storage_capacity(output_path=output_dir)
+
+    async def handle_exit(self) -> None:
+        self.is_running = False
+        self.live.refresh()
+        self.live.stop()
+        self.refresh.cancel()
+        elapsed = time.monotonic() - self.start_time
+        avg_speed = (
+            f"{format_size(self.download_bytes / elapsed)}/s" if elapsed > 0 else 0
+        )
+
+        size_str = (
+            f"{format_size(self.download_bytes)}"
+            + f"/{format_size(self.download_bytes)}"
+        )
+        mins, secs = divmod(int(elapsed), 60)
+        hours, mins = divmod(mins, 60)
+        time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+
+        status_word = "CANCELLED" if self.is_cancelled else "SUCCESS"
+        report = (
+            f"\n--- Final Report ({status_word}) ---\n"
+            f"Total files:   {self.files_completed}/{self.total_files}\n"
+            f"Total Data:    {size_str}\n"
+            f"Average Speed: {avg_speed}\n"
+            f"Total Time:    {time_str}\n"
+            f"--------------------------------"
+        )
+        report_dict = {
+            "total_files": self.files_completed,
+            "total_bytes": self.download_bytes,
+            "average_speed": avg_speed,
+            "time_elapsed_sec": elapsed,
+        }
+        await self.log(
+            report,
+            status=LogStatus.INFO,
+            progress=False,
+            throttle_key=None,
+            throttle_sec=10.0,
+            **report_dict,
+        )
+
+    async def _ui_start(self) -> None:
+        self.live.start()
+        self.refresh = asyncio.create_task(self.ui_refresh_actor(self.state_keeper_q))
+        self.start_time = time.monotonic()
