@@ -9,7 +9,6 @@ from typing import cast
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
-from hydrastream._curl_shim import get_error_response
 from hydrastream.domain.entities import Checksum, File, FileMeta, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
@@ -32,7 +31,7 @@ class BaseMetadataResolver(ABC):
 
     links_inbox: asyncio.PriorityQueue[Envelope[LinkData | StopMsg]]
     files_outbox: asyncio.PriorityQueue[Envelope[File | StopMsg]]
-    reg_events_outbox: asyncio.Queue[StateKeeperCmd]
+    state_outbox: asyncio.Queue[StateKeeperCmd]
 
     barrier: asyncio.Barrier
 
@@ -101,7 +100,7 @@ class BaseMetadataResolver(ABC):
         """Общая логика регистрации, внутри которой есть ХУК для наследников."""
         filename = file_obj.meta.original_filename
 
-        await self.reg_events_outbox.put(
+        await self.state_outbox.put(
             RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
         )
         self.ui.add_file(file_obj.meta.id, filename, file_obj.meta.content_length)
@@ -136,7 +135,7 @@ class BaseMetadataResolver(ABC):
         """Возвращает True, если нужно пропустить итерацию (continue)."""
 
         if isinstance(e, RequestsError):
-            response = get_error_response(e)
+            response = self.net.get_error_response
 
             if isinstance(response, Response):
                 status = response.status_code
@@ -255,8 +254,6 @@ class StreamMetadataResolver(BaseMetadataResolver):
 
 @hydra_dataclass
 class DiskMetadataResolver(BaseMetadataResolver):
-    state_outbox: asyncio.Queue[StateKeeperCmd]
-
     fs: StorageBackend
 
     async def _prepare_file_object(
@@ -295,9 +292,9 @@ class DiskMetadataResolver(BaseMetadataResolver):
             chunk_size=chunk_size,
         )
 
-    async def _register_file(self, file_obj: File) -> None:
+    async def _on_file_registered(self, file_obj: File) -> None:
         filename = file_obj.meta.original_filename
-        await self.reg_events_outbox.put(
+        await self.state_outbox.put(
             RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
         )
         chunks = file_obj.chunks or []

@@ -18,10 +18,10 @@ class TrafficController:
     reg_events_q: asyncio.Queue[TrafficSignal]
     worker_events: list[asyncio.Event]
     stop_analyzer: asyncio.Event
-    controller_checkpoint_event: asyncio.Event
+    analyzer_checkpoint_event: asyncio.Event
 
-    dynamic_limit: int = 1
-    prev_dynamic_limit: int = 1
+    dynamic_limit: int
+    prev_dynamic_limit: int
 
     def __post_init__(self) -> None:
         for i in range(self.dynamic_limit):
@@ -44,7 +44,7 @@ class TrafficController:
                     self.dynamic_limit = len(self.worker_events)
                     self._update_lights()
                     self.stop_analyzer.set()
-                    self.controller_checkpoint_event.set()
+                    self.analyzer_checkpoint_event.set()
 
                     break
 

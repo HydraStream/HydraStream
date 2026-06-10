@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import asyncio
+from dataclasses import field
 
 from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
@@ -19,18 +20,21 @@ class FileAutosaver:
     flush_event: asyncio.Event
     disk_q: asyncio.Queue[WriteChunk | FlushCmd | StopMsg]
     reg_events_q: asyncio.Queue[StateKeeperCmd]
-    get_shapshot: asyncio.Queue[dict[int, File]]
+    _get_shapshot: asyncio.Queue[dict[int, File]] = field(
+        default_factory=asyncio.Queue[dict[int, File]]
+    )
+    interval: float
     fs: StorageBackend
     ui: MonitorBackend
 
     is_debug: bool
 
-    async def run(self, interval: float) -> None:
+    async def run(self) -> None:
         loop = asyncio.get_running_loop()
 
         while not self.all_complete.is_set():
             try:
-                async with asyncio.timeout(interval):
+                async with asyncio.timeout(self.interval):
                     await self.all_complete.wait()
                 break
             except TimeoutError:
@@ -38,9 +42,9 @@ class FileAutosaver:
                     self.flush_event.clear()
                     await self.disk_q.put(FlushCmd())
                     await self.reg_events_q.put(
-                        GetSnapshotCmd(reply_to=self.get_shapshot)
+                        GetSnapshotCmd(reply_to=self._get_shapshot)
                     )
-                    files = await self.get_shapshot.get()
+                    files = await self._get_shapshot.get()
                     await self.flush_event.wait()
                     await loop.run_in_executor(None, self.save_all_states, files)
 

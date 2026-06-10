@@ -11,7 +11,6 @@ from typing import cast
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
 
-from hydrastream._curl_shim import get_error_response
 from hydrastream.actors.controller import (
     MaxLimitSignal,
     NetworkCongestionSignal,
@@ -35,6 +34,7 @@ from hydrastream.messages.base import Envelope, StopMsg
 from hydrastream.messages.io import StreamChunk, WriteChunk
 from hydrastream.messages.state import ProgressDeltaCmd, RemoveFileCmd, StateKeeperCmd
 from hydrastream.messages.traffic import (
+    FlushCmd,
     RegisterStreamCmd,
     RemoveStreamCmd,
     ThrottlerMsg,
@@ -59,6 +59,7 @@ class BaseDownloadWorker(ABC):
     is_debug: bool
 
     async def run(self) -> None:
+
         while True:
             await self.wakeup_event.wait()
             envelope, chunk = await self.get_chunk()
@@ -157,7 +158,7 @@ class BaseDownloadWorker(ABC):
         self, envelope: Envelope[Chunk], chunk: Chunk, e: RequestsError
     ) -> None:
         """Разбирает сетевые ошибки и решает: убить файл или переповторить чанк."""
-        response = get_error_response(e)
+        response = self.net.get_error_response(e)
         if not isinstance(response, Response):
             await self.requeue_chunk(envelope, chunk)
             return
@@ -298,8 +299,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
 
 @hydra_dataclass
 class DiskDownloadWorker(BaseDownloadWorker):
-    disk_outbox: asyncio.Queue[WriteChunk | StopMsg]
-    reg_events_outbox: asyncio.Queue[StateKeeperCmd]
+    disk_outbox: asyncio.Queue[WriteChunk | FlushCmd | StopMsg]
     file_limit_outbox: asyncio.Queue[FileCompleted]
 
     fs: StorageBackend
@@ -456,5 +456,5 @@ class DiskDownloadWorker(BaseDownloadWorker):
         self.fs.close_file(fd_or_conn=file_obj.fd)
         self.fs.delete_state(filename)
         await self.ui.done(file_obj.meta.id, filename)
-        await self.reg_events_outbox.put(RemoveFileCmd(file_id=chunk.file.meta.id))
+        await self.state_outbox.put(RemoveFileCmd(file_id=chunk.file.meta.id))
         await self.file_limit_outbox.put(FileCompleted())

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import AbstractAsyncContextManager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from typing_extensions import Buffer, runtime_checkable
@@ -68,8 +69,9 @@ class MonitorBackend(Protocol):
         """Сдвинуть прогресс-бар"""
         ...
 
-    def update_filename(self, file_id: int, new_filename: str) -> None:
-        pass
+    def update_filename(self, file_id: int, new_filename: str) -> None: ...
+
+    async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None: ...
 
     async def done(self, file_id: int, filename: str) -> None:
         """Отметить файл как завершенный"""
@@ -84,7 +86,11 @@ class MonitorBackend(Protocol):
 class NetworkStream(Protocol):
     """Абстракция над потоком (response от curl_cffi или httpx)"""
 
+    @property
     def response(self) -> Any: ...
+
+    @property
+    def headers(self) -> dict[str, str]: ...
 
     def aiter_bytes(self, chunk_size: int) -> AsyncGenerator[bytes, None]: ...
 
@@ -102,6 +108,9 @@ class NetworkBackend(Protocol):
     ) -> AbstractAsyncContextManager[NetworkStream]:
         """Открыть стрим для скачивания чанка"""
         ...
+
+    def get_error_response(self, e: Any) -> Any | None:
+        return e.response  # type: ignore
 
     async def close(self) -> None:
         """Закрыть все соединения"""

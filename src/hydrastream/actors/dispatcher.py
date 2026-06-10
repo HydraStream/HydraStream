@@ -96,7 +96,7 @@ class BaseFileDispatcher(ABC):
 
 @hydra_dataclass
 class StreamFileDispatcher(BaseFileDispatcher):
-    file_discovery: asyncio.Queue[File | None]
+    file_discovery: asyncio.Queue[File | StopMsg]
 
     async def _prepare_file(self, file_obj: File) -> None:
         # Для стрима просто закидываем файл в трубу (имя не меняется)

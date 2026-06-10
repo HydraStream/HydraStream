@@ -3,6 +3,7 @@
 
 import asyncio
 import time
+from dataclasses import field
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
@@ -24,15 +25,15 @@ from hydrastream.messages.traffic import (
 class ThrottleController:
     throttler_input: asyncio.Queue[ThrottlerMsg]
 
-    active_stream: set[NetworkStream]
+    active_stream: set[NetworkStream] = field(default_factory=set[NetworkStream])
 
     speed_limit: float | None
-    frequency_speed_limit: int = 10
-    time_speed_limit: float
-    bytes_to_check: int
-    prev_bytes: int = 0
-    last_checkpoint_time: float = 0.0
-    target_time: float = 0.0
+    _frequency_speed_limit: int = 10
+    _time_speed_limit: float = field(init=False)
+    _bytes_to_check: int = field(init=False)
+    _prev_bytes: int = 0
+    _last_checkpoint_time: float = 0.0
+    _target_time: float = 0.0
 
     is_debug: bool
     ui: MonitorBackend
@@ -43,16 +44,16 @@ class ThrottleController:
     is_disk_choked: bool = False
 
     def __post_init__(self) -> None:
-        self.time_speed_limit = 1 / self.frequency_speed_limit
+        self._time_speed_limit = 1 / self._frequency_speed_limit
         if self.speed_limit:
             self.speed_limit = self.speed_limit * 1024**2
-            self.bytes_to_check = int(self.speed_limit / self.frequency_speed_limit)
-            self.target_time = self.bytes_to_check / self.speed_limit
+            self._bytes_to_check = int(self.speed_limit / self._frequency_speed_limit)
+            self._target_time = self._bytes_to_check / self.speed_limit
         else:
-            self.bytes_to_check = 5 * 1024**2
+            self._bytes_to_check = 5 * 1024**2
 
     async def run(self) -> None:  # noqa
-        self.last_checkpoint_time = time.monotonic()
+        self._last_checkpoint_time = time.monotonic()
 
         while not self.all_complete.is_set():
             try:
@@ -105,12 +106,12 @@ class ThrottleController:
 
     async def enforce_throttling(self) -> None:
         now = time.monotonic()
-        elapsed = min(1, now - self.last_checkpoint_time)
+        elapsed = min(1, now - self._last_checkpoint_time)
 
         if elapsed <= 0 or not self.speed_limit:
             return
 
-        target_time = self.bytes_to_check / self.speed_limit
+        target_time = self._bytes_to_check / self.speed_limit
 
         if elapsed < target_time:
             sleep_duration = target_time - elapsed
@@ -125,7 +126,7 @@ class ThrottleController:
                 self._set_curl_speed_limit(limit=0)
 
         # Обновляем время после паузы!
-        self.last_checkpoint_time = time.monotonic()
+        self._last_checkpoint_time = time.monotonic()
 
     def _set_curl_speed_limit(self, limit: int) -> None:
         """Вспомогательная функция для прохода по активным потокам."""

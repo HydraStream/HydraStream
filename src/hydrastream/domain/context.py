@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import field
 
 from hydrastream.domain.config import HydraConfig
@@ -12,7 +13,6 @@ from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.interfaces import (
     MonitorBackend,
     NetworkBackend,
-    NetworkStream,
     StorageBackend,
 )
 from hydrastream.messages.base import Envelope, StopMsg
@@ -29,13 +29,13 @@ from hydrastream.messages.traffic import (
 
 @hydra_dataclass(kw_only=True, slots=True)
 class HydraContext:
+    is_stream: bool
     # =========================================================================
     # 1. ГЛОБАЛЬНЫЕ ЗАВИСИМОСТИ (Передаются снаружи при создании)
     # =========================================================================
     config: HydraConfig
     ui: MonitorBackend
-    net_back: NetworkBackend
-    net_stream: NetworkStream
+    net: NetworkBackend
     fs: StorageBackend
 
     # =========================================================================
@@ -88,6 +88,10 @@ class HydraContext:
         default_factory=asyncio.Queue[File | StopMsg]
     )
 
+    workers: int = field(init=False)
+    start_works: int = field(init=False)
+    resolvers: int = 20
+
     # =========================================================================
     # 4. СОБЫТИЯ И БАРЬЕРЫ (Синхронизация)
     # =========================================================================
@@ -96,12 +100,28 @@ class HydraContext:
 
     analyzer_checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
     throttler_checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
+    stop_analyzer: asyncio.Event = field(default_factory=asyncio.Event)
 
     # Будут созданы в __post_init__ в зависимости от конфига
     worker_events: list[asyncio.Event] = field(init=False)
     worker_barrier: asyncio.Barrier = field(init=False)
+    resolver_barrier: asyncio.Barrier = field(init=False)
 
     def __post_init__(self) -> None:
+        # self.resolvers = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
+        # self.resolvers = min(self.resolvers, 20)
+
+        if self.is_stream:
+            self.workers = self.config.threads
+        else:
+            self.workers = (
+                math.ceil(self.config.threads * 1.2)
+                if self.config.threads > 1
+                else self.config.threads
+            )
+
+        self.start_works = 5 if self.workers >= 5 else self.workers
         # Создаем массив светофоров и барьер под конкретное количество потоков!
-        self.worker_events = [asyncio.Event() for _ in range(self.config.threads)]
-        self.worker_barrier = asyncio.Barrier(self.config.threads)
+        self.worker_events = [asyncio.Event() for _ in range(self.workers)]
+        self.worker_barrier = asyncio.Barrier(self.workers)
+        self.resolver_barrier = asyncio.Barrier(self.resolvers)

@@ -27,9 +27,9 @@ class DiskAggregator:
     ui: MonitorBackend
     is_debug: bool
 
-    current_buffer: list[WriteChunk] = field(default_factory=list[WriteChunk])
-    current_size: int = 0
-    is_writing_now: bool = False
+    _current_buffer: list[WriteChunk] = field(default_factory=list[WriteChunk])
+    _current_size: int = 0
+    _is_writing_now: bool = False
 
     async def run(self) -> None:
 
@@ -38,10 +38,10 @@ class DiskAggregator:
 
             match msg:
                 case WriteChunk():
-                    self.current_buffer.append(msg)
-                    self.current_size += msg.length
+                    self._current_buffer.append(msg)
+                    self._current_size += msg.length
 
-                    if self.current_size >= self.MAX_BUFFER:
+                    if self._current_size >= self.MAX_BUFFER:
                         await self._persist_buffer()
 
                 case FlushCmd():
@@ -67,7 +67,7 @@ class DiskAggregator:
 
     async def _persist_buffer(self) -> None:
 
-        if self.is_writing_now:
+        if self._is_writing_now:
             await self.throttler_outbox.put(DiskBufferFullSignal())
 
             try:
@@ -79,16 +79,16 @@ class DiskAggregator:
                     "DiskWriter stopped responding! Hardware failure?"
                 ) from e
 
-            self.is_writing_now = False
+            self._is_writing_now = False
             await self.throttler_outbox.put(DiskBufferClearedSignal())
 
-        if self.current_buffer:
-            batch = await self._coalesce(self.current_buffer)
+        if self._current_buffer:
+            batch = await self._coalesce(self._current_buffer)
             await self.writer_outbox.put(batch)
 
-            self.is_writing_now = True
-            self.current_buffer.clear()
-            self.current_size = 0
+            self._is_writing_now = True
+            self._current_buffer.clear()
+            self._current_size = 0
 
     async def _coalesce(self, batch_bytes: list[WriteChunk]) -> list[WriteChunk]:
 

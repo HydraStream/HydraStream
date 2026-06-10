@@ -48,6 +48,7 @@ class BaseMonitor(MonitorBackend, ABC):
     is_running: bool = False
     is_cancelled: bool = False
     is_stream: bool = False
+    is_verify: bool = True
 
     """Всё, что касается записи логов на жесткий диск."""
 
@@ -72,7 +73,7 @@ class BaseMonitor(MonitorBackend, ABC):
 
     async def log(
         self,
-        message: str | Rule,
+        message: str | Rule | Table,
         *,
         status: LogStatus | str = LogStatus.INFO,
         progress: bool = False,
@@ -113,11 +114,11 @@ class BaseMonitor(MonitorBackend, ABC):
             **log_extra,  # Дополнительные флаги типа throttle_key
         )
 
-    async def date_print(self) -> None:
+    async def _date_print(self) -> None:
         current_date = datetime.now().strftime("%Y-%m-%d")
         await self.log(f"--- {current_date} ---")
 
-    async def log_worker(self) -> None:
+    async def _log_worker(self) -> None:
         """
         Фоновый воркер. Живет всё время работы программы.
         Берет строки из очереди и пишет в ОТКРЫТЫЙ файл.
@@ -164,7 +165,7 @@ class BaseMonitor(MonitorBackend, ABC):
             self.files_completed += 1
             await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
-    def safe_init(self) -> None:
+    def _safe_init(self) -> None:
         """Пытается создать папку для лога. Если не выходит - падает на дефолт."""
         try:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -185,12 +186,12 @@ class BaseMonitor(MonitorBackend, ABC):
         self.is_running = True
 
         try:
-            self.safe_init()
+            self._safe_init()
             self.log_fd = self.log_file.open("a", encoding="utf-8")
-            self.log_task = asyncio.create_task(self.log_worker())
+            self.log_task = asyncio.create_task(self._log_worker())
             self.start_time = time.monotonic()
             await self.log("--- Session Started ---")
-            await self.date_print()
+            await self._date_print()
         except OSError as e:
             if self.is_debug:
                 raise
@@ -204,7 +205,7 @@ class BaseMonitor(MonitorBackend, ABC):
 
         await self._ui_start()
 
-    async def handle_exit(self) -> None:
+    async def _handle_exit(self) -> None:
         self.is_running = False
 
         elapsed = time.monotonic() - self.start_time
@@ -244,7 +245,7 @@ class BaseMonitor(MonitorBackend, ABC):
         )
 
     async def stop(self) -> None:
-        await self.handle_exit()
+        await self._handle_exit()
         await self.log("--- Session Finished ---")
 
         if self.log_task:
@@ -256,6 +257,47 @@ class BaseMonitor(MonitorBackend, ABC):
             self.log_fd = None
 
         await self._ui_stop()
+
+    async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
+        """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
+
+        table = Table(
+            title="[bold yellow] DRY RUN REPORT (No data will be downloaded)[/]"
+        )
+        table.add_column("Filename", style="cyan", no_wrap=True)
+        table.add_column("Size", justify="right")
+        table.add_column("Chunks", justify="right")
+        if self.is_verify:
+            table.add_column("Hash Found", justify="center")
+        table.add_column("Ranges", justify="center")
+
+        for f in files.values():
+            f.create_chunks()
+            str_size = format_size(f.meta.content_length)
+            if self.is_verify and f.meta.expected_checksum:
+                self.has_hash += 1
+
+            if f.meta.supports_ranges:
+                ranges = "✅"
+                self.has_ranges += 1
+            else:
+                ranges = "❌ (Fallback to 1 thread)"
+
+            if self.is_verify:
+                table.add_row(
+                    f.meta.original_filename,
+                    str_size,
+                    str(len(f.chunks)),
+                    "✅" if f.meta.expected_checksum else "❌",
+                    ranges,
+                )
+            else:
+                table.add_row(
+                    f.meta.original_filename, str_size, str(len(f.chunks)), ranges
+                )
+        await self.log(table)
+        if not self.is_stream:
+            await self._check_storage_capacity(output_path=output_dir)
 
     async def _check_storage_capacity(self, output_path: str | Path) -> None:
         """Проверяет наличие свободного места на диске перед началом загрузки."""
@@ -289,13 +331,7 @@ class BaseMonitor(MonitorBackend, ABC):
 
     @abstractmethod
     async def _display_log(
-        self, message: str | Rule, status: LogStatus | str, **kwargs: object
-    ) -> None:
-        pass
-
-    @abstractmethod
-    async def _display_dry_run(
-        self, data: dict[str, Any], output_dir: str | Path
+        self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
     ) -> None:
         pass
 
@@ -313,7 +349,7 @@ class BaseMonitor(MonitorBackend, ABC):
 @hydra_dataclass
 class QuietMonitor(BaseMonitor):
     async def _display_log(
-        self, message: str | Rule, status: LogStatus | str, **kwargs: object
+        self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
     ) -> None:
         log_record = {
             "timestamp": datetime.now(UTC),
@@ -334,15 +370,13 @@ class QuietMonitor(BaseMonitor):
 class JsonMonitor(BaseMonitor):
     async def _display_log(
         self,
-        message: str | Rule,
+        message: str | Rule | Table,
         status: LogStatus | str,
         **kwargs: object,
     ) -> None:
         pass
 
-    async def _display_dry_run(
-        self, data: dict[str, File], output_dir: str | Path
-    ) -> None:
+    async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
         report_data = {
             "total_files": self.total_files,
             "total_bytes": self.total_bytes,
@@ -359,7 +393,7 @@ class JsonMonitor(BaseMonitor):
                     if f.meta.expected_checksum
                     else None,
                 }
-                for f in data.values()
+                for f in files.values()
             ],
         }
 
@@ -380,7 +414,7 @@ class PlainMonitor(BaseMonitor):
     console: Console = field(default_factory=lambda: Console(stderr=True))
 
     async def _display_log(
-        self, message: str | Rule, status: LogStatus | str, **kwargs: object
+        self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
     ) -> None:
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         final_msg = f"{timestamp} {message}"
@@ -424,7 +458,6 @@ class GradientPercent(ProgressColumn):
 @hydra_dataclass
 class RichMonitor(BaseMonitor):
     is_dry_run: bool = False
-    is_verify: bool = True
 
     console: Console = field(default_factory=lambda: Console(stderr=True))
 
@@ -470,7 +503,7 @@ class RichMonitor(BaseMonitor):
         )
 
         self.live = Live(
-            get_renderable=self.make_panel,
+            get_renderable=self._make_panel,
             console=self.rich.console,
             auto_refresh=True,
             refresh_per_second=10,
@@ -478,7 +511,7 @@ class RichMonitor(BaseMonitor):
         )
 
     async def _display_log(
-        self, message: str | Rule, status: LogStatus | str, **kwargs: object
+        self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
     ) -> None:
         pass
 
@@ -487,24 +520,24 @@ class RichMonitor(BaseMonitor):
     ) -> None:
         pass
 
-    def truncate_filename(self, name: str, w: int = 30) -> str:
+    def _truncate_filename(self, name: str, w: int = 30) -> str:
         return (
             f"{name[: w // 2 - 1]}...{name[-w // 2 + 2 :]}" if len(name) > w else name
         )
 
-    async def date_print(self) -> None:
+    async def _date_print(self) -> None:
         current_date = datetime.now().strftime("%Y-%m-%d")
         date_header = f"[bold cyan] Date: {current_date}[/]"
 
         self.rich.console.print(Rule(date_header))
         await self.log(f"--- {current_date} ---")
 
-    def formatting_log(
+    def _formatting_log(
         self,
-        message: str | Rule,
+        message: str | Rule | Table,
         formatted_msg: str,
         status: str | LogStatus = LogStatus.INFO,
-    ) -> Panel | str | Rule:
+    ) -> Panel | str | Rule | Table:
         match status.upper():
             case "CRITICAL" | "INTERRUPT":
                 renderable = Panel(
@@ -533,7 +566,7 @@ class RichMonitor(BaseMonitor):
 
     async def log(
         self,
-        message: str | Rule,
+        message: str | Rule | Table,
         *,
         status: str | LogStatus = LogStatus.INFO,
         progress: bool = False,
@@ -554,38 +587,9 @@ class RichMonitor(BaseMonitor):
         if self.log_file:
             clean_msg = Text.from_markup(str(final_msg)).plain
             self.log_queue.put_nowait(clean_msg)
-
-        renderable = self.formatting_log(message, final_msg, status)
+        renderable = self._formatting_log(message, final_msg, status)
         if progress or status in ["WARNING", "ERROR", "CRITICAL", "INTERRUPT"]:
             self.rich.console.print(renderable)
-
-    async def log_worker(self) -> None:
-        """
-        Фоновый воркер. Живет всё время работы программы.
-        Берет строки из очереди и пишет в ОТКРЫТЫЙ файл.
-        """
-        if not self.log_fd:
-            return
-
-        while True:
-            msg = await self.log_queue.get()
-
-            # Ядовитая пилюля для остановки логгера
-            if msg is None:
-                break
-
-            try:
-                self.log_fd.write(f"{msg}\n")
-                self.log_fd.flush()  # Гарантируем, что строка сразу упала на диск
-            except OSError as e:
-                if self.is_debug:
-                    raise
-                err = LogFileError(path=str(self.log_file), original_err=str(e))
-                await self.log(f"{err.formatted_msg}", status=LogStatus.WARNING)
-
-                self.log_fd.close()
-                self.log_fd = None
-                break
 
     def add_file(
         self, file_id: int, filename: str, total_size: int | None = None
@@ -594,7 +598,7 @@ class RichMonitor(BaseMonitor):
             self.total_bytes += total_size
             self.total_files += 1
 
-        t_filename = self.truncate_filename(filename)
+        t_filename = self._truncate_filename(filename)
         if total_size is None:
             task_id = self.rich.add_task(
                 "Download Hash for", filename=t_filename, total=total_size
@@ -607,19 +611,15 @@ class RichMonitor(BaseMonitor):
                 visible=False,
             )
         self.tasks[file_id] = task_id
-        self.update_panel_title()
+        self._update_panel_title()
 
     def update_filename(self, file_id: int, new_filename: str) -> None:
-        if self.rich:
-            self.rich.update(self.tasks[file_id], description=new_filename)
+        self.rich.update(self.tasks[file_id], description=new_filename)
 
-    async def ui_refresh_actor(
+    async def _ui_refresh_actor(
         self, state_keeper_q: asyncio.Queue[StateKeeperCmd]
     ) -> None:
         reply_q: asyncio.Queue[dict[int, int]] = asyncio.Queue(maxsize=1)
-
-        if not self.rich:
-            return
 
         while self.is_running:
             try:
@@ -643,16 +643,16 @@ class RichMonitor(BaseMonitor):
 
                     if file_id not in self.active_files:
                         self.active_files.add(file_id)
-                        self.update_panel_title()
+                        self._update_panel_title()
 
             except Exception as e:
                 if self.is_debug:
                     raise
                 await self.log(f"UI Refresh Error: {e!r}", status=LogStatus.ERROR)
 
-    def update_panel_title(self) -> None:
-
+    def _update_panel_title(self) -> None:
         active = len(self.active_files)
+
         self.dynamic_title = (
             f"[bold white][green]{self.files_completed}[/]/"
             + f"[blue]{self.total_files}[/] Files | [yellow]{active} Active[/]"
@@ -670,16 +670,14 @@ class RichMonitor(BaseMonitor):
 
         if self.rich.tasks[task_id].total is not None:
             self.files_completed += 1
-            self.update_panel_title()
+            self._update_panel_title()
             await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
         elif self.buffer.get(file_id, 0):
             self.files_completed += 1
             await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
-    def make_panel(self) -> Panel | str:
-        if not self.rich:
-            return ""
+    def _make_panel(self) -> Panel | str:
 
         if not self.rich.tasks and self.is_running:
             return ""
@@ -770,51 +768,7 @@ class RichMonitor(BaseMonitor):
             padding=(1, 2),
         )
 
-    async def print_dry_run_report(
-        self, files: dict[int, File], stream: bool, output_dir: str | Path
-    ) -> None:
-        """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
-
-        table = Table(
-            title="[bold yellow] DRY RUN REPORT (No data will be downloaded)[/]"
-        )
-        table.add_column("Filename", style="cyan", no_wrap=True)
-        table.add_column("Size", justify="right")
-        table.add_column("Chunks", justify="right")
-        if self.is_verify:
-            table.add_column("Hash Found", justify="center")
-        table.add_column("Ranges", justify="center")
-
-        for f in files.values():
-            f.create_chunks()
-            str_size = format_size(f.meta.content_length)
-            if self.is_verify and f.meta.expected_checksum:
-                self.has_hash += 1
-
-            if f.meta.supports_ranges:
-                ranges = "✅"
-                self.has_ranges += 1
-            else:
-                ranges = "❌ (Fallback to 1 thread)"
-
-            if self.is_verify:
-                table.add_row(
-                    f.meta.original_filename,
-                    str_size,
-                    str(len(f.chunks)),
-                    "✅" if f.meta.expected_checksum else "❌",
-                    ranges,
-                )
-            else:
-                table.add_row(
-                    f.meta.original_filename, str_size, str(len(f.chunks)), ranges
-                )
-        # Печатаем таблицу в stderr (чтобы не сломать пайпы)
-        self.rich.console.print(table)
-        if not stream:
-            await self._check_storage_capacity(output_path=output_dir)
-
-    async def handle_exit(self) -> None:
+    async def _handle_exit(self) -> None:
         self.is_running = False
         self.live.refresh()
         self.live.stop()
@@ -858,5 +812,5 @@ class RichMonitor(BaseMonitor):
 
     async def _ui_start(self) -> None:
         self.live.start()
-        self.refresh = asyncio.create_task(self.ui_refresh_actor(self.state_keeper_q))
+        self.refresh = asyncio.create_task(self._ui_refresh_actor(self.state_keeper_q))
         self.start_time = time.monotonic()

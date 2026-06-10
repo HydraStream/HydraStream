@@ -13,8 +13,13 @@ class CurlStreamAdapter(NetworkStream):
     def __init__(self, response: Response) -> None:
         self._response = response
 
+    @property
     def response(self) -> Response:
         return self._response
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return self._response.headers  # type: ignore
 
     async def aiter_bytes(self, chunk_size: int) -> AsyncGenerator[bytes, None]:
         iterator = self._response.aiter_content(chunk_size=chunk_size)  # type: ignore
@@ -25,9 +30,6 @@ class CurlStreamAdapter(NetworkStream):
     def set_speed_limit(self, limit: int) -> None:
         if self._response.curl is not None:
             self._response.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, limit)
-
-    def _get_error_response(self, e: RequestsError) -> Response | None:
-        return e.response  # type: ignore
 
 
 class CurlNetworkAdapter(NetworkBackend):
@@ -43,6 +45,9 @@ class CurlNetworkAdapter(NetworkBackend):
     ) -> AsyncIterator[NetworkStream]:
         async with self.client.stream("GET", url, headers=headers) as r:
             yield CurlStreamAdapter(r)
+
+    def get_error_response(self, e: RequestsError) -> Response | None:
+        return e.response  # type: ignore
 
     async def close(self) -> None:
         await self.client.close()

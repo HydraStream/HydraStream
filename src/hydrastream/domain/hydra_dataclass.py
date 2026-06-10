@@ -28,7 +28,6 @@ def hydra_dataclass(
 
 
 def hydra_dataclass(cls: Any = None, /, **kwargs: Any) -> Any:
-    # Ваши дефолты
     params = {"kw_only": True, "slots": True}
     params.update(kwargs)
 
