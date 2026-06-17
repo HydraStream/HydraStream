@@ -11,7 +11,7 @@ from collections import defaultdict
 from dataclasses import asdict, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import orjson
 from rich.console import Console, Group
@@ -43,6 +43,17 @@ from hydrastream.interfaces import MonitorBackend
 from hydrastream.utils import format_size
 
 
+class BaseMonitorKwargs(TypedDict):
+    is_running: bool
+    is_cancelled: bool
+    is_stream: bool
+    is_verify: bool
+
+    log_file: Path
+
+    is_debug: bool
+
+
 @hydra_dataclass
 class BaseMonitor(MonitorBackend, ABC):
     is_running: bool = False
@@ -53,23 +64,23 @@ class BaseMonitor(MonitorBackend, ABC):
     """Всё, что касается записи логов на жесткий диск."""
 
     log_file: Path
-    log_throttle: dict[str, float] = field(default_factory=dict[str, float])
-    log_fd: typing.TextIO | None = field(default=None, init=False, repr=False)
-    log_queue: asyncio.Queue[str | None] = field(
+    _log_throttle: dict[str, float] = field(default_factory=dict[str, float])
+    _log_fd: typing.TextIO | None = field(default=None, init=False, repr=False)
+    _log_queue: asyncio.Queue[str | None] = field(
         default_factory=asyncio.Queue[str | None], init=False
     )
-    log_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _log_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     """Чисто статистика и счетчики загрузки."""
 
-    start_time: float = 0.0
-    total_bytes: int = 0
-    download_bytes: int = 0
-    total_files: int = 0
-    files_completed: int = 0
-    buffer: defaultdict[int, int] = field(default_factory=lambda: defaultdict(int))
+    _start_time: float = 0.0
+    _total_bytes: int = 0
+    _download_bytes: int = 0
+    _total_files: int = 0
+    _files_completed: int = 0
+    _buffer: defaultdict[int, int] = field(default_factory=lambda: defaultdict(int))
 
-    is_debug = False
+    is_debug: bool = False
 
     async def log(
         self,
@@ -81,19 +92,21 @@ class BaseMonitor(MonitorBackend, ABC):
         throttle_sec: float = 10.0,
         **kwargs: object,
     ) -> None:
+        if status == LogStatus.INTERRUPT:
+            self.is_cancelled = True
         if throttle_key:
             now = time.monotonic()
-            last_time = self.log_throttle.get(throttle_key, 0.0)
+            last_time = self._log_throttle.get(throttle_key, 0.0)
             if now - last_time < throttle_sec:
                 return
-            self.log_throttle[throttle_key] = now
+            self._log_throttle[throttle_key] = now
 
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         final_msg = f"{timestamp} {message}"
 
         if self.log_file:
             clean_msg = Text.from_markup(str(final_msg)).plain
-            self.log_queue.put_nowait(clean_msg)
+            self._log_queue.put_nowait(clean_msg)
 
         await self._display_log(message, status, **kwargs)
 
@@ -123,35 +136,35 @@ class BaseMonitor(MonitorBackend, ABC):
         Фоновый воркер. Живет всё время работы программы.
         Берет строки из очереди и пишет в ОТКРЫТЫЙ файл.
         """
-        if not self.log_fd:
+        if not self._log_fd:
             return
 
         while True:
-            msg = await self.log_queue.get()
+            msg = await self._log_queue.get()
 
             # Ядовитая пилюля для остановки логгера
             if msg is None:
                 break
 
             try:
-                self.log_fd.write(f"{msg}\n")
-                self.log_fd.flush()  # Гарантируем, что строка сразу упала на диск
+                self._log_fd.write(f"{msg}\n")
+                self._log_fd.flush()  # Гарантируем, что строка сразу упала на диск
             except OSError as e:
                 if self.is_debug:
                     raise
                 err = LogFileError(path=str(self.log_file), original_err=str(e))
                 await self.log(f"{err.formatted_msg}", status=LogStatus.WARNING)
 
-                self.log_fd.close()
-                self.log_fd = None
+                self._log_fd.close()
+                self._log_fd = None
                 break
 
     def add_file(
         self, file_id: int, filename: str, total_size: int | None = None
     ) -> None:
         if total_size is not None:
-            self.total_bytes += total_size
-            self.total_files += 1
+            self._total_bytes += total_size
+            self._total_files += 1
 
     def update_progress(self, file_id: int, advance_bytes: int) -> None:
         pass
@@ -161,8 +174,8 @@ class BaseMonitor(MonitorBackend, ABC):
 
     async def done(self, file_id: int, filename: str) -> None:
 
-        if self.buffer.get(file_id, 0):
-            self.files_completed += 1
+        if self._buffer.get(file_id, 0):
+            self._files_completed += 1
             await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
     def _safe_init(self) -> None:
@@ -187,15 +200,15 @@ class BaseMonitor(MonitorBackend, ABC):
 
         try:
             self._safe_init()
-            self.log_fd = self.log_file.open("a", encoding="utf-8")
-            self.log_task = asyncio.create_task(self._log_worker())
-            self.start_time = time.monotonic()
+            self._log_fd = self.log_file.open("a", encoding="utf-8")
+            self._log_task = asyncio.create_task(self._log_worker())
+            self._start_time = time.monotonic()
             await self.log("--- Session Started ---")
             await self._date_print()
         except OSError as e:
             if self.is_debug:
                 raise
-            self.log_fd = None
+            self._log_fd = None
 
             err = LogFileError(path=str(self.log_file), original_err=str(e))
             await self.log(
@@ -208,13 +221,14 @@ class BaseMonitor(MonitorBackend, ABC):
     async def _handle_exit(self) -> None:
         self.is_running = False
 
-        elapsed = time.monotonic() - self.start_time
+        elapsed = time.monotonic() - self._start_time
         avg_speed = (
-            f"{format_size(self.download_bytes / elapsed)}/s" if elapsed > 0 else 0
+            f"{format_size(self._download_bytes / elapsed)}/s" if elapsed > 0 else 0
         )
 
         size_str = (
-            f"{format_size(self.download_bytes)}" + f"/{format_size(self.total_bytes)}"
+            f"{format_size(self._download_bytes)}"
+            + f"/{format_size(self._total_bytes)}"
         )
         mins, secs = divmod(int(elapsed), 60)
         hours, mins = divmod(mins, 60)
@@ -223,15 +237,15 @@ class BaseMonitor(MonitorBackend, ABC):
         status_word = "CANCELLED" if self.is_cancelled else "SUCCESS"
         report = (
             f"\n--- Final Report ({status_word}) ---\n"
-            f"Total files:   {self.files_completed}/{self.total_files}\n"
+            f"Total files:   {self._files_completed}/{self._total_files}\n"
             f"Total Data:    {size_str}\n"
             f"Average Speed: {avg_speed}\n"
             f"Total Time:    {time_str}\n"
             f"--------------------------------"
         )
         report_dict = {
-            "total_files": self.files_completed,
-            "total_bytes": self.download_bytes,
+            "total_files": self._files_completed,
+            "total_bytes": self._download_bytes,
             "average_speed": avg_speed,
             "time_elapsed_sec": elapsed,
         }
@@ -248,15 +262,13 @@ class BaseMonitor(MonitorBackend, ABC):
         await self._handle_exit()
         await self.log("--- Session Finished ---")
 
-        if self.log_task:
-            self.log_queue.put_nowait(None)
-            await self.log_task
+        if self._log_task:
+            self._log_queue.put_nowait(None)
+            await self._log_task
 
-        if self.log_fd:
-            self.log_fd.close()
-            self.log_fd = None
-
-        await self._ui_stop()
+        if self._log_fd:
+            self._log_fd.close()
+            self._log_fd = None
 
     async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
         """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
@@ -307,7 +319,7 @@ class BaseMonitor(MonitorBackend, ABC):
 
         try:
             free_space = shutil.disk_usage(check_dir).free
-            required = self.total_bytes
+            required = self._total_bytes
 
             if free_space < required:
                 await self.log("\n[bold red] DANGER: Insufficient disk space![/]")
@@ -339,12 +351,6 @@ class BaseMonitor(MonitorBackend, ABC):
     async def _ui_start(self) -> None:
         pass
 
-    @abstractmethod
-    async def _ui_stop(
-        self,
-    ) -> None:
-        pass
-
 
 @hydra_dataclass
 class QuietMonitor(BaseMonitor):
@@ -365,6 +371,9 @@ class QuietMonitor(BaseMonitor):
     ) -> None:
         pass
 
+    async def _ui_start(self) -> None:
+        pass
+
 
 @hydra_dataclass
 class JsonMonitor(BaseMonitor):
@@ -378,8 +387,8 @@ class JsonMonitor(BaseMonitor):
 
     async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
         report_data = {
-            "total_files": self.total_files,
-            "total_bytes": self.total_bytes,
+            "total_files": self._total_files,
+            "total_bytes": self._total_bytes,
             "files": [
                 {
                     "filename": f.actual_filename,
@@ -408,6 +417,9 @@ class JsonMonitor(BaseMonitor):
         if self.is_stream:
             await self._check_storage_capacity(output_dir)
 
+    async def _ui_start(self) -> None:
+        pass
+
 
 @hydra_dataclass
 class PlainMonitor(BaseMonitor):
@@ -423,6 +435,9 @@ class PlainMonitor(BaseMonitor):
     async def _display_dry_run(
         self, data: dict[str, Any], output_dir: str | Path
     ) -> None:
+        pass
+
+    async def _ui_start(self) -> None:
         pass
 
 
@@ -574,19 +589,21 @@ class RichMonitor(BaseMonitor):
         throttle_sec: float = 10.0,
         **kwargs: object,
     ) -> None:
+        if status == LogStatus.INTERRUPT:
+            self.is_cancelled = True
         if throttle_key:
             now = time.monotonic()
-            last_time = self.log_throttle.get(throttle_key, 0.0)
+            last_time = self._log_throttle.get(throttle_key, 0.0)
             if now - last_time < throttle_sec:
                 return
-            self.log_throttle[throttle_key] = now
+            self._log_throttle[throttle_key] = now
 
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         final_msg = f"{timestamp} {message}"
 
         if self.log_file:
             clean_msg = Text.from_markup(str(final_msg)).plain
-            self.log_queue.put_nowait(clean_msg)
+            self._log_queue.put_nowait(clean_msg)
         renderable = self._formatting_log(message, final_msg, status)
         if progress or status in ["WARNING", "ERROR", "CRITICAL", "INTERRUPT"]:
             self.rich.console.print(renderable)
@@ -595,8 +612,8 @@ class RichMonitor(BaseMonitor):
         self, file_id: int, filename: str, total_size: int | None = None
     ) -> None:
         if total_size is not None:
-            self.total_bytes += total_size
-            self.total_files += 1
+            self._total_bytes += total_size
+            self._total_files += 1
 
         t_filename = self._truncate_filename(filename)
         if total_size is None:
@@ -632,8 +649,8 @@ class RichMonitor(BaseMonitor):
 
                 # 3. Отрисовываем!
                 for file_id, bytes_to_advance in deltas.items():
-                    self.buffer[file_id] += bytes_to_advance
-                    self.download_bytes += bytes_to_advance
+                    self._buffer[file_id] += bytes_to_advance
+                    self._download_bytes += bytes_to_advance
 
                     self.rich.update(
                         self.tasks[file_id],
@@ -654,8 +671,8 @@ class RichMonitor(BaseMonitor):
         active = len(self.active_files)
 
         self.dynamic_title = (
-            f"[bold white][green]{self.files_completed}[/]/"
-            + f"[blue]{self.total_files}[/] Files | [yellow]{active} Active[/]"
+            f"[bold white][green]{self._files_completed}[/]/"
+            + f"[blue]{self._total_files}[/] Files | [yellow]{active} Active[/]"
         )
 
     async def done(self, file_id: int, filename: str) -> None:
@@ -669,12 +686,12 @@ class RichMonitor(BaseMonitor):
         self.active_files.discard(file_id)
 
         if self.rich.tasks[task_id].total is not None:
-            self.files_completed += 1
+            self._files_completed += 1
             self._update_panel_title()
             await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
-        elif self.buffer.get(file_id, 0):
-            self.files_completed += 1
+        elif self._buffer.get(file_id, 0):
+            self._files_completed += 1
             await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
     def _make_panel(self) -> Panel | str:
@@ -682,8 +699,8 @@ class RichMonitor(BaseMonitor):
         if not self.rich.tasks and self.is_running:
             return ""
 
-        elapsed = time.monotonic() - self.start_time
-        avg_speed = self.download_bytes / elapsed if elapsed > 0 else 0
+        elapsed = time.monotonic() - self._start_time
+        avg_speed = self._download_bytes / elapsed if elapsed > 0 else 0
         speed_str = f"{format_size(avg_speed)}/s"
 
         mins, secs = divmod(int(elapsed), 60)
@@ -693,8 +710,8 @@ class RichMonitor(BaseMonitor):
         time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
 
         remain_time = (
-            (self.total_bytes - self.download_bytes) / avg_speed
-            if self.total_bytes and avg_speed
+            (self._total_bytes - self._download_bytes) / avg_speed
+            if self._total_bytes and avg_speed
             else 0
         )
 
@@ -705,13 +722,14 @@ class RichMonitor(BaseMonitor):
         remain_time_str = f"{r_hours:02d}:{r_mins:02d}:{r_secs:02d}"
 
         size_str = (
-            f"{format_size(self.download_bytes)}" + f"/{format_size(self.total_bytes)}"
+            f"{format_size(self._download_bytes)}"
+            + f"/{format_size(self._total_bytes)}"
         )
 
         if (
             not self.rich.tasks
-            and self.total_files > 0
-            and self.total_files == self.files_completed
+            and self._total_files > 0
+            and self._total_files == self._files_completed
         ) or self.is_cancelled:
             grid = Table.grid(expand=True)
             grid.add_column()
@@ -719,7 +737,7 @@ class RichMonitor(BaseMonitor):
             content = Group("[green]All downloads completed successfully!\n", grid)
             grid.add_row(
                 "[white]Total files:",
-                f"[green3]{self.files_completed}/{self.total_files}[/]",
+                f"[green3]{self._files_completed}/{self._total_files}[/]",
             )
             grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
             grid.add_row("[white]Average Speed:", f"[bold yellow]{speed_str}[/]")
@@ -732,21 +750,21 @@ class RichMonitor(BaseMonitor):
             )
 
         if self.is_dry_run:
-            size_str = f"{format_size(self.total_bytes)}"
+            size_str = f"{format_size(self._total_bytes)}"
             grid = Table.grid(expand=True)
             grid.add_column()
             grid.add_column(justify="center")
 
-            grid.add_row("[white]Total files:", f"[green3]{self.total_files}[/]")
+            grid.add_row("[white]Total files:", f"[green3]{self._total_files}[/]")
             grid.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
             if self.is_verify:
                 grid.add_row(
                     "[white]Hash Found:",
-                    f"[bold yellow]{self.has_hash}/{self.total_files}[/]",
+                    f"[bold yellow]{self.has_hash}/{self._total_files}[/]",
                 )
             grid.add_row(
                 "[white]Ranges:",
-                f"[bold magenta]{self.has_ranges}/{self.total_files}[/]",
+                f"[bold magenta]{self.has_ranges}/{self._total_files}[/]",
             )
             return Panel(
                 grid,
@@ -773,14 +791,14 @@ class RichMonitor(BaseMonitor):
         self.live.refresh()
         self.live.stop()
         self.refresh.cancel()
-        elapsed = time.monotonic() - self.start_time
+        elapsed = time.monotonic() - self._start_time
         avg_speed = (
-            f"{format_size(self.download_bytes / elapsed)}/s" if elapsed > 0 else 0
+            f"{format_size(self._download_bytes / elapsed)}/s" if elapsed > 0 else 0
         )
 
         size_str = (
-            f"{format_size(self.download_bytes)}"
-            + f"/{format_size(self.download_bytes)}"
+            f"{format_size(self._download_bytes)}"
+            + f"/{format_size(self._download_bytes)}"
         )
         mins, secs = divmod(int(elapsed), 60)
         hours, mins = divmod(mins, 60)
@@ -789,15 +807,15 @@ class RichMonitor(BaseMonitor):
         status_word = "CANCELLED" if self.is_cancelled else "SUCCESS"
         report = (
             f"\n--- Final Report ({status_word}) ---\n"
-            f"Total files:   {self.files_completed}/{self.total_files}\n"
+            f"Total files:   {self._files_completed}/{self._total_files}\n"
             f"Total Data:    {size_str}\n"
             f"Average Speed: {avg_speed}\n"
             f"Total Time:    {time_str}\n"
             f"--------------------------------"
         )
         report_dict = {
-            "total_files": self.files_completed,
-            "total_bytes": self.download_bytes,
+            "total_files": self._files_completed,
+            "total_bytes": self._download_bytes,
             "average_speed": avg_speed,
             "time_elapsed_sec": elapsed,
         }
@@ -813,4 +831,4 @@ class RichMonitor(BaseMonitor):
     async def _ui_start(self) -> None:
         self.live.start()
         self.refresh = asyncio.create_task(self._ui_refresh_actor(self.state_keeper_q))
-        self.start_time = time.monotonic()
+        self._start_time = time.monotonic()

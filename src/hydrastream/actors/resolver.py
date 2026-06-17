@@ -4,7 +4,7 @@
 import asyncio
 import random
 from abc import ABC, abstractmethod
-from typing import cast
+from typing import TypedDict, cast
 
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
@@ -22,6 +22,28 @@ from hydrastream.messages.io import LinkData
 from hydrastream.messages.state import ProgressDeltaCmd, RegisterFileCmd, StateKeeperCmd
 from hydrastream.providers import ProviderRouter
 from hydrastream.utils import extract_filename, redact_url
+
+
+class BaseResolverKwargs(TypedDict):
+    threads: int
+    MIN_CHUNK: int
+
+    links_inbox: asyncio.PriorityQueue[Envelope[LinkData | StopMsg]]
+
+    files_outbox: asyncio.PriorityQueue[Envelope[File | StopMsg]]
+    state_outbox: asyncio.Queue[StateKeeperCmd]
+
+    barrier: asyncio.Barrier
+
+    all_complete: asyncio.Event
+
+    is_dry_run: bool
+    is_verify: bool
+    is_debug: bool
+
+    ui: MonitorBackend
+    net: NetworkBackend
+    provider: ProviderRouter
 
 
 @hydra_dataclass
@@ -43,6 +65,7 @@ class BaseMetadataResolver(ABC):
 
     ui: MonitorBackend
     net: NetworkBackend
+    provider: ProviderRouter
 
     async def run(self) -> None:
         """Это ШАБЛОННЫЙ МЕТОД. Наследники не переопределяют его!"""
@@ -204,8 +227,7 @@ class BaseMetadataResolver(ABC):
 
         self.ui.add_file(id, filename)
 
-        provider = ProviderRouter()
-        checksum = await provider.resolve_hash(self.net, url, filename)
+        checksum = await self.provider.resolve_hash(self.net, url, filename)
         await self.ui.done(id, filename)
 
         if checksum is None:

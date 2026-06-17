@@ -6,7 +6,7 @@ import os
 import random
 import traceback
 from abc import ABC, abstractmethod
-from typing import cast
+from typing import TypedDict, cast
 
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
@@ -41,14 +41,13 @@ from hydrastream.messages.traffic import (
 )
 
 
-@hydra_dataclass
-class BaseDownloadWorker(ABC):
+class BaseWorkerKwargs(TypedDict):
     chunks_inbox: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
-    throttler_outbox: asyncio.Queue[ThrottlerMsg] | None = None
+
+    throttler_outbox: asyncio.Queue[ThrottlerMsg]
     controller_outbox: asyncio.Queue[TrafficSignal]
     state_outbox: asyncio.Queue[StateKeeperCmd]
 
-    wakeup_event: asyncio.Event
     all_complete: asyncio.Event
 
     barrier: asyncio.Barrier
@@ -57,6 +56,25 @@ class BaseDownloadWorker(ABC):
     net: NetworkBackend
 
     is_debug: bool
+
+
+@hydra_dataclass
+class BaseDownloadWorker(ABC):
+    chunks_inbox: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
+    throttler_outbox: asyncio.Queue[ThrottlerMsg] | None = None
+    controller_outbox: asyncio.Queue[TrafficSignal]
+    state_outbox: asyncio.Queue[StateKeeperCmd]
+
+    all_complete: asyncio.Event
+
+    barrier: asyncio.Barrier
+
+    ui: MonitorBackend
+    net: NetworkBackend
+
+    is_debug: bool
+
+    wakeup_event: asyncio.Event
 
     async def run(self) -> None:
 

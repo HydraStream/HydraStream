@@ -5,7 +5,7 @@ from dataclasses import field
 from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.interfaces import MonitorBackend
+from hydrastream.interfaces import MonitorBackend, StorageBackend
 from hydrastream.messages.base import StopMsg
 from hydrastream.messages.state import (
     GetSnapshotCmd,
@@ -32,49 +32,60 @@ class StateKeeperActor:
     analyzer_checkpoint_event: asyncio.Event
     throttler_checkpoint_event: asyncio.Event
 
+    fs: StorageBackend
     ui: MonitorBackend
 
+    is_stream: bool
     is_debug: bool
 
     async def run(self) -> None:
-        while True:
-            cmd = await self.stater_inbox.get()
-            match cmd:
-                case RegisterFileCmd(file_id=fid, file_obj=fobj):
-                    self._files[fid] = fobj
+        try:
+            while True:
+                cmd = await self.stater_inbox.get()
+                match cmd:
+                    case RegisterFileCmd(file_id=fid, file_obj=fobj):
+                        self._files[fid] = fobj
 
-                case RemoveFileCmd(file_id=fid):
-                    self._files.pop(fid, None)
+                    case RemoveFileCmd(file_id=fid):
+                        self._files.pop(fid, None)
 
-                case GetSnapshotCmd(reply_to=queue):
-                    await queue.put(self._files.copy())
+                    case GetSnapshotCmd(reply_to=queue):
+                        await queue.put(self._files.copy())
 
-                case ProgressDeltaCmd(file_id=fid, delta_bytes=delta):
-                    self._ui_deltas[fid] += delta
-                    self._global_bytes += delta
+                    case ProgressDeltaCmd(file_id=fid, delta_bytes=delta):
+                        self._ui_deltas[fid] += delta
+                        self._global_bytes += delta
 
-                    if (
-                        self._global_bytes - self._prev_global_bytes
-                        >= self.bytes_to_check
-                    ):
-                        self._prev_global_bytes += self.bytes_to_check
+                        if (
+                            self._global_bytes - self._prev_global_bytes
+                            >= self.bytes_to_check
+                        ):
+                            self._prev_global_bytes += self.bytes_to_check
 
-                        self.analyzer_checkpoint_event.set()
-                        self.throttler_checkpoint_event.set()
+                            self.analyzer_checkpoint_event.set()
+                            self.throttler_checkpoint_event.set()
 
-                case GetUIDeltasCmd(reply_to=queue):
-                    await queue.put(dict(self._ui_deltas))
-                    self._ui_deltas.clear()
+                    case GetUIDeltasCmd(reply_to=queue):
+                        await queue.put(dict(self._ui_deltas))
+                        self._ui_deltas.clear()
 
-                case StopMsg():
-                    break
+                    case StopMsg():
+                        break
 
-                case _:
-                    if self.is_debug:
-                        raise RuntimeError(
-                            f"Unknown message type in stater_inbox: {type(cmd)}"
+                    case _:
+                        if self.is_debug:
+                            raise RuntimeError(
+                                f"Unknown message type in stater_inbox: {type(cmd)}"
+                            )
+                        await self.ui.log(
+                            f"Received unknown message: {cmd}",
+                            status=LogStatus.ERROR,
                         )
-                    await self.ui.log(
-                        f"Received unknown message: {cmd}",
-                        status=LogStatus.ERROR,
-                    )
+        finally:
+            if not self.is_stream:
+                for file_obj in self._files.values():
+                    if file_obj.chunks and not file_obj.is_complete:
+                        self.fs.save_state(file_obj)
+
+                    if file_obj.fd is not None:
+                        self.fs.close_file(file_obj.fd)

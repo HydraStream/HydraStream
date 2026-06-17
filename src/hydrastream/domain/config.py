@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import (
     Any,
@@ -20,7 +21,13 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from hydrastream.interfaces import HashProvider
+from hydrastream.interfaces import (
+    Hasher,
+    HashProvider,
+    MonitorBackend,
+    NetworkBackend,
+    StorageBackend,
+)
 
 
 class HydraConfig(BaseSettings):
@@ -37,7 +44,7 @@ class HydraConfig(BaseSettings):
     threads: int = Field(default=128, ge=1, le=128)
     no_ui: bool = False
     quiet: bool = False
-    output_dir: str = "download"
+    output_dir: Path = Field(default=Path("download"))
     speed_limit: float | None = Field(default=None, gt=0.0)
     dry_run: bool = False
     json_logs: bool = False
@@ -56,17 +63,33 @@ class HydraConfig(BaseSettings):
     custom_providers: dict[str, HashProvider] | None = Field(
         default=None, repr=False, exclude=True
     )
+    custom_storage: StorageBackend | None = None
+    custom_monitor: MonitorBackend | None = None
+    custom_network: NetworkBackend | None = None
+    custom_hasher: Hasher | None = None
 
     @field_validator("output_dir")
     @classmethod
-    def validate_output(cls, v: str) -> str:
-        path = Path(v)
-        if path.exists() and not path.is_dir():
-            raise ValueError(f"Path '{v}' exists but is not a directory")
+    def validate_output(cls, v: Path) -> Path:
+        # 1. Превращаем путь в абсолютный
         try:
-            path.resolve()
+            # resolve() делает путь абсолютным и убирает симлинки
+            # strict=False позволяет работать даже с еще не созданными папками
+            v = v.resolve(strict=False)
         except Exception as e:
             raise ValueError(f"Invalid path format: {v}") from e
+
+        # 2. Проверяем, что это не файл
+        if v.exists() and not v.is_dir():
+            raise ValueError(f"Path '{v}' exists but is not a directory")
+
+        # 3. Проверяем права на запись (os.W_OK)
+        # Если папка существует, проверяем её. Если нет — проверяем родительскую папку.
+        target_to_check = v if v.exists() else v.parent
+
+        if not os.access(target_to_check, os.W_OK):
+            raise ValueError(f"No write permissions for path: '{target_to_check}'")
+
         return v
 
     @field_validator("links")

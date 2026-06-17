@@ -7,6 +7,7 @@ import asyncio
 import math
 from dataclasses import field
 
+from hydrastream.adapters.network_curl import CurlNetworkAdapter
 from hydrastream.domain.config import HydraConfig
 from hydrastream.domain.entities import Chunk, File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
@@ -25,18 +26,31 @@ from hydrastream.messages.traffic import (
     TrafficSignal,
     WriteCompleted,
 )
+from hydrastream.monitor import (
+    BaseMonitorKwargs,
+    JsonMonitor,
+    PlainMonitor,
+    QuietMonitor,
+    RichMonitor,
+)
+from hydrastream.providers import ProviderRouter
+from hydrastream.storage import LocalStorageManager
 
 
-@hydra_dataclass(kw_only=True, slots=True)
+@hydra_dataclass
 class HydraContext:
+    is_running: bool = True
+    is_stopping: bool = False
+    is_cancelled: bool = False
     is_stream: bool
     # =========================================================================
     # 1. ГЛОБАЛЬНЫЕ ЗАВИСИМОСТИ (Передаются снаружи при создании)
     # =========================================================================
-    config: HydraConfig
-    ui: MonitorBackend
-    net: NetworkBackend
-    fs: StorageBackend
+    config: HydraConfig = field(init=False)
+    ui: MonitorBackend = field(init=False)
+    net: NetworkBackend = field(init=False)
+    fs: StorageBackend = field(init=False)
+    provider: ProviderRouter = field(default_factory=ProviderRouter)
 
     # =========================================================================
     # 2. ОЧЕРЕДИ С ПРИОРИТЕТОМ (Priority Queues)
@@ -48,6 +62,9 @@ class HydraContext:
         default_factory=asyncio.PriorityQueue[Envelope[File | StopMsg]]
     )
     chunks_q: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]] = field(
+        default_factory=asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
+    )
+    ready_chunks_q: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]] = field(
         default_factory=asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
     )
     stream_chunks_q: asyncio.PriorityQueue[Envelope[StreamChunk | StopMsg]] = field(
@@ -108,6 +125,50 @@ class HydraContext:
     resolver_barrier: asyncio.Barrier = field(init=False)
 
     def __post_init__(self) -> None:
+        if self.config.custom_monitor is None:
+            base_resolver_kwargs: BaseMonitorKwargs = {
+                "is_running": self.is_running,
+                "is_cancelled": self.is_cancelled,
+                "is_stream": self.is_stream,
+                "is_verify": self.config.verify,
+                "log_file": self.config.output_dir,
+                "is_debug": self.config.debug,
+            }
+
+            if self.config.json_logs:
+                self.ui = JsonMonitor(**base_resolver_kwargs)
+            elif self.config.quiet:
+                self.ui = QuietMonitor(**base_resolver_kwargs)
+            elif self.config.no_ui:
+                self.ui = PlainMonitor(**base_resolver_kwargs)
+            else:
+                self.ui = RichMonitor(
+                    **base_resolver_kwargs, state_keeper_q=self.state_q
+                )
+        else:
+            self.ui = self.config.custom_monitor
+
+        if self.config.custom_storage is None:
+            self.fs = LocalStorageManager(
+                output_dir=self.config.output_dir, debug=self.config.debug
+            )
+        else:
+            self.fs = self.config.custom_storage
+
+        if self.config.custom_network is None:
+            self.net = CurlNetworkAdapter(
+                threads=self.config.threads,
+                impersonate=self.config.impersonate,
+                client_kwargs=self.config.client_kwargs,
+            )
+
+        self.custom_providers = (
+            self.config.custom_providers if self.config else self.custom_providers
+        )
+        if self.custom_providers:
+            for domain, provider in self.custom_providers.items():
+                self.provider.register(domain, provider)
+
         # self.resolvers = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
         # self.resolvers = min(self.resolvers, 20)
 

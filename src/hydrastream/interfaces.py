@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from typing_extensions import Buffer, runtime_checkable
 
-from hydrastream.exceptions import LogStatus
+from hydrastream.exceptions import HydraError, LogStatus
 
 if TYPE_CHECKING:
     from hydrastream.domain.entities import Checksum, File, TypeHash
@@ -77,9 +77,13 @@ class MonitorBackend(Protocol):
         """Отметить файл как завершенный"""
         ...
 
+    async def start(self) -> None: ...
+
     async def stop(self) -> None:
         """Остановить отрисовку и закрыть ресурсы"""
         ...
+
+    async def report(self, error: HydraError, **log_extra: Any) -> None: ...
 
 
 @runtime_checkable

@@ -3,7 +3,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from curl_cffi import AsyncSession, CurlOpt, Response
+from curl_cffi import AsyncSession, BrowserTypeLiteral, CurlOpt, Headers, Response
 from curl_cffi.requests import RequestsError
 
 from hydrastream.interfaces import NetworkBackend, NetworkStream
@@ -33,8 +33,26 @@ class CurlStreamAdapter(NetworkStream):
 
 
 class CurlNetworkAdapter(NetworkBackend):
-    def __init__(self, session: AsyncSession[Response]) -> None:
-        self.client = session
+    def __init__(
+        self,
+        threads: int,
+        impersonate: BrowserTypeLiteral,
+        client_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        options = (client_kwargs or {}).copy()
+
+        user_headers = options.pop("headers", None)
+        headers_obj = Headers(user_headers)
+        headers_obj.setdefault("Accept-Encoding", "identity")
+        headers_obj.setdefault("Connection", "keep-alive")
+        options["headers"] = headers_obj
+        options.setdefault("max_clients", threads)
+        options.setdefault("impersonate", impersonate)
+        options.setdefault("timeout", 30.0)
+
+        self.client = AsyncSession(
+            **options,
+        )
 
     async def request(self, method: str, url: str, **kwargs: Any) -> Response:  # noqa: ANN401
         return await self.client.request(method, url, **kwargs)  # type: ignore

@@ -3,7 +3,7 @@ from dataclasses import field
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.interfaces import MonitorBackend
+from hydrastream.interfaces import MonitorBackend, StorageBackend
 from hydrastream.messages.base import StopMsg
 from hydrastream.messages.io import WriteChunk
 from hydrastream.messages.traffic import (
@@ -25,6 +25,8 @@ class DiskAggregator:
     MAX_BUFFER: int
 
     ui: MonitorBackend
+    fs: StorageBackend
+
     is_debug: bool
 
     _current_buffer: list[WriteChunk] = field(default_factory=list[WriteChunk])
@@ -32,37 +34,44 @@ class DiskAggregator:
     _is_writing_now: bool = False
 
     async def run(self) -> None:
+        try:
+            while True:
+                msg = await self.disk_inbox.get()
 
-        while True:
-            msg = await self.disk_inbox.get()
+                match msg:
+                    case WriteChunk():
+                        self._current_buffer.append(msg)
+                        self._current_size += msg.length
 
-            match msg:
-                case WriteChunk():
-                    self._current_buffer.append(msg)
-                    self._current_size += msg.length
+                        if self._current_size >= self.MAX_BUFFER:
+                            await self._persist_buffer()
 
-                    if self._current_size >= self.MAX_BUFFER:
+                    case FlushCmd():
                         await self._persist_buffer()
 
-                case FlushCmd():
-                    await self._persist_buffer()
+                        self.flush_event.set()
 
-                    self.flush_event.set()
+                    case StopMsg():
+                        await self._persist_buffer()
 
-                case StopMsg():
-                    await self._persist_buffer()
+                        await self.writer_outbox.put(StopMsg())
+                        break
 
-                    await self.writer_outbox.put(StopMsg())
-                    break
-
-                case _:
-                    if self.is_debug:
-                        raise RuntimeError(
-                            f"Unknown message type in disk_inbox: {type(msg)}"
+                    case _:
+                        if self.is_debug:
+                            raise RuntimeError(
+                                f"Unknown message type in disk_inbox: {type(msg)}"
+                            )
+                        await self.ui.log(
+                            f"Received unknown message: {msg}",
+                            status=LogStatus.ERROR,
                         )
-                    await self.ui.log(
-                        f"Received unknown message: {msg}",
-                        status=LogStatus.ERROR,
+        finally:
+            if self._current_buffer:
+                coalesced = await self._coalesce(self._current_buffer)
+                for chunk in coalesced:
+                    self.fs.write_chunk_data(
+                        chunk.fd, chunk.data, chunk.length, chunk.offset
                     )
 
     async def _persist_buffer(self) -> None:

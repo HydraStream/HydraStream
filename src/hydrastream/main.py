@@ -12,6 +12,8 @@ import typer
 from curl_cffi import BrowserTypeLiteral
 
 from hydrastream.__init__ import __version__
+from hydrastream.domain.config import HydraConfig
+from hydrastream.domain.entities import Checksum, TypeHash
 from hydrastream.exceptions import (
     ExitCode,
     HydraError,
@@ -20,16 +22,6 @@ from hydrastream.exceptions import (
     ValidationError,
 )
 from hydrastream.facade import HydraClient
-from hydrastream.models import (
-    Checksum,
-    DisplayConfig,
-    HydraConfig,
-    LogState,
-    SpeedLimiterState,
-    TypeHash,
-    UIState,
-)
-from hydrastream.monitor import log, log_start, log_stop, report
 
 if sys.platform != "win32":
     try:

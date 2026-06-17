@@ -16,16 +16,27 @@ from hydrastream.actors.controller import TrafficController
 from hydrastream.actors.dispatcher import DiskFileDispatcher, StreamFileDispatcher
 from hydrastream.actors.feeder import LinkFeeder
 from hydrastream.actors.memory_throttler import MemoryThrottler
-from hydrastream.actors.resolver import DiskMetadataResolver, StreamMetadataResolver
+from hydrastream.actors.resolver import (
+    BaseResolverKwargs,
+    DiskMetadataResolver,
+    StreamMetadataResolver,
+)
 from hydrastream.actors.stater import StateKeeperActor
+from hydrastream.actors.streamer import file_streamer
 from hydrastream.actors.throttler import ThrottleController
-from hydrastream.actors.worker import DiskDownloadWorker, StreamDownloadWorker
+from hydrastream.actors.worker import (
+    BaseWorkerKwargs,
+    DiskDownloadWorker,
+    StreamDownloadWorker,
+)
 from hydrastream.actors.writer import DiskWriter
 from hydrastream.domain.context import HydraContext
-from hydrastream.domain.entities import Checksum, TypeHash
+from hydrastream.domain.entities import Checksum, File, TypeHash
 from hydrastream.exceptions import (
     LogStatus,
 )
+from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.state import GetSnapshotCmd
 
 Ts = TypeVarTuple("Ts")
 
@@ -45,14 +56,10 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
         return
 
     ctx.is_running = False
+
     await stop(ctx, complete=True)
 
-    if not ctx.stream:
-        save_all_states(ctx, ctx.files)
-        for file_obj in ctx.files.values():
-            if file_obj.fd:
-                ctx.fs.close_file(file_obj.fd)
-    await ui_stop(ctx.ui)
+    await ctx.ui.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.remove_signal_handler(sig)
@@ -66,18 +73,15 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
     ctx.is_stopping = True
 
     if not complete:
-        ctx.ui.cancelled = True
         await ctx.ui.log(
             "Interrupt signal received. Initiating graceful shutdown...",
             status=LogStatus.INTERRUPT,
         )
 
-        if ctx.stream:
+        if ctx.is_stream:
             with contextlib.suppress(asyncio.QueueFull):
-                ctx.queues.stream.put_nowait(
-                    Envelope(sort_key=(-1,), is_poison_pill=True)
-                )
-                ctx.queues.file_discovery.put_nowait(-1)
+                ctx.stream_chunks_q.put_nowait(Envelope.poison_pill())
+                ctx.file_discovery_q.put_nowait(StopMsg())
 
 
 async def prepare_runtime(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
@@ -88,7 +92,7 @@ async def prepare_runtime(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
     )
     loop.set_default_executor(custom_pool)
 
-    await ui_start(ctx.ui)
+    await ctx.ui.start()
     main_task = asyncio.current_task()
 
     def handle_signal() -> None:
@@ -105,38 +109,32 @@ async def _bootstrap_engine(
     links: list[str],
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
 ) -> None:
+
+    base_resolver_kwargs: BaseResolverKwargs = {
+        "threads": ctx.config.threads,
+        "MIN_CHUNK": ctx.config.MIN_CHUNK,
+        "links_inbox": ctx.links_q,
+        "files_outbox": ctx.files_q,
+        "state_outbox": ctx.state_q,
+        "barrier": ctx.resolver_barrier,
+        "all_complete": ctx.all_complete,
+        "is_dry_run": ctx.config.dry_run,
+        "is_verify": ctx.config.verify,
+        "is_debug": ctx.config.debug,
+        "ui": ctx.ui,
+        "net": ctx.net,
+        "provider": ctx.provider,
+    }
+
     for i in range(ctx.resolvers):
         resolver = (
             DiskMetadataResolver(
-                threads=ctx.config.threads,
-                MIN_CHUNK=ctx.config.MIN_CHUNK,
-                links_inbox=ctx.links_q,
-                files_outbox=ctx.files_q,
-                state_outbox=ctx.state_q,
-                barrier=ctx.resolver_barrier,
-                all_complete=ctx.all_complete,
-                is_dry_run=ctx.config.dry_run,
-                is_verify=ctx.config.verify,
-                is_debug=ctx.config.debug,
-                ui=ctx.ui,
-                net=ctx.net,
+                **base_resolver_kwargs,
                 fs=ctx.fs,
             )
             if not ctx.is_stream
             else StreamMetadataResolver(
-                threads=ctx.config.threads,
-                MIN_CHUNK=ctx.config.MIN_CHUNK,
-                STREAM_CHUNK_SIZE=ctx.config.STREAM_CHUNK_SIZE,
-                links_inbox=ctx.links_q,
-                files_outbox=ctx.files_q,
-                state_outbox=ctx.state_q,
-                barrier=ctx.resolver_barrier,
-                all_complete=ctx.all_complete,
-                is_dry_run=ctx.config.dry_run,
-                is_verify=ctx.config.verify,
-                is_debug=ctx.config.debug,
-                ui=ctx.ui,
-                net=ctx.net,
+                **base_resolver_kwargs, STREAM_CHUNK_SIZE=ctx.config.STREAM_CHUNK_SIZE
             )
         )
         tg.create_task(resolver.run(), name=f"MetadataResolver: {i}")
@@ -166,47 +164,41 @@ async def _bootstrap_engine(
 
     memory_throttler = MemoryThrottler(
         chunk_inbox=ctx.chunks_q,
-        chunk_outbox=ctx.chunks_q,
+        chunk_outbox=ctx.ready_chunks_q,
         credit_inbox=ctx.credit_q,
         budget=ctx.config.BUFFER_SIZE,
     )
     tg.create_task(memory_throttler.run(), name="MemoryThrottler")
 
+    base_worker_kwargs: BaseWorkerKwargs = {
+        "chunks_inbox": ctx.ready_chunks_q,
+        "throttler_outbox": ctx.throttler_q,
+        "controller_outbox": ctx.controller_q,
+        "state_outbox": ctx.state_q,
+        "all_complete": ctx.all_complete,
+        "barrier": ctx.worker_barrier,
+        "ui": ctx.ui,
+        "net": ctx.net,
+        "is_debug": ctx.config.debug,
+    }
+
     for i in range(ctx.workers):
-        worker = (
-            DiskDownloadWorker(
-                chunks_inbox=ctx.chunks_q,
-                throttler_outbox=ctx.throttler_q,
-                controller_outbox=ctx.controller_q,
-                state_outbox=ctx.state_q,
+        if ctx.is_stream:
+            worker = StreamDownloadWorker(
+                **base_worker_kwargs,
                 wakeup_event=ctx.worker_events[i],
-                all_complete=ctx.all_complete,
-                barrier=ctx.worker_barrier,
-                ui=ctx.ui,
-                net=ctx.net,
-                is_debug=ctx.config.debug,
+                stream_chunks_outbox=ctx.stream_chunks_q,
+                file_discovery_outbox=ctx.file_discovery_q,
+            )
+        else:
+            worker = DiskDownloadWorker(
+                **base_worker_kwargs,
+                wakeup_event=ctx.worker_events[i],
                 disk_outbox=ctx.disk_q,
                 file_limit_outbox=ctx.file_limit_q,
                 fs=ctx.fs,
             )
-            if not ctx.is_stream
-            else StreamDownloadWorker(
-                chunks_inbox=ctx.chunks_q,
-                throttler_outbox=ctx.throttler_q,
-                controller_outbox=ctx.controller_q,
-                state_outbox=ctx.state_q,
-                wakeup_event=ctx.worker_events[i],
-                all_complete=ctx.all_complete,
-                barrier=ctx.worker_barrier,
-                ui=ctx.ui,
-                net=ctx.net,
-                is_debug=ctx.config.debug,
-                stream_chunks_outbox=ctx.stream_chunks_q,
-                file_discovery_outbox=ctx.file_discovery_q,
-            )
-        )
-        tg.create_task(worker.run(), name=f"DownloadWorker: {i}")
-
+        tg.create_task(worker.run(), name=f"DownloadWorker-{i}")
     writer = DiskWriter(
         writer_inbox=ctx.writer_q,
         ack_outbox=ctx.ack_q,
@@ -222,6 +214,8 @@ async def _bootstrap_engine(
         analyzer_checkpoint_event=ctx.analyzer_checkpoint_event,
         throttler_checkpoint_event=ctx.throttler_checkpoint_event,
         ui=ctx.ui,
+        fs=ctx.fs,
+        is_stream=ctx.is_stream,
         is_debug=ctx.config.debug,
     )
     tg.create_task(stater.run(), name="StateKeeper")
@@ -234,6 +228,7 @@ async def _bootstrap_engine(
         flush_event=ctx.flush_event,
         MAX_BUFFER=int(ctx.config.BUFFER_SIZE / 3),
         ui=ctx.ui,
+        fs=ctx.fs,
         is_debug=ctx.config.debug,
     )
     tg.create_task(aggregator.run(), name="DiskAggregator")
@@ -289,7 +284,7 @@ async def _bootstrap_engine(
 
 async def session_killer(ctx: HydraContext) -> None:
     try:
-        await ctx.sync.all_complete.wait()
+        await ctx.all_complete.wait()
     except asyncio.CancelledError:
         await ctx.net.close()
         raise
@@ -312,15 +307,34 @@ async def stream_all(
                 if not ctx.config.dry_run:
                     file_gen = None
                     while True:
-                        file_id = await ctx.file_discovery_q.get()
+                        msg = await ctx.file_discovery_q.get()
+                        match msg:
+                            case File():
+                                filename = msg.actual_filename
+                                file_gen = file_streamer(
+                                    file_obj=msg,
+                                    stream_chunk_inbox=ctx.stream_chunks_q,
+                                    credit_outbox=ctx.credit_q,
+                                    reg_events_q=ctx.state_q,
+                                    file_limit_q=ctx.file_limit_q,
+                                    ui=ctx.ui,
+                                    is_debug=ctx.config.debug,
+                                )
+                                yield filename, file_gen
 
-                        if file_id == -1:
-                            break
-                        filename = ctx.files[file_id].meta.filename
+                            case StopMsg():
+                                break
 
-                        file_gen = streamer(ctx, file_id)
-
-                        yield filename, file_gen
+                            case _:
+                                if ctx.config.debug:
+                                    raise RuntimeError(
+                                        "Unknown message type in "
+                                        f"file_discovery_q: {type(msg)}"
+                                    )
+                                await ctx.ui.log(
+                                    f"Received unknown message: {msg}",
+                                    status=LogStatus.ERROR,
+                                )
 
         except* Exception as eg:
             for e in eg.exceptions:
@@ -344,7 +358,6 @@ async def run_downloads(
     links: list[str],
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
 ) -> None:
-    stream = False
 
     loop = asyncio.get_running_loop()
     await prepare_runtime(ctx, loop)
@@ -355,7 +368,10 @@ async def run_downloads(
                 tg.create_task(session_killer(ctx), name="SessionKiller")
                 await _bootstrap_engine(ctx, tg, links, expected_checksums)
             if ctx.config.dry_run:
-                await ctx.ui.dry_run(ctx.files, ctx.config.output_dir)
+                _get_shapshot: asyncio.Queue[dict[int, File]] = asyncio.Queue()
+                await ctx.state_q.put(GetSnapshotCmd(reply_to=_get_shapshot))
+                files = await _get_shapshot.get()
+                await ctx.ui.dry_run(files, ctx.config.output_dir)
         except* Exception as eg:
             await ctx.ui.log(
                 f"Critical failure in TaskGroup: {eg.exceptions}",

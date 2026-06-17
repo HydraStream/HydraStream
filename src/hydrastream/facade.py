@@ -13,22 +13,18 @@ from urllib.parse import urlparse
 
 from curl_cffi import BrowserTypeLiteral
 
+from hydrastream.domain.config import HydraConfig
+from hydrastream.domain.context import HydraContext
+from hydrastream.domain.entities import Checksum, TypeHash
 from hydrastream.engine import run_downloads, stream_all, teardown_engine
 from hydrastream.exceptions import FileReadError, InvalidParameterError, ValidationError
-from hydrastream.interfaces import HashProvider, StorageBackend
-from hydrastream.models import (
-    Checksum,
-    DisplayConfig,
-    HydraConfig,
-    HydraContext,
-    LogState,
-    SpeedLimiterState,
-    TypeHash,
-    UIState,
+from hydrastream.interfaces import (
+    Hasher,
+    HashProvider,
+    MonitorBackend,
+    NetworkBackend,
+    StorageBackend,
 )
-from hydrastream.monitor import log_start, log_stop, report
-from hydrastream.providers import ProviderRouter
-from hydrastream.storage import LocalStorageManager
 
 
 class HydraClient:
@@ -50,8 +46,10 @@ class HydraClient:
         impersonate: BrowserTypeLiteral = "chrome120",
         client_kwargs: dict[str, Any] | None = None,
         custom_providers: dict[str, "HashProvider"] | None = None,
-        fs: StorageBackend | None = None,
-        ui: UIState | None = None,
+        custom_storage: StorageBackend | None = None,
+        custom_monitor: MonitorBackend | None = None,
+        custom_network: NetworkBackend | None = None,
+        custom_hasher: Hasher | None = None,
     ) -> None:
         if config:
             self.config = config
@@ -64,43 +62,20 @@ class HydraClient:
                 speed_limit=speed_limit,
                 no_ui=no_ui,
                 quiet=quiet,
-                output_dir=output_dir,
+                output_dir=Path(output_dir),
                 buffer_size_mb=buffer_size_mb,
                 json_logs=json_logs,
                 verify=verify,
                 impersonate=impersonate,
                 debug=debug,
                 client_kwargs=client_kwargs,
-            )
-        if ui:
-            self.ui_init = False
-            self.ui = ui
-        else:
-            self.ui_init = True
-            self.ui = UIState(
-                display=DisplayConfig(
-                    no_ui=self.config.no_ui,
-                    quiet=self.config.quiet,
-                    dry_run=self.config.dry_run,
-                    json_logs=self.config.json_logs,
-                    verify=self.config.verify,
-                    debug=self.config.debug,
-                ),
-                log=LogState(log_file=Path(self.config.output_dir) / "download.log"),
-                speed=SpeedLimiterState(speed_limit=self.config.speed_limit),
+                custom_providers=custom_providers,
+                custom_storage=custom_storage,
+                custom_monitor=custom_monitor,
+                custom_network=custom_network,
+                custom_hasher=custom_hasher,
             )
         self.state: HydraContext | None = None
-        if fs:
-            self.fs = fs
-        else:
-            self.fs = LocalStorageManager(
-                output_dir=Path(self.config.output_dir), debug=self.config.debug
-            )
-        self.provider = ProviderRouter()
-        self.custom_providers = config.custom_providers if config else custom_providers
-        if custom_providers:
-            for domain, provider in custom_providers.items():
-                self.provider.register(domain, provider)
 
     async def __aenter__(self) -> Self:
         if self.ui_init:
@@ -126,9 +101,7 @@ class HydraClient:
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
     ) -> None:
         links = await self.validate(links, input_file)
-        self.state = HydraContext(
-            config=self.config, fs=self.fs, provider=self.provider
-        )
+        self.state = HydraContext(config=self.config, is_stream=False)
         await run_downloads(self.state, links, expected_checksums)
 
     async def stream(
@@ -138,9 +111,7 @@ class HydraClient:
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
     ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
         links = await self.validate(links, input_file)
-        self.state = HydraContext(
-            config=self.config, fs=self.fs, provider=self.provider
-        )
+        self.state = HydraContext(config=self.config, is_stream=True)
         return stream_all(self.state, links, expected_checksums)
 
     async def validate(
@@ -208,7 +179,7 @@ def get_input_stream(filepath: str) -> Generator[TextIO, None, None]:
 
 
 async def parse_urls(
-    ctx: UIState, links_from_args: list[str] | None, filepath: str | None
+    ui: MonitorBackend, links_from_args: list[str] | None, filepath: str | None
 ) -> list[str]:
     all_links: list[str] = []
 
@@ -218,8 +189,7 @@ async def parse_urls(
             if is_valid_url(url):
                 all_links.append(url)
             else:
-                await report(
-                    ctx,
+                await ui.report(
                     InvalidParameterError(
                         param="url", value=url, reason="Invalid HTTP/HTTPS format"
                     ),
@@ -236,8 +206,7 @@ async def parse_urls(
                 if is_valid_url(url):
                     all_links.append(url)
                 else:
-                    await report(
-                        ctx,
+                    await ui.report(
                         InvalidParameterError(
                             param="file_link",
                             value=url,
