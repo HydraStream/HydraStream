@@ -22,6 +22,7 @@ from hydrastream.exceptions import (
     ValidationError,
 )
 from hydrastream.facade import HydraClient
+from hydrastream.monitor import QuietMonitor
 
 if sys.platform != "win32":
     try:
@@ -104,19 +105,17 @@ async def async_main(  # noqa: C901, PLR0912
         browser: Browser TLS fingerprint to impersonate.
         debug: Enable debug mode to propagate full tracebacks on failure.
     """  # noqa: E501
-    ui = UIState(
-        display=DisplayConfig(
-            no_ui=no_ui,
-            quiet=quiet,
-            dry_run=dry_run,
-            json_logs=json_logs,
-            verify=verify,
-        ),
-        log=LogState(log_file=Path(output_dir).expanduser().resolve() / "download.log"),
-        speed=SpeedLimiterState(speed_limit=speed_limit),
+    print("10")
+    ui = QuietMonitor(
+        is_verify=verify,
+        log_file=Path(output_dir) / "hydra.log",
+        is_debug=debug,
     )
+    print("11")
     try:
-        await log_start(ui)
+        print("12")
+        await ui.start()
+        print("13")
 
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] = {}
 
@@ -131,7 +130,7 @@ async def async_main(  # noqa: C901, PLR0912
                     "multiple URLs are provided."
                 ),
             )
-
+        print("14")
         config = HydraConfig(
             threads=threads,
             dry_run=dry_run,
@@ -140,7 +139,7 @@ async def async_main(  # noqa: C901, PLR0912
             speed_limit=speed_limit,
             no_ui=no_ui,
             quiet=quiet,
-            output_dir=output_dir,
+            output_dir=Path(output_dir),
             buffer_size_mb=buffer_size_mb,
             json_logs=json_logs,
             verify=verify,
@@ -148,15 +147,14 @@ async def async_main(  # noqa: C901, PLR0912
             impersonate=impersonate,
             debug=debug,
         )
-
+        print("15")
         async with HydraClient(config=config, ui=ui) as loader:
             if stream and not config.dry_run:
                 assert sys.__stdout__ is not None
                 is_terminal = sys.__stdout__.isatty()
 
                 if is_terminal:
-                    await report(
-                        ui,
+                    await ui.report(
                         InvalidParameterError(
                             param="stream",
                             reason=(
@@ -168,8 +166,7 @@ async def async_main(  # noqa: C901, PLR0912
                     )
 
                     if not expected_checksums:
-                        await report(
-                            ui,
+                        await ui.report(
                             ValidationError(
                                 param="stream",
                                 reason=(
@@ -180,8 +177,7 @@ async def async_main(  # noqa: C901, PLR0912
                             ),
                         )
 
-                        await report(
-                            ui,
+                        await ui.report(
                             InvalidParameterError(
                                 param="stream",
                                 reason=(
@@ -204,7 +200,7 @@ async def async_main(  # noqa: C901, PLR0912
                         sys.stdout.buffer.flush()
             else:
                 await loader.run(links, input_file, expected_checksums)
-
+        print("5")
     except (KeyboardInterrupt, asyncio.CancelledError):
         if debug:
             raise
@@ -219,8 +215,8 @@ async def async_main(  # noqa: C901, PLR0912
         codes: list[int] = []
         for err in all_errors:
             if isinstance(err, HydraError):
-                await report(ui, err)
-                await log(ui, f"FATAL: {err!r}", status=LogStatus.CRITICAL)
+                await ui.report(err)
+                await ui.log(f"FATAL: {err!r}", status=LogStatus.CRITICAL)
                 codes.append(err.exit_code)
 
         exit_code = max(codes) if codes else ExitCode.GENERAL_ERROR
@@ -228,7 +224,7 @@ async def async_main(  # noqa: C901, PLR0912
         sys.exit(exit_code)
 
     finally:
-        await log_stop(ui)
+        await ui.stop()
 
 
 T = TypeVar("T", bound=BaseException)

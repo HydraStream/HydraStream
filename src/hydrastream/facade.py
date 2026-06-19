@@ -25,6 +25,7 @@ from hydrastream.interfaces import (
     NetworkBackend,
     StorageBackend,
 )
+from hydrastream.monitor import QuietMonitor
 
 
 class HydraClient:
@@ -50,6 +51,7 @@ class HydraClient:
         custom_monitor: MonitorBackend | None = None,
         custom_network: NetworkBackend | None = None,
         custom_hasher: Hasher | None = None,
+        ui: MonitorBackend | None = None,
     ) -> None:
         if config:
             self.config = config
@@ -76,10 +78,21 @@ class HydraClient:
                 custom_hasher=custom_hasher,
             )
         self.state: HydraContext | None = None
+        if ui is None:
+            self.ui = QuietMonitor(
+                is_verify=verify,
+                log_file=Path(output_dir),
+                is_debug=debug,
+            )
+            self.ui_init = False
+        else:
+            self.ui = ui
+            self.ui_init = True
 
     async def __aenter__(self) -> Self:
-        if self.ui_init:
-            await log_start(self.ui)
+        if not self.ui_init:
+            await self.ui.start()
+            self.ui_init = True
         return self
 
     async def __aexit__(
@@ -91,8 +104,10 @@ class HydraClient:
         if self.state is not None:
             loop = asyncio.get_running_loop()
             await teardown_engine(self.state, loop)
+
         if self.ui_init:
-            await log_stop(self.ui)
+            await self.ui.stop()
+            self.ui_init = False
 
     async def run(
         self,
@@ -100,9 +115,11 @@ class HydraClient:
         input_file: str | None = None,
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
     ) -> None:
+        print("2")
         links = await self.validate(links, input_file)
         self.state = HydraContext(config=self.config, is_stream=False)
         await run_downloads(self.state, links, expected_checksums)
+        print("3")
 
     async def stream(
         self,

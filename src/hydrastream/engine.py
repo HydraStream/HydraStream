@@ -139,75 +139,6 @@ async def _bootstrap_engine(
         )
         tg.create_task(resolver.run(), name=f"MetadataResolver: {i}")
 
-    dispatcher = (
-        DiskFileDispatcher(
-            limit=ctx.config.threads,
-            files_inbox=ctx.files_q,
-            chunks_outbox=ctx.chunks_q,
-            file_limit_inbox=ctx.file_limit_q,
-            ui=ctx.ui,
-            is_debug=ctx.config.debug,
-            fs=ctx.fs,
-        )
-        if not ctx.is_stream
-        else StreamFileDispatcher(
-            limit=ctx.config.threads,
-            files_inbox=ctx.files_q,
-            chunks_outbox=ctx.chunks_q,
-            file_limit_inbox=ctx.file_limit_q,
-            file_discovery=ctx.file_discovery_q,
-            ui=ctx.ui,
-            is_debug=ctx.config.debug,
-        )
-    )
-    tg.create_task(dispatcher.run(), name="FileDispatcher")
-
-    memory_throttler = MemoryThrottler(
-        chunk_inbox=ctx.chunks_q,
-        chunk_outbox=ctx.ready_chunks_q,
-        credit_inbox=ctx.credit_q,
-        budget=ctx.config.BUFFER_SIZE,
-    )
-    tg.create_task(memory_throttler.run(), name="MemoryThrottler")
-
-    base_worker_kwargs: BaseWorkerKwargs = {
-        "chunks_inbox": ctx.ready_chunks_q,
-        "throttler_outbox": ctx.throttler_q,
-        "controller_outbox": ctx.controller_q,
-        "state_outbox": ctx.state_q,
-        "all_complete": ctx.all_complete,
-        "barrier": ctx.worker_barrier,
-        "ui": ctx.ui,
-        "net": ctx.net,
-        "is_debug": ctx.config.debug,
-    }
-
-    for i in range(ctx.workers):
-        if ctx.is_stream:
-            worker = StreamDownloadWorker(
-                **base_worker_kwargs,
-                wakeup_event=ctx.worker_events[i],
-                stream_chunks_outbox=ctx.stream_chunks_q,
-                file_discovery_outbox=ctx.file_discovery_q,
-            )
-        else:
-            worker = DiskDownloadWorker(
-                **base_worker_kwargs,
-                wakeup_event=ctx.worker_events[i],
-                disk_outbox=ctx.disk_q,
-                file_limit_outbox=ctx.file_limit_q,
-                fs=ctx.fs,
-            )
-        tg.create_task(worker.run(), name=f"DownloadWorker-{i}")
-    writer = DiskWriter(
-        writer_inbox=ctx.writer_q,
-        ack_outbox=ctx.ack_q,
-        fs=ctx.fs,
-        ui=ctx.ui,
-        is_debug=ctx.config.debug,
-    )
-    tg.create_task(writer.run(), name="DiskWriter")
-
     stater = StateKeeperActor(
         stater_inbox=ctx.state_q,
         bytes_to_check=ctx.config.MIN_CHUNK,
@@ -220,61 +151,133 @@ async def _bootstrap_engine(
     )
     tg.create_task(stater.run(), name="StateKeeper")
 
-    aggregator = DiskAggregator(
-        disk_inbox=ctx.disk_q,
-        throttler_outbox=ctx.throttler_q,
-        ack_inbox=ctx.ack_q,
-        writer_outbox=ctx.writer_q,
-        flush_event=ctx.flush_event,
-        MAX_BUFFER=int(ctx.config.BUFFER_SIZE / 3),
-        ui=ctx.ui,
-        fs=ctx.fs,
-        is_debug=ctx.config.debug,
-    )
-    tg.create_task(aggregator.run(), name="DiskAggregator")
+    if not ctx.config.dry_run:
+        dispatcher = (
+            DiskFileDispatcher(
+                limit=ctx.config.threads,
+                files_inbox=ctx.files_q,
+                chunks_outbox=ctx.chunks_q,
+                file_limit_inbox=ctx.file_limit_q,
+                ui=ctx.ui,
+                is_debug=ctx.config.debug,
+                fs=ctx.fs,
+            )
+            if not ctx.is_stream
+            else StreamFileDispatcher(
+                limit=ctx.config.threads,
+                files_inbox=ctx.files_q,
+                chunks_outbox=ctx.chunks_q,
+                file_limit_inbox=ctx.file_limit_q,
+                file_discovery=ctx.file_discovery_q,
+                ui=ctx.ui,
+                is_debug=ctx.config.debug,
+            )
+        )
+        tg.create_task(dispatcher.run(), name="FileDispatcher")
 
-    analyzer = TelemetryAnalyzer(
-        threads=ctx.config.threads,
-        _current_limit=ctx.start_works,
-        analyzer_checkpoint_event=ctx.analyzer_checkpoint_event,
-        controller_outbox=ctx.controller_q,
-        ui=ctx.ui,
-        stop_analyzer=ctx.stop_analyzer,
-        is_debug=ctx.config.debug,
-    )
-    tg.create_task(analyzer.run(), name="TelemetryAnalyzer")
+        if ctx.is_stream:
+            memory_throttler = MemoryThrottler(
+                chunk_inbox=ctx.chunks_q,
+                chunk_outbox=ctx.ready_chunks_q,
+                credit_inbox=ctx.credit_q,
+                budget=ctx.config.BUFFER_SIZE,
+            )
+            tg.create_task(memory_throttler.run(), name="MemoryThrottler")
 
-    autosaver = FileAutosaver(
-        interval=60,
-        all_complete=ctx.all_complete,
-        flush_event=ctx.flush_event,
-        disk_q=ctx.disk_q,
-        reg_events_q=ctx.state_q,
-        fs=ctx.fs,
-        ui=ctx.ui,
-        is_debug=ctx.config.debug,
-    )
-    tg.create_task(autosaver.run(), name="FileAutosaver")
+        base_worker_kwargs: BaseWorkerKwargs = {
+            "throttler_outbox": ctx.throttler_q,
+            "controller_outbox": ctx.controller_q,
+            "state_outbox": ctx.state_q,
+            "all_complete": ctx.all_complete,
+            "barrier": ctx.worker_barrier,
+            "ui": ctx.ui,
+            "net": ctx.net,
+            "is_debug": ctx.config.debug,
+        }
 
-    controller = TrafficController(
-        reg_events_q=ctx.controller_q,
-        worker_events=ctx.worker_events,
-        stop_analyzer=ctx.stop_analyzer,
-        analyzer_checkpoint_event=ctx.analyzer_checkpoint_event,
-        dynamic_limit=ctx.start_works,
-        prev_dynamic_limit=ctx.start_works,
-    )
-    tg.create_task(controller.run(), name="TrafficController")
+        for i in range(ctx.workers):
+            if ctx.is_stream:
+                worker = StreamDownloadWorker(
+                    **base_worker_kwargs,
+                    chunks_inbox=ctx.ready_chunks_q,
+                    wakeup_event=ctx.worker_events[i],
+                    stream_chunks_outbox=ctx.stream_chunks_q,
+                    file_discovery_outbox=ctx.file_discovery_q,
+                )
+            else:
+                worker = DiskDownloadWorker(
+                    **base_worker_kwargs,
+                    chunks_inbox=ctx.chunks_q,
+                    wakeup_event=ctx.worker_events[i],
+                    disk_outbox=ctx.disk_q,
+                    file_limit_outbox=ctx.file_limit_q,
+                    fs=ctx.fs,
+                )
+            tg.create_task(worker.run(), name=f"DownloadWorker-{i}")
+        writer = DiskWriter(
+            writer_inbox=ctx.writer_q,
+            ack_outbox=ctx.ack_q,
+            fs=ctx.fs,
+            ui=ctx.ui,
+            is_debug=ctx.config.debug,
+        )
+        tg.create_task(writer.run(), name="DiskWriter")
 
-    throttler = ThrottleController(
-        throttler_input=ctx.throttler_q,
-        speed_limit=ctx.config.speed_limit,
-        is_debug=ctx.config.debug,
-        ui=ctx.ui,
-        all_complete=ctx.all_complete,
-        throttler_checkpoint_event=ctx.throttler_checkpoint_event,
-    )
-    tg.create_task(throttler.run(), name="ThrottleController")
+        aggregator = DiskAggregator(
+            disk_inbox=ctx.disk_q,
+            throttler_outbox=ctx.throttler_q,
+            ack_inbox=ctx.ack_q,
+            writer_outbox=ctx.writer_q,
+            flush_event=ctx.flush_event,
+            MAX_BUFFER=int(ctx.config.BUFFER_SIZE / 3),
+            ui=ctx.ui,
+            fs=ctx.fs,
+            is_debug=ctx.config.debug,
+        )
+        tg.create_task(aggregator.run(), name="DiskAggregator")
+
+        analyzer = TelemetryAnalyzer(
+            threads=ctx.config.threads,
+            _current_limit=ctx.start_works,
+            analyzer_checkpoint_event=ctx.analyzer_checkpoint_event,
+            controller_outbox=ctx.controller_q,
+            ui=ctx.ui,
+            stop_analyzer=ctx.stop_analyzer,
+            is_debug=ctx.config.debug,
+        )
+        tg.create_task(analyzer.run(), name="TelemetryAnalyzer")
+
+        autosaver = FileAutosaver(
+            interval=60,
+            all_complete=ctx.all_complete,
+            flush_event=ctx.flush_event,
+            disk_q=ctx.disk_q,
+            reg_events_q=ctx.state_q,
+            fs=ctx.fs,
+            ui=ctx.ui,
+            is_debug=ctx.config.debug,
+        )
+        tg.create_task(autosaver.run(), name="FileAutosaver")
+
+        controller = TrafficController(
+            reg_events_q=ctx.controller_q,
+            worker_events=ctx.worker_events,
+            stop_analyzer=ctx.stop_analyzer,
+            analyzer_checkpoint_event=ctx.analyzer_checkpoint_event,
+            dynamic_limit=ctx.start_works,
+            prev_dynamic_limit=ctx.start_works,
+        )
+        tg.create_task(controller.run(), name="TrafficController")
+
+        throttler = ThrottleController(
+            throttler_input=ctx.throttler_q,
+            speed_limit=ctx.config.speed_limit,
+            is_debug=ctx.config.debug,
+            ui=ctx.ui,
+            all_complete=ctx.all_complete,
+            throttler_checkpoint_event=ctx.throttler_checkpoint_event,
+        )
+        tg.create_task(throttler.run(), name="ThrottleController")
 
     feeder = LinkFeeder(
         links=links, expected_checksums=expected_checksums, links_outbox=ctx.links_q
@@ -367,11 +370,14 @@ async def run_downloads(
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(session_killer(ctx), name="SessionKiller")
                 await _bootstrap_engine(ctx, tg, links, expected_checksums)
+                print("1")
+
             if ctx.config.dry_run:
                 _get_shapshot: asyncio.Queue[dict[int, File]] = asyncio.Queue()
                 await ctx.state_q.put(GetSnapshotCmd(reply_to=_get_shapshot))
                 files = await _get_shapshot.get()
                 await ctx.ui.dry_run(files, ctx.config.output_dir)
+
         except* Exception as eg:
             await ctx.ui.log(
                 f"Critical failure in TaskGroup: {eg.exceptions}",

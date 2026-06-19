@@ -188,7 +188,7 @@ class BaseMonitor(MonitorBackend, ABC):
         except OSError:
             # Если юзер передал /root/secret/dir/ и у нас нет прав,
             # откатываемся в текущую директорию!
-            fallback = Path.cwd() / "download.log"
+            fallback = Path.cwd() / "hydra.log"
             self.log_file = fallback
 
     async def start(self) -> None:
@@ -512,14 +512,14 @@ class RichMonitor(BaseMonitor):
             TransferSpeedColumn(),
             "•",
             TimeRemainingColumn(),
-            console=self.rich.console,
+            console=self.console,
             transient=False,
             expand=True,
         )
 
         self.live = Live(
             get_renderable=self._make_panel,
-            console=self.rich.console,
+            console=self.console,
             auto_refresh=True,
             refresh_per_second=10,
             transient=False,

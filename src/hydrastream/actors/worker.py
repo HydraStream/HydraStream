@@ -42,8 +42,6 @@ from hydrastream.messages.traffic import (
 
 
 class BaseWorkerKwargs(TypedDict):
-    chunks_inbox: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
-
     throttler_outbox: asyncio.Queue[ThrottlerMsg]
     controller_outbox: asyncio.Queue[TrafficSignal]
     state_outbox: asyncio.Queue[StateKeeperCmd]

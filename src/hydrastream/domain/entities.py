@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from dataclasses import field, replace
 from typing import (
@@ -28,8 +27,6 @@ from hydrastream.exceptions import (
     OrphanedChunkError,
     ValidationError,
 )
-from hydrastream.messages.base import Envelope
-from hydrastream.messages.io import StreamChunk
 
 if TYPE_CHECKING:
     pass
@@ -172,7 +169,7 @@ class File:
     fd: int | None = field(default=None, repr=False)
     verified: bool = field(default=False)
     is_failed: bool = field(default=False)
-    _stream_queue: asyncio.Queue[Envelope[StreamChunk | None]] | None = None
+    # _stream_queue: asyncio.Queue[Envelope[StreamChunk | None]] | None = None
 
     def create_chunks(self) -> None:
         if self.chunks:

@@ -46,7 +46,7 @@ class HydraContext:
     # =========================================================================
     # 1. ГЛОБАЛЬНЫЕ ЗАВИСИМОСТИ (Передаются снаружи при создании)
     # =========================================================================
-    config: HydraConfig = field(init=False)
+    config: HydraConfig
     ui: MonitorBackend = field(init=False)
     net: NetworkBackend = field(init=False)
     fs: StorageBackend = field(init=False)
@@ -162,11 +162,8 @@ class HydraContext:
                 client_kwargs=self.config.client_kwargs,
             )
 
-        self.custom_providers = (
-            self.config.custom_providers if self.config else self.custom_providers
-        )
-        if self.custom_providers:
-            for domain, provider in self.custom_providers.items():
+        if self.config.custom_providers:
+            for domain, provider in self.config.custom_providers.items():
                 self.provider.register(domain, provider)
 
         # self.resolvers = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
