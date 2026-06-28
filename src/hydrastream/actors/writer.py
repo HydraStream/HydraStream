@@ -5,15 +5,15 @@ import os
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import MonitorBackend, StorageBackend
-from hydrastream.messages.base import StopMsg
+from hydrastream.messages.base import ActorFifoQueue, TerminalPill
 from hydrastream.messages.io import WriteChunk
 from hydrastream.messages.traffic import WriteCompleted
 
 
 @hydra_dataclass
 class DiskWriter:
-    writer_inbox: asyncio.Queue[list[WriteChunk] | StopMsg]
-    ack_outbox: asyncio.Queue[WriteCompleted | StopMsg]
+    writer_inbox: ActorFifoQueue[list[WriteChunk] | TerminalPill]
+    ack_outbox: ActorFifoQueue[WriteCompleted | TerminalPill]
 
     fs: StorageBackend
     ui: MonitorBackend
@@ -30,7 +30,7 @@ class DiskWriter:
                     try:
                         await loop.run_in_executor(None, self._write_all_sync, batch)
 
-                        await self.ack_outbox.put(WriteCompleted())
+                        await self.ack_outbox.send_data(WriteCompleted())
 
                     except Exception as e:
                         msg = self._handle_disk_error(e)
@@ -40,7 +40,7 @@ class DiskWriter:
                         )
                         raise RuntimeError(msg) from e
 
-                case StopMsg():
+                case TerminalPill():
                     break
 
                 case _:

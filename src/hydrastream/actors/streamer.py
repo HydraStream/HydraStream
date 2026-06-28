@@ -3,20 +3,20 @@ import hashlib
 from collections.abc import AsyncGenerator
 
 from hydrastream.actors.dispatcher import FileCompleted
-from hydrastream.actors.stater import RemoveFileCmd, StateKeeperCmd
+from hydrastream.actors.stater import RemoveFileCmd, StateKeeperMsg
 from hydrastream.domain.entities import Checksum, File
 from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
 from hydrastream.interfaces import Hasher, MonitorBackend
-from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.base import ActorFifoQueue, ActorPriorityQueue, TerminalPill
 from hydrastream.messages.io import StreamChunk
 
 
 async def file_streamer(  # noqa
     file_obj: File,
-    stream_chunk_inbox: asyncio.PriorityQueue[Envelope[StreamChunk | StopMsg]],
+    stream_chunk_inbox: ActorPriorityQueue[StreamChunk | TerminalPill],
     credit_outbox: asyncio.Queue[int],
-    reg_events_q: asyncio.Queue[StateKeeperCmd],
-    file_limit_q: asyncio.Queue[FileCompleted],
+    reg_events_q: ActorFifoQueue[StateKeeperMsg],
+    file_limit_q: ActorFifoQueue[FileCompleted],
     ui: MonitorBackend,
     is_debug: bool,
 ) -> AsyncGenerator[bytes, None]:
@@ -32,8 +32,7 @@ async def file_streamer(  # noqa
 
     try:
         while expected_offset < total_size:
-            envelope = await stream_chunk_inbox.get()
-            msg = envelope.payload
+            msg = await stream_chunk_inbox.get()
 
             match msg:
                 case StreamChunk(start=offset, data=chunk_data):
@@ -59,7 +58,7 @@ async def file_streamer(  # noqa
                     else:
                         buffer[offset] = chunk_data
 
-                case StopMsg():
+                case TerminalPill():
                     break
 
                 case _:
@@ -94,8 +93,8 @@ async def file_streamer(  # noqa
     finally:
         buffer.clear()
 
-        await reg_events_q.put(RemoveFileCmd(file_id=file_obj.meta.id))
-        await file_limit_q.put(FileCompleted())
+        await reg_events_q.send_data(RemoveFileCmd(file_id=file_obj.meta.id))
+        await file_limit_q.send_data(FileCompleted())
 
 
 def verify_stream(

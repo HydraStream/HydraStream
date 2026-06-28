@@ -6,20 +6,20 @@ from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import MonitorBackend, StorageBackend
-from hydrastream.messages.base import StopMsg
+from hydrastream.messages.base import ActorFifoQueue, TerminalPill
 from hydrastream.messages.state import (
     GetSnapshotCmd,
     GetUIDeltasCmd,
     ProgressDeltaCmd,
     RegisterFileCmd,
     RemoveFileCmd,
-    StateKeeperCmd,
+    StateKeeperMsg,
 )
 
 
 @hydra_dataclass
 class StateKeeperActor:
-    stater_inbox: asyncio.Queue[StateKeeperCmd]
+    stater_inbox: ActorFifoQueue[StateKeeperMsg]
 
     _files: dict[int, File] = field(default_factory=dict[int, File])
     _ui_deltas: defaultdict[int, int] = field(default_factory=lambda: defaultdict(int))
@@ -69,7 +69,7 @@ class StateKeeperActor:
                         await queue.put(dict(self._ui_deltas))
                         self._ui_deltas.clear()
 
-                    case StopMsg():
+                    case TerminalPill():
                         break
 
                     case _:

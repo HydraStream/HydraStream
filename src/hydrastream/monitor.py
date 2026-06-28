@@ -35,11 +35,12 @@ from rich.rule import Rule
 from rich.table import Column, Table
 from rich.text import Text
 
-from hydrastream.actors.stater import GetUIDeltasCmd, StateKeeperCmd
+from hydrastream.actors.stater import GetUIDeltasCmd, StateKeeperMsg
 from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import HydraError, LogFileError, LogStatus
 from hydrastream.interfaces import MonitorBackend
+from hydrastream.messages.base import ActorFifoQueue
 from hydrastream.utils import format_size
 
 
@@ -489,7 +490,7 @@ class RichMonitor(BaseMonitor):
     progress: Progress = field(init=False)
     live: Live = field(init=False)
 
-    state_keeper_q: asyncio.Queue[StateKeeperCmd]
+    state_keeper_q: ActorFifoQueue[StateKeeperMsg]
 
     def __post_init__(self) -> None:
         self.renewal_rate = 1 / self.refresh_per_second
@@ -634,7 +635,7 @@ class RichMonitor(BaseMonitor):
         self.rich.update(self.tasks[file_id], description=new_filename)
 
     async def _ui_refresh_actor(
-        self, state_keeper_q: asyncio.Queue[StateKeeperCmd]
+        self, state_keeper_q: ActorFifoQueue[StateKeeperMsg]
     ) -> None:
         reply_q: asyncio.Queue[dict[int, int]] = asyncio.Queue(maxsize=1)
 
@@ -644,7 +645,7 @@ class RichMonitor(BaseMonitor):
                 await asyncio.sleep(self.renewal_rate)
 
                 # 2. Запрашиваем дельты у базы данных (StateKeeper)
-                await state_keeper_q.put(GetUIDeltasCmd(reply_to=reply_q))
+                await state_keeper_q.send_data(GetUIDeltasCmd(reply_to=reply_q))
                 deltas = await reply_q.get()
 
                 # 3. Отрисовываем!

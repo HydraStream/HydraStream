@@ -10,7 +10,7 @@ from hydrastream.exceptions import (
     LogStatus,
 )
 from hydrastream.interfaces import MonitorBackend, NetworkStream
-from hydrastream.messages.base import StopMsg
+from hydrastream.messages.base import ActorFifoQueue, TerminalPill
 from hydrastream.messages.traffic import (
     CheckpointReachedCmd,
     DiskBufferClearedSignal,
@@ -23,7 +23,7 @@ from hydrastream.messages.traffic import (
 
 @hydra_dataclass
 class ThrottleController:
-    throttler_input: asyncio.Queue[ThrottlerMsg]
+    throttler_input: ActorFifoQueue[ThrottlerMsg]
 
     active_stream: set[NetworkStream] = field(default_factory=set[NetworkStream])
 
@@ -84,7 +84,7 @@ class ThrottleController:
                         # Пришла порция байтов для ограничения скорости юзера
                         await self.enforce_throttling()
 
-                    case StopMsg():
+                    case TerminalPill():
                         break
 
                     case _:

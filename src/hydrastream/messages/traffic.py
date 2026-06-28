@@ -2,12 +2,8 @@ from typing import TypeAlias
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.interfaces import NetworkStream
-from hydrastream.messages.base import StopMsg
-
-
-@hydra_dataclass(frozen=True)
-class NetworkCongestionSignal:
-    pass
+from hydrastream.messages.base import TerminalPill
+from hydrastream.messages.io import WriteChunk
 
 
 @hydra_dataclass(frozen=True)
@@ -26,18 +22,8 @@ class ScaleDownSignal:
 
 
 TrafficSignal: TypeAlias = (
-    NetworkCongestionSignal | MaxLimitSignal | ScaleUpSignal | ScaleDownSignal
+    ScaleDownSignal | ScaleUpSignal | MaxLimitSignal | TerminalPill
 )
-
-
-@hydra_dataclass
-class FlushCmd:
-    pass
-
-
-@hydra_dataclass(frozen=True)
-class FileCompleted:
-    pass
 
 
 @hydra_dataclass(frozen=True)
@@ -66,15 +52,28 @@ class DiskBufferClearedSignal:
 
 
 ThrottlerMsg: TypeAlias = (
-    RegisterStreamCmd
+    CheckpointReachedCmd
+    | RegisterStreamCmd
     | RemoveStreamCmd
     | DiskBufferFullSignal
     | DiskBufferClearedSignal
-    | CheckpointReachedCmd
-    | StopMsg
+    | TerminalPill
 )
 
 
 @hydra_dataclass(frozen=True)
+class FlushCmd:
+    pass
+
+
+DiskMsg: TypeAlias = WriteChunk | FlushCmd | TerminalPill
+
+
+@hydra_dataclass(frozen=True)
 class WriteCompleted:
+    pass
+
+
+@hydra_dataclass(frozen=True)
+class FileCompleted:
     pass

@@ -16,12 +16,16 @@ from hydrastream.interfaces import (
     NetworkBackend,
     StorageBackend,
 )
-from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.base import (
+    ActorFifoQueue,
+    ActorPriorityQueue,
+    TerminalPill,
+)
 from hydrastream.messages.io import LinkData, StreamChunk, WriteChunk
-from hydrastream.messages.state import StateKeeperCmd
+from hydrastream.messages.state import StateKeeperMsg
 from hydrastream.messages.traffic import (
+    DiskMsg,
     FileCompleted,
-    FlushCmd,
     ThrottlerMsg,
     TrafficSignal,
     WriteCompleted,
@@ -55,54 +59,52 @@ class HydraContext:
     # =========================================================================
     # 2. ОЧЕРЕДИ С ПРИОРИТЕТОМ (Priority Queues)
     # =========================================================================
-    links_q: asyncio.PriorityQueue[Envelope[LinkData | StopMsg]] = field(
-        default_factory=asyncio.PriorityQueue[Envelope[LinkData | StopMsg]]
+    links_q: ActorPriorityQueue[LinkData | TerminalPill] = field(
+        default_factory=ActorPriorityQueue[LinkData | TerminalPill]
     )
-    files_q: asyncio.PriorityQueue[Envelope[File | StopMsg]] = field(
-        default_factory=asyncio.PriorityQueue[Envelope[File | StopMsg]]
+    files_q: ActorPriorityQueue[File | TerminalPill] = field(
+        default_factory=ActorPriorityQueue[File | TerminalPill]
     )
-    chunks_q: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]] = field(
-        default_factory=asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
+    chunks_q: ActorPriorityQueue[Chunk | TerminalPill] = field(
+        default_factory=ActorPriorityQueue[Chunk | TerminalPill]
     )
-    ready_chunks_q: asyncio.PriorityQueue[Envelope[Chunk | StopMsg]] = field(
-        default_factory=asyncio.PriorityQueue[Envelope[Chunk | StopMsg]]
+    ready_chunks_q: ActorPriorityQueue[Chunk | TerminalPill] = field(
+        default_factory=ActorPriorityQueue[Chunk | TerminalPill]
     )
-    stream_chunks_q: asyncio.PriorityQueue[Envelope[StreamChunk | StopMsg]] = field(
-        default_factory=asyncio.PriorityQueue[Envelope[StreamChunk | StopMsg]]
+    stream_chunks_q: ActorPriorityQueue[StreamChunk | TerminalPill] = field(
+        default_factory=ActorPriorityQueue[StreamChunk | TerminalPill]
     )
 
     # =========================================================================
     # 3. ОБЫЧНЫЕ ОЧЕРЕДИ (FIFO Queues)
     # =========================================================================
     # Диск и агрегация
-    disk_q: asyncio.Queue[WriteChunk | FlushCmd | StopMsg] = field(
-        default_factory=asyncio.Queue[WriteChunk | FlushCmd | StopMsg]
+    disk_q: ActorFifoQueue[DiskMsg] = field(default_factory=ActorFifoQueue[DiskMsg])
+    writer_q: ActorFifoQueue[list[WriteChunk] | TerminalPill] = field(
+        default_factory=ActorFifoQueue[list[WriteChunk] | TerminalPill]
     )
-    writer_q: asyncio.Queue[list[WriteChunk] | StopMsg] = field(
-        default_factory=asyncio.Queue[list[WriteChunk] | StopMsg]
-    )
-    ack_q: asyncio.Queue[WriteCompleted | StopMsg] = field(
-        default_factory=asyncio.Queue[WriteCompleted | StopMsg]
+    ack_q: ActorFifoQueue[WriteCompleted | TerminalPill] = field(
+        default_factory=ActorFifoQueue[WriteCompleted | TerminalPill]
     )
 
     # Управление и телеметрия
-    throttler_q: asyncio.Queue[ThrottlerMsg] = field(
-        default_factory=asyncio.Queue[ThrottlerMsg]
+    throttler_q: ActorFifoQueue[ThrottlerMsg] = field(
+        default_factory=ActorFifoQueue[ThrottlerMsg]
     )
-    controller_q: asyncio.Queue[TrafficSignal] = field(
-        default_factory=asyncio.Queue[TrafficSignal]
+    controller_q: ActorFifoQueue[TrafficSignal] = field(
+        default_factory=ActorFifoQueue[TrafficSignal]
     )
-    state_q: asyncio.Queue[StateKeeperCmd] = field(
-        default_factory=asyncio.Queue[StateKeeperCmd]
+    state_q: ActorFifoQueue[StateKeeperMsg] = field(
+        default_factory=ActorFifoQueue[StateKeeperMsg]
     )
     credit_q: asyncio.Queue[int] = field(default_factory=asyncio.Queue[int])
 
     # Жизненный цикл файлов
-    file_limit_q: asyncio.Queue[FileCompleted] = field(
-        default_factory=asyncio.Queue[FileCompleted]
+    file_limit_q: ActorFifoQueue[FileCompleted] = field(
+        default_factory=ActorFifoQueue[FileCompleted]
     )
-    file_discovery_q: asyncio.Queue[File | StopMsg] = field(
-        default_factory=asyncio.Queue[File | StopMsg]
+    file_discovery_q: ActorFifoQueue[File | TerminalPill] = field(
+        default_factory=ActorFifoQueue[File | TerminalPill]
     )
 
     workers: int = field(init=False)
@@ -121,8 +123,6 @@ class HydraContext:
 
     # Будут созданы в __post_init__ в зависимости от конфига
     worker_events: list[asyncio.Event] = field(init=False)
-    worker_barrier: asyncio.Barrier = field(init=False)
-    resolver_barrier: asyncio.Barrier = field(init=False)
 
     def __post_init__(self) -> None:
         if self.config.custom_monitor is None:
@@ -181,5 +181,3 @@ class HydraContext:
         self.start_works = 5 if self.workers >= 5 else self.workers
         # Создаем массив светофоров и барьер под конкретное количество потоков!
         self.worker_events = [asyncio.Event() for _ in range(self.workers)]
-        self.worker_barrier = asyncio.Barrier(self.workers)
-        self.resolver_barrier = asyncio.Barrier(self.resolvers)

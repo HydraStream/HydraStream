@@ -169,7 +169,7 @@ class File:
     fd: int | None = field(default=None, repr=False)
     verified: bool = field(default=False)
     is_failed: bool = field(default=False)
-    # _stream_queue: asyncio.Queue[Envelope[StreamChunk | None]] | None = None
+    # _stream_queue: ActorFifoQueue[StreamChunk | None]] | None = None
 
     def create_chunks(self) -> None:
         if self.chunks:

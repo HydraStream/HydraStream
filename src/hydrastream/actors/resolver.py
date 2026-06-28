@@ -4,7 +4,7 @@
 import asyncio
 import random
 from abc import ABC, abstractmethod
-from typing import TypedDict, cast
+from typing import TypedDict
 
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
@@ -17,9 +17,14 @@ from hydrastream.interfaces import (
     NetworkBackend,
     StorageBackend,
 )
-from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.base import (
+    ActorFifoQueue,
+    ActorPriorityQueue,
+    StandardPill,
+    TerminalPill,
+)
 from hydrastream.messages.io import LinkData
-from hydrastream.messages.state import ProgressDeltaCmd, RegisterFileCmd, StateKeeperCmd
+from hydrastream.messages.state import ProgressDeltaCmd, RegisterFileCmd, StateKeeperMsg
 from hydrastream.providers import ProviderRouter
 from hydrastream.utils import extract_filename, redact_url
 
@@ -28,12 +33,10 @@ class BaseResolverKwargs(TypedDict):
     threads: int
     MIN_CHUNK: int
 
-    links_inbox: asyncio.PriorityQueue[Envelope[LinkData | StopMsg]]
+    links_inbox: ActorPriorityQueue[LinkData | TerminalPill]
 
-    files_outbox: asyncio.PriorityQueue[Envelope[File | StopMsg]]
-    state_outbox: asyncio.Queue[StateKeeperCmd]
-
-    barrier: asyncio.Barrier
+    files_outbox: ActorPriorityQueue[File | TerminalPill]
+    state_outbox: ActorFifoQueue[StateKeeperMsg]
 
     all_complete: asyncio.Event
 
@@ -51,11 +54,9 @@ class BaseMetadataResolver(ABC):
     threads: int
     MIN_CHUNK: int
 
-    links_inbox: asyncio.PriorityQueue[Envelope[LinkData | StopMsg]]
-    files_outbox: asyncio.PriorityQueue[Envelope[File | StopMsg]]
-    state_outbox: asyncio.Queue[StateKeeperCmd]
-
-    barrier: asyncio.Barrier
+    links_inbox: ActorPriorityQueue[LinkData | TerminalPill]
+    files_outbox: ActorPriorityQueue[File | TerminalPill]
+    state_outbox: ActorFifoQueue[StateKeeperMsg]
 
     all_complete: asyncio.Event
 
@@ -71,13 +72,10 @@ class BaseMetadataResolver(ABC):
         """Это ШАБЛОННЫЙ МЕТОД. Наследники не переопределяют его!"""
         checksum = None
         while True:
-            envelope = await self.links_inbox.get()
-            msg = envelope.payload
+            msg = await self.links_inbox.get()
 
             match msg:
                 case LinkData() as data:
-                    envelope = cast(Envelope[LinkData], envelope)
-
                     try:
                         meta = await self._fetch_metadata(data.url)
                         filename, total_size, supports_ranges = meta
@@ -98,15 +96,15 @@ class BaseMetadataResolver(ABC):
                         await self._register_file(file_obj)
 
                     except Exception as e:
-                        await self._handle_error(e, envelope)
+                        await self._handle_error(e, msg)
 
-                case StopMsg():
-                    position = await self.barrier.wait()
+                case StandardPill():
+                    break
 
-                    if position == 0:
-                        await self.files_outbox.put(Envelope.poison_pill())
-                        if self.is_dry_run:
-                            self.all_complete.set()
+                case TerminalPill():
+                    await self.files_outbox.send_poison_pills()
+                    if self.is_dry_run:
+                        self.all_complete.set()
                     break
 
                 case _:
@@ -123,17 +121,15 @@ class BaseMetadataResolver(ABC):
         """Общая логика регистрации, внутри которой есть ХУК для наследников."""
         filename = file_obj.meta.original_filename
 
-        await self.state_outbox.put(
-            RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
+        await self.state_outbox.send_data(
+            data=RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
         )
         self.ui.add_file(file_obj.meta.id, filename, file_obj.meta.content_length)
 
         # ВЫЗЫВАЕМ ХУК (Стрим проигнорирует, Диск - обновит UI)
         await self._on_file_registered(file_obj)
 
-        await self.files_outbox.put(
-            Envelope(sort_key=(file_obj.meta.id,), payload=file_obj)
-        )
+        await self.files_outbox.send_data(sort_key=(file_obj.meta.id,), data=file_obj)
 
     @abstractmethod
     async def _prepare_file_object(
@@ -153,7 +149,7 @@ class BaseMetadataResolver(ABC):
     async def _handle_error(
         self,
         e: Exception,
-        envelope: Envelope[LinkData],
+        data: LinkData,
     ) -> None:
         """Возвращает True, если нужно пропустить итерацию (continue)."""
 
@@ -165,19 +161,19 @@ class BaseMetadataResolver(ABC):
                 # Постоянные ошибки: логируем и забываем
                 if status in {400, 401, 403, 404, 410, 416}:
                     await self.ui.log(
-                        f"Link {redact_url(envelope.payload.url)} failed permanently "
+                        f"Link {redact_url(data.url)} failed permanently "
                         f"(HTTP {status}).",
                         status=LogStatus.ERROR,
                     )
 
                 # Временные ошибки сервера (5xx, 429) — в очередь
-                await self._requeue_chunk(envelope, delay_range=(0.5, 2.0))
+                await self._requeue_chunk(data, delay_range=(0.5, 2.0))
             else:
                 # Сетевая ошибка без ответа
-                await self._requeue_chunk(envelope)
+                await self._requeue_chunk(data)
 
         if isinstance(e, TimeoutError):
-            await self._requeue_chunk(envelope)
+            await self._requeue_chunk(data)
 
         # Если мы здесь, значит ошибка критическая (Exception)
         await self.ui.log(
@@ -187,10 +183,10 @@ class BaseMetadataResolver(ABC):
 
     async def _requeue_chunk(
         self,
-        envelope: Envelope[LinkData],
+        data: LinkData,
         delay_range: tuple[float, float] = (1.0, 3.0),
     ) -> None:
-        await self.links_inbox.put(envelope)
+        await self.links_inbox.send_data(data)
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
@@ -316,7 +312,7 @@ class DiskMetadataResolver(BaseMetadataResolver):
 
     async def _on_file_registered(self, file_obj: File) -> None:
         filename = file_obj.meta.original_filename
-        await self.state_outbox.put(
+        await self.state_outbox.send_data(
             RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
         )
         chunks = file_obj.chunks or []
@@ -324,9 +320,7 @@ class DiskMetadataResolver(BaseMetadataResolver):
         self.ui.add_file(file_obj.meta.id, filename, file_obj.meta.content_length)
         downloaded = sum(c.uploaded for c in chunks)
         if downloaded - len(chunks) > 0:
-            await self.state_outbox.put(
+            await self.state_outbox.send_data(
                 ProgressDeltaCmd(file_id=file_obj.meta.id, delta_bytes=downloaded)
             )
-        await self.files_outbox.put(
-            Envelope(sort_key=(file_obj.meta.id,), payload=file_obj)
-        )
+        await self.files_outbox.send_data(sort_key=(file_obj.meta.id,), data=file_obj)

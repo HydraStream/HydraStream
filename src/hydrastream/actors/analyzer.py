@@ -5,6 +5,7 @@ import time
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import MonitorBackend
+from hydrastream.messages.base import ActorFifoQueue
 from hydrastream.messages.traffic import ScaleDownSignal, ScaleUpSignal, TrafficSignal
 from hydrastream.utils import format_size
 
@@ -14,7 +15,7 @@ class TelemetryAnalyzer:
     threads: int
     _current_limit: int
     analyzer_checkpoint_event: asyncio.Event
-    controller_outbox: asyncio.Queue[TrafficSignal]
+    controller_outbox: ActorFifoQueue[TrafficSignal]
     _smoothed_speed: float = 0.0
     _prev_speed: float = 0.0
     _tau: float = 1.0
@@ -100,7 +101,7 @@ class TelemetryAnalyzer:
 
         # Применяем изменения
         if self.dynamic_limit != self._current_limit:
-            await self.controller_outbox.put(
+            await self.controller_outbox.send_data(
                 ScaleUpSignal()
                 if self._current_limit > self.dynamic_limit
                 else ScaleDownSignal()

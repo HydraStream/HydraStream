@@ -4,18 +4,19 @@
 import asyncio
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
+from hydrastream.messages.base import ActorFifoQueue
 from hydrastream.messages.traffic import (
     MaxLimitSignal,
-    NetworkCongestionSignal,
     ScaleDownSignal,
     ScaleUpSignal,
+    TerminalPill,
     TrafficSignal,
 )
 
 
 @hydra_dataclass
 class TrafficController:
-    reg_events_q: asyncio.Queue[TrafficSignal]
+    reg_events_q: ActorFifoQueue[TrafficSignal]
     worker_events: list[asyncio.Event]
     stop_analyzer: asyncio.Event
     analyzer_checkpoint_event: asyncio.Event
@@ -32,7 +33,7 @@ class TrafficController:
             msg = await self.reg_events_q.get()
 
             match msg:
-                case NetworkCongestionSignal() | ScaleDownSignal():
+                case TerminalPill() | ScaleDownSignal():
                     self.dynamic_limit = max(1, self.dynamic_limit - 1)
 
                 case ScaleUpSignal():

@@ -2,7 +2,6 @@
 # Licensed under the MIT License.
 
 import asyncio
-import contextlib
 import random
 import signal
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -35,7 +34,7 @@ from hydrastream.domain.entities import Checksum, File, TypeHash
 from hydrastream.exceptions import (
     LogStatus,
 )
-from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.base import TerminalPill
 from hydrastream.messages.state import GetSnapshotCmd
 
 Ts = TypeVarTuple("Ts")
@@ -79,9 +78,8 @@ async def stop(ctx: HydraContext, complete: bool = False) -> None:
         )
 
         if ctx.is_stream:
-            with contextlib.suppress(asyncio.QueueFull):
-                ctx.stream_chunks_q.put_nowait(Envelope.poison_pill())
-                ctx.file_discovery_q.put_nowait(StopMsg())
+            ctx.stream_chunks_q.send_poison_pills_nowait()
+            ctx.file_discovery_q.send_poison_pills_nowait()
 
 
 async def prepare_runtime(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
@@ -116,7 +114,6 @@ async def _bootstrap_engine(
         "links_inbox": ctx.links_q,
         "files_outbox": ctx.files_q,
         "state_outbox": ctx.state_q,
-        "barrier": ctx.resolver_barrier,
         "all_complete": ctx.all_complete,
         "is_dry_run": ctx.config.dry_run,
         "is_verify": ctx.config.verify,
@@ -153,24 +150,26 @@ async def _bootstrap_engine(
 
     if not ctx.config.dry_run:
         dispatcher = (
-            DiskFileDispatcher(
+            StreamFileDispatcher(
                 limit=ctx.config.threads,
                 files_inbox=ctx.files_q,
                 chunks_outbox=ctx.chunks_q,
                 file_limit_inbox=ctx.file_limit_q,
-                ui=ctx.ui,
-                is_debug=ctx.config.debug,
-                fs=ctx.fs,
-            )
-            if not ctx.is_stream
-            else StreamFileDispatcher(
-                limit=ctx.config.threads,
-                files_inbox=ctx.files_q,
-                chunks_outbox=ctx.chunks_q,
-                file_limit_inbox=ctx.file_limit_q,
+                num_workers=1,
                 file_discovery=ctx.file_discovery_q,
                 ui=ctx.ui,
                 is_debug=ctx.config.debug,
+            )
+            if ctx.is_stream
+            else DiskFileDispatcher(
+                limit=ctx.config.threads,
+                files_inbox=ctx.files_q,
+                chunks_outbox=ctx.chunks_q,
+                file_limit_inbox=ctx.file_limit_q,
+                num_workers=ctx.workers,
+                ui=ctx.ui,
+                is_debug=ctx.config.debug,
+                fs=ctx.fs,
             )
         )
         tg.create_task(dispatcher.run(), name="FileDispatcher")
@@ -181,6 +180,9 @@ async def _bootstrap_engine(
                 chunk_outbox=ctx.ready_chunks_q,
                 credit_inbox=ctx.credit_q,
                 budget=ctx.config.BUFFER_SIZE,
+                num_workers=ctx.workers,
+                ui=ctx.ui,
+                is_debug=ctx.config.debug,
             )
             tg.create_task(memory_throttler.run(), name="MemoryThrottler")
 
@@ -189,7 +191,6 @@ async def _bootstrap_engine(
             "controller_outbox": ctx.controller_q,
             "state_outbox": ctx.state_q,
             "all_complete": ctx.all_complete,
-            "barrier": ctx.worker_barrier,
             "ui": ctx.ui,
             "net": ctx.net,
             "is_debug": ctx.config.debug,
@@ -280,7 +281,10 @@ async def _bootstrap_engine(
         tg.create_task(throttler.run(), name="ThrottleController")
 
     feeder = LinkFeeder(
-        links=links, expected_checksums=expected_checksums, links_outbox=ctx.links_q
+        links=links,
+        expected_checksums=expected_checksums,
+        links_outbox=ctx.links_q,
+        num_resolvers=ctx.resolvers,
     )
     tg.create_task(feeder.run(), name="LinkFeeder")
 
@@ -325,7 +329,7 @@ async def stream_all(
                                 )
                                 yield filename, file_gen
 
-                            case StopMsg():
+                            case TerminalPill():
                                 break
 
                             case _:
@@ -374,7 +378,7 @@ async def run_downloads(
 
             if ctx.config.dry_run:
                 _get_shapshot: asyncio.Queue[dict[int, File]] = asyncio.Queue()
-                await ctx.state_q.put(GetSnapshotCmd(reply_to=_get_shapshot))
+                await ctx.state_q.send_data(GetSnapshotCmd(reply_to=_get_shapshot))
                 files = await _get_shapshot.get()
                 await ctx.ui.dry_run(files, ctx.config.output_dir)
 

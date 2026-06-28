@@ -1,9 +1,11 @@
-import asyncio
 from collections.abc import Iterable
 
 from hydrastream.domain.entities import Checksum, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.messages.base import Envelope, StopMsg
+from hydrastream.messages.base import (
+    ActorPriorityQueue,
+    TerminalPill,
+)
 from hydrastream.messages.io import LinkData
 
 
@@ -11,7 +13,8 @@ from hydrastream.messages.io import LinkData
 class LinkFeeder:
     links: str | Iterable[str]
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None
-    links_outbox: asyncio.PriorityQueue[Envelope[LinkData | StopMsg]]
+    links_outbox: ActorPriorityQueue[LinkData | TerminalPill]
+    num_resolvers: int
 
     async def run(
         self,
@@ -24,10 +27,8 @@ class LinkFeeder:
                     checksums = Checksum(algorithm=checksums[0], value=checksums[1])
             else:
                 self.expected_checksums = None
-            await self.links_outbox.put(
-                Envelope(
-                    sort_key=(id,),
-                    payload=LinkData(id=id, url=link, checksum=checksums),
-                )
+            await self.links_outbox.send_data(
+                data=LinkData(id=id, url=link, checksum=checksums),
+                sort_key=(id,),
             )
-        await self.links_outbox.put(Envelope.poison_pill())
+        await self.links_outbox.send_poison_pills(count=self.num_resolvers)

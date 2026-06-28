@@ -4,7 +4,7 @@ from dataclasses import field
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import MonitorBackend, StorageBackend
-from hydrastream.messages.base import StopMsg
+from hydrastream.messages.base import ActorFifoQueue, TerminalPill
 from hydrastream.messages.io import WriteChunk
 from hydrastream.messages.traffic import (
     DiskBufferClearedSignal,
@@ -17,10 +17,10 @@ from hydrastream.messages.traffic import (
 
 @hydra_dataclass
 class DiskAggregator:
-    disk_inbox: asyncio.Queue[WriteChunk | FlushCmd | StopMsg]
-    throttler_outbox: asyncio.Queue[ThrottlerMsg]
-    ack_inbox: asyncio.Queue[WriteCompleted | StopMsg]
-    writer_outbox: asyncio.Queue[list[WriteChunk] | StopMsg]
+    disk_inbox: ActorFifoQueue[WriteChunk | FlushCmd | TerminalPill]
+    throttler_outbox: ActorFifoQueue[ThrottlerMsg]
+    ack_inbox: ActorFifoQueue[WriteCompleted | TerminalPill]
+    writer_outbox: ActorFifoQueue[list[WriteChunk] | TerminalPill]
     flush_event: asyncio.Event
     MAX_BUFFER: int
 
@@ -51,10 +51,10 @@ class DiskAggregator:
 
                         self.flush_event.set()
 
-                    case StopMsg():
+                    case TerminalPill():
                         await self._persist_buffer()
 
-                        await self.writer_outbox.put(StopMsg())
+                        await self.writer_outbox.send_poison_pills()
                         break
 
                     case _:
@@ -77,7 +77,7 @@ class DiskAggregator:
     async def _persist_buffer(self) -> None:
 
         if self._is_writing_now:
-            await self.throttler_outbox.put(DiskBufferFullSignal())
+            await self.throttler_outbox.send_data(DiskBufferFullSignal())
 
             try:
                 async with asyncio.timeout(60.0):
@@ -89,11 +89,11 @@ class DiskAggregator:
                 ) from e
 
             self._is_writing_now = False
-            await self.throttler_outbox.put(DiskBufferClearedSignal())
+            await self.throttler_outbox.send_data(DiskBufferClearedSignal())
 
         if self._current_buffer:
             batch = await self._coalesce(self._current_buffer)
-            await self.writer_outbox.put(batch)
+            await self.writer_outbox.send_data(batch)
 
             self._is_writing_now = True
             self._current_buffer.clear()
