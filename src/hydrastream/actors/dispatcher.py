@@ -11,6 +11,8 @@ from hydrastream.interfaces import MonitorBackend, StorageBackend
 from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
+    PoisonPill,
+    StandardPill,
     TerminalPill,
 )
 from hydrastream.messages.traffic import FileCompleted
@@ -22,8 +24,8 @@ class BaseFileDispatcher(ABC):
     current_files: int = 0
     num_workers: int
 
-    files_inbox: ActorPriorityQueue[File | TerminalPill]
-    chunks_outbox: ActorPriorityQueue[Chunk | TerminalPill]
+    files_inbox: ActorPriorityQueue[File | PoisonPill]
+    chunks_outbox: ActorPriorityQueue[Chunk | PoisonPill]
     file_limit_inbox: ActorFifoQueue[FileCompleted]
 
     ui: MonitorBackend
@@ -40,7 +42,6 @@ class BaseFileDispatcher(ABC):
                     if self.current_files >= self.limit:
                         await self.file_limit_inbox.get()
                         self.current_files -= 1
-                        continue
 
                     self.current_files += 1
 
@@ -64,7 +65,7 @@ class BaseFileDispatcher(ABC):
                                 data=c,
                             )
 
-                case TerminalPill():
+                case StandardPill() | TerminalPill():
                     await self.chunks_outbox.send_poison_pills(self.num_workers)
                     break
 
@@ -91,7 +92,7 @@ class BaseFileDispatcher(ABC):
 
 @hydra_dataclass
 class StreamFileDispatcher(BaseFileDispatcher):
-    file_discovery: ActorFifoQueue[File | TerminalPill]
+    file_discovery: ActorFifoQueue[File | PoisonPill]
 
     async def _prepare_file(self, file_obj: File) -> None:
         # Для стрима просто закидываем файл в трубу (имя не меняется)

@@ -4,7 +4,7 @@ from hydrastream.domain.entities import Checksum, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.messages.base import (
     ActorPriorityQueue,
-    TerminalPill,
+    PoisonPill,
 )
 from hydrastream.messages.io import LinkData
 
@@ -13,7 +13,7 @@ from hydrastream.messages.io import LinkData
 class LinkFeeder:
     links: str | Iterable[str]
     expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None
-    links_outbox: ActorPriorityQueue[LinkData | TerminalPill]
+    links_outbox: ActorPriorityQueue[LinkData | PoisonPill]
     num_resolvers: int
 
     async def run(

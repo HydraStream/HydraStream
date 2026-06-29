@@ -4,7 +4,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Coroutine
 from dataclasses import field
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 
@@ -24,14 +24,17 @@ class _Envelope(Generic[T_co]):
 
 @hydra_dataclass(frozen=True)
 class TerminalPill:
-    pass
+    """Последняя пилюля. Должна достаться только 'последнему выжившему'."""
 
 
 @hydra_dataclass(frozen=True)
-class StandardPill(TerminalPill):
+class StandardPill:
     """Обычная пилюля. Останавливает любой свободный воркер."""
 
     pass
+
+
+PoisonPill: TypeAlias = StandardPill | TerminalPill
 
 
 @hydra_dataclass(frozen=True)
@@ -54,7 +57,7 @@ class ActorQueue(Generic[T], ABC):
         pass
 
     @abstractmethod
-    async def get(self) -> T | TerminalPill:
+    async def get(self) -> T | PoisonPill:
         pass
 
     @abstractmethod
@@ -67,7 +70,7 @@ class ActorFifoQueue(ActorQueue[T]):
     """Реализация для стандартной FIFO очереди."""
 
     maxsize: int = 0
-    _raw_queue: asyncio.Queue[T | TerminalPill] = field(init=False, repr=False)
+    _raw_queue: asyncio.Queue[T | PoisonPill] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_raw_queue", asyncio.Queue(maxsize=self.maxsize))
@@ -86,7 +89,7 @@ class ActorFifoQueue(ActorQueue[T]):
                 self._raw_queue.put_nowait(StandardPill())
             self._raw_queue.put_nowait(TerminalPill())
 
-    async def get(self) -> T | TerminalPill:
+    async def get(self) -> T | PoisonPill:
         return await self._raw_queue.get()
 
     def empty(self) -> bool:
@@ -98,7 +101,7 @@ class ActorPriorityQueue(ActorQueue[T]):
     """Реализация для приоритетной очереди."""
 
     maxsize: int = 0
-    _raw_queue: asyncio.PriorityQueue[_Envelope[T | TerminalPill]] = field(
+    _raw_queue: asyncio.PriorityQueue[_Envelope[T | PoisonPill]] = field(
         init=False, repr=False
     )
 
@@ -130,7 +133,7 @@ class ActorPriorityQueue(ActorQueue[T]):
                 _Envelope(sort_key=(sys.maxsize,), payload=TerminalPill())
             )
 
-    async def get(self) -> T | TerminalPill:
+    async def get(self) -> T | PoisonPill:
         env = await self._raw_queue.get()
         return env.payload
 

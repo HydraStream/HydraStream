@@ -19,6 +19,7 @@ from hydrastream.exceptions import (
     InsufficientSpaceError,
     StateSaveError,
 )
+from hydrastream.utils import debug_allocated_file
 
 
 class LocalStorageManager:
@@ -27,6 +28,7 @@ class LocalStorageManager:
         self.state_dir = self.output_dir / ".states"
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self._active_fds: set[int] = set()
         self.debug = debug
 
     def allocate_space(self, filename: str, size: int) -> str | None:
@@ -41,14 +43,17 @@ class LocalStorageManager:
         if filepath.is_file():
             filepath = self.get_unique_path(filepath)
 
-        fd = os.open(filepath, os.O_RDWR | os.O_CREAT)
+        fd = None
         try:
+            fd = os.open(filepath, os.O_RDWR | os.O_CREAT)
+
             if hasattr(os, "posix_fallocate") and size > 0:
                 os.posix_fallocate(fd, 0, size)
             else:
                 os.ftruncate(fd, size)
         finally:
-            os.close(fd)
+            if fd is not None:
+                os.close(fd)
 
         if filepath.name != filename:
             return filepath.name
@@ -56,7 +61,9 @@ class LocalStorageManager:
 
     def open_file(self, filename: str) -> int:
         filepath = self.output_dir / filename
-        return os.open(filepath, os.O_RDWR)
+        fd = os.open(filepath, os.O_RDWR)
+        self._active_fds.add(fd)
+        return fd
 
     def write_chunk_data(
         self, fd_or_conn: int, data_bytes: list[bytes], len_data: int, offset: int
@@ -78,33 +85,45 @@ class LocalStorageManager:
         self, fd: int, data_bytes: list[bytes], len_data: int, offset: int
     ) -> None:
         """Сложная векторная запись (Zero-Copy) для
-        Linux/macOS с обработкой частичной записи."""
-        views = [memoryview(b) for b in data_bytes]
-        written = 0
-        retries = 0
+        Linux/macOS с обходом лимита IOV_MAX и точной обработкой частичной записи."""
 
-        # Флаг RWF_DSYNC есть только в новых версиях Python/Linux
-        flags = os.RWF_DSYNC if hasattr(os, "RWF_DSYNC") else 0
+        # Задаем жесткий безопасный лимит. Использование динамического getattr
+        # может вернуть слишком большое число, лучше ограничить до стабильных 1000.
+        IOV_MAX = 1000  # noqa: N806
 
-        while written < len_data:
-            try:
-                if flags:
-                    n = os.pwritev(fd, views, offset + written, flags)
-                else:
-                    n = os.pwritev(fd, views, offset + written)
+        current_offset = offset
 
-                if n <= 0:
-                    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        # Внешний цикл: двигаемся по списку data_bytes строгими пачками
+        for i in range(0, len(data_bytes), IOV_MAX):
+            batch_bytes = data_bytes[i : i + IOV_MAX]
+            views = [memoryview(b) for b in batch_bytes]
 
-                written += n
+            # Считаем точную длину только текущей пачки
+            batch_len = sum(len(v) for v in views)
 
-                # Если ядро не смогло записать всё за один раз, перестраиваем векторы
-                if written < len_data:
-                    views = self._rebuild_memoryviews(views, n)
+            written = 0
+            retries = 0
 
-            except OSError as e:
-                self._handle_io_retry(e, retries)
-                retries += 1
+            while written < batch_len:
+                try:
+                    # Теперь мы передаем ВЕСЬ массив views текущей пачки,
+                    # так как он гарантированно меньше или равен IOV_MAX
+                    n = os.pwritev(fd, views, current_offset)
+
+                    if n <= 0:
+                        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+                    written += n
+                    current_offset += (
+                        n  # Сдвигаем смещение для следующего вызова pwritev
+                    )
+
+                    if written < batch_len:
+                        views = self._rebuild_memoryviews(views, n)
+
+                except OSError as e:
+                    self._handle_io_retry(e, retries)
+                    retries += 1
 
     def _write_windows_merged(
         self, fd: int, data_bytes: list[bytes], len_data: int, offset: int
@@ -149,8 +168,18 @@ class LocalStorageManager:
             raise e
 
     def close_file(self, fd_or_conn: int) -> None:
-        with contextlib.suppress(OSError):
-            os.close(fd_or_conn)
+        if fd_or_conn in self._active_fds:
+            try:
+                os.close(fd_or_conn)
+            except OSError:
+                pass
+            finally:
+                self._active_fds.discard(fd_or_conn)
+
+    def force_close_all(self) -> None:
+        for fd in list(self._active_fds):
+            with contextlib.suppress(OSError):
+                self.close_file(fd)
 
     def delete_file(self, filename: str) -> None:
         filepath = self.output_dir / filename
@@ -265,6 +294,7 @@ class LocalStorageManager:
 
         if calculated != expected_checksum:
             filepath = self.output_dir / filename
+            debug_allocated_file(self.output_dir / "original" / filename, filepath)
             filepath.unlink(missing_ok=True)
             raise HashMismatchError(
                 filename=filename,

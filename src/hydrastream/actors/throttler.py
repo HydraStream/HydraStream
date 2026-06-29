@@ -10,7 +10,11 @@ from hydrastream.exceptions import (
     LogStatus,
 )
 from hydrastream.interfaces import MonitorBackend, NetworkStream
-from hydrastream.messages.base import ActorFifoQueue, TerminalPill
+from hydrastream.messages.base import (
+    ActorFifoQueue,
+    StandardPill,
+    TerminalPill,
+)
 from hydrastream.messages.traffic import (
     CheckpointReachedCmd,
     DiskBufferClearedSignal,
@@ -28,29 +32,20 @@ class ThrottleController:
     active_stream: set[NetworkStream] = field(default_factory=set[NetworkStream])
 
     speed_limit: float | None
-    _frequency_speed_limit: int = 10
-    _time_speed_limit: float = field(init=False)
-    _bytes_to_check: int = field(init=False)
+    bytes_to_check: int
     _prev_bytes: int = 0
     _last_checkpoint_time: float = 0.0
-    _target_time: float = 0.0
 
     is_debug: bool
     ui: MonitorBackend
 
     all_complete: asyncio.Event
-    throttler_checkpoint_event: asyncio.Event
 
     is_disk_choked: bool = False
 
     def __post_init__(self) -> None:
-        self._time_speed_limit = 1 / self._frequency_speed_limit
         if self.speed_limit:
             self.speed_limit = self.speed_limit * 1024**2
-            self._bytes_to_check = int(self.speed_limit / self._frequency_speed_limit)
-            self._target_time = self._bytes_to_check / self.speed_limit
-        else:
-            self._bytes_to_check = 5 * 1024**2
 
     async def run(self) -> None:  # noqa
         self._last_checkpoint_time = time.monotonic()
@@ -80,11 +75,11 @@ class ThrottleController:
                         self.is_disk_choked = False
                         self._set_curl_speed_limit(limit=0)
 
-                    case CheckpointReachedCmd():
-                        # Пришла порция байтов для ограничения скорости юзера
+                    case CheckpointReachedCmd(new_btc=btc):
+                        self.bytes_to_check = btc
                         await self.enforce_throttling()
 
-                    case TerminalPill():
+                    case StandardPill() | TerminalPill():
                         break
 
                     case _:
@@ -111,7 +106,7 @@ class ThrottleController:
         if elapsed <= 0 or not self.speed_limit:
             return
 
-        target_time = self._bytes_to_check / self.speed_limit
+        target_time = self.bytes_to_check / self.speed_limit
 
         if elapsed < target_time:
             sleep_duration = target_time - elapsed

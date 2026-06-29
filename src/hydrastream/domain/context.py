@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import field
+from functools import partial
 
 from hydrastream.adapters.network_curl import CurlNetworkAdapter
 from hydrastream.domain.config import HydraConfig
@@ -19,7 +20,7 @@ from hydrastream.interfaces import (
 from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
-    TerminalPill,
+    PoisonPill,
 )
 from hydrastream.messages.io import LinkData, StreamChunk, WriteChunk
 from hydrastream.messages.state import StateKeeperMsg
@@ -59,20 +60,20 @@ class HydraContext:
     # =========================================================================
     # 2. ОЧЕРЕДИ С ПРИОРИТЕТОМ (Priority Queues)
     # =========================================================================
-    links_q: ActorPriorityQueue[LinkData | TerminalPill] = field(
-        default_factory=ActorPriorityQueue[LinkData | TerminalPill]
+    links_q: ActorPriorityQueue[LinkData | PoisonPill] = field(
+        default_factory=partial(ActorPriorityQueue[LinkData | PoisonPill])
     )
-    files_q: ActorPriorityQueue[File | TerminalPill] = field(
-        default_factory=ActorPriorityQueue[File | TerminalPill]
+    files_q: ActorPriorityQueue[File | PoisonPill] = field(
+        default_factory=ActorPriorityQueue[File | PoisonPill]
     )
-    chunks_q: ActorPriorityQueue[Chunk | TerminalPill] = field(
-        default_factory=ActorPriorityQueue[Chunk | TerminalPill]
+    chunks_q: ActorPriorityQueue[Chunk | PoisonPill] = field(
+        default_factory=ActorPriorityQueue[Chunk | PoisonPill]
     )
-    ready_chunks_q: ActorPriorityQueue[Chunk | TerminalPill] = field(
-        default_factory=ActorPriorityQueue[Chunk | TerminalPill]
+    ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill] = field(
+        default_factory=ActorPriorityQueue[Chunk | PoisonPill]
     )
-    stream_chunks_q: ActorPriorityQueue[StreamChunk | TerminalPill] = field(
-        default_factory=ActorPriorityQueue[StreamChunk | TerminalPill]
+    stream_chunks_q: ActorPriorityQueue[StreamChunk | PoisonPill] = field(
+        default_factory=ActorPriorityQueue[StreamChunk | PoisonPill]
     )
 
     # =========================================================================
@@ -80,11 +81,11 @@ class HydraContext:
     # =========================================================================
     # Диск и агрегация
     disk_q: ActorFifoQueue[DiskMsg] = field(default_factory=ActorFifoQueue[DiskMsg])
-    writer_q: ActorFifoQueue[list[WriteChunk] | TerminalPill] = field(
-        default_factory=ActorFifoQueue[list[WriteChunk] | TerminalPill]
+    writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill] = field(
+        default_factory=ActorFifoQueue[list[WriteChunk] | PoisonPill]
     )
-    ack_q: ActorFifoQueue[WriteCompleted | TerminalPill] = field(
-        default_factory=ActorFifoQueue[WriteCompleted | TerminalPill]
+    ack_q: ActorFifoQueue[WriteCompleted | PoisonPill] = field(
+        default_factory=ActorFifoQueue[WriteCompleted | PoisonPill]
     )
 
     # Управление и телеметрия
@@ -103,22 +104,20 @@ class HydraContext:
     file_limit_q: ActorFifoQueue[FileCompleted] = field(
         default_factory=ActorFifoQueue[FileCompleted]
     )
-    file_discovery_q: ActorFifoQueue[File | TerminalPill] = field(
-        default_factory=ActorFifoQueue[File | TerminalPill]
+    file_discovery_q: ActorFifoQueue[File | PoisonPill] = field(
+        default_factory=ActorFifoQueue[File | PoisonPill]
     )
 
     workers: int = field(init=False)
     start_works: int = field(init=False)
-    resolvers: int = 20
+    resolvers: int = 1
 
     # =========================================================================
     # 4. СОБЫТИЯ И БАРЬЕРЫ (Синхронизация)
     # =========================================================================
     all_complete: asyncio.Event = field(default_factory=asyncio.Event)
-    flush_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     analyzer_checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
-    throttler_checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
     stop_analyzer: asyncio.Event = field(default_factory=asyncio.Event)
 
     # Будут созданы в __post_init__ в зависимости от конфига
@@ -127,7 +126,6 @@ class HydraContext:
     def __post_init__(self) -> None:
         if self.config.custom_monitor is None:
             base_resolver_kwargs: BaseMonitorKwargs = {
-                "is_running": self.is_running,
                 "is_cancelled": self.is_cancelled,
                 "is_stream": self.is_stream,
                 "is_verify": self.config.verify,

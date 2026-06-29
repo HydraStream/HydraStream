@@ -20,11 +20,13 @@ from hydrastream.interfaces import (
 from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
+    PoisonPill,
     StandardPill,
     TerminalPill,
 )
 from hydrastream.messages.io import LinkData
 from hydrastream.messages.state import ProgressDeltaCmd, RegisterFileCmd, StateKeeperMsg
+from hydrastream.network import safe_request, stream_chunk
 from hydrastream.providers import ProviderRouter
 from hydrastream.utils import extract_filename, redact_url
 
@@ -33,9 +35,9 @@ class BaseResolverKwargs(TypedDict):
     threads: int
     MIN_CHUNK: int
 
-    links_inbox: ActorPriorityQueue[LinkData | TerminalPill]
+    links_inbox: ActorPriorityQueue[LinkData | PoisonPill]
 
-    files_outbox: ActorPriorityQueue[File | TerminalPill]
+    files_outbox: ActorPriorityQueue[File | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg]
 
     all_complete: asyncio.Event
@@ -54,8 +56,8 @@ class BaseMetadataResolver(ABC):
     threads: int
     MIN_CHUNK: int
 
-    links_inbox: ActorPriorityQueue[LinkData | TerminalPill]
-    files_outbox: ActorPriorityQueue[File | TerminalPill]
+    links_inbox: ActorPriorityQueue[LinkData | PoisonPill]
+    files_outbox: ActorPriorityQueue[File | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg]
 
     all_complete: asyncio.Event
@@ -192,11 +194,15 @@ class BaseMetadataResolver(ABC):
 
     async def _fetch_metadata(self, url: str) -> tuple[str, int, bool]:
         # 1. Пробуем HEAD
-        response = await self.net.request("HEAD", url=url)
+        response = await safe_request(net=self.net, ui=self.ui, url=url, method="HEAD")
         # 2. Если HEAD не дал инфы, используем GET, но ОБЯЗАТЕЛЬНО через stream
         if response is None or int(response.headers.get("content-length", 0)) == 0:
             # Контекстный менеджер 'async with' сам закроет соединение в конце
-            async with self.net.stream(url) as connect:
+            async with stream_chunk(
+                net=self.net,
+                ui=self.ui,
+                url=url,
+            ) as connect:
                 if response := connect.response:
                     headers = connect.response.headers
                     return self._parse_headers(url, headers)
@@ -223,7 +229,7 @@ class BaseMetadataResolver(ABC):
 
         self.ui.add_file(id, filename)
 
-        checksum = await self.provider.resolve_hash(self.net, url, filename)
+        checksum = await self.provider.resolve_hash(self.net, self.ui, url, filename)
         await self.ui.done(id, filename)
 
         if checksum is None:
@@ -312,9 +318,6 @@ class DiskMetadataResolver(BaseMetadataResolver):
 
     async def _on_file_registered(self, file_obj: File) -> None:
         filename = file_obj.meta.original_filename
-        await self.state_outbox.send_data(
-            RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
-        )
         chunks = file_obj.chunks or []
 
         self.ui.add_file(file_obj.meta.id, filename, file_obj.meta.content_length)
@@ -323,4 +326,3 @@ class DiskMetadataResolver(BaseMetadataResolver):
             await self.state_outbox.send_data(
                 ProgressDeltaCmd(file_id=file_obj.meta.id, delta_bytes=downloaded)
             )
-        await self.files_outbox.send_data(sort_key=(file_obj.meta.id,), data=file_obj)

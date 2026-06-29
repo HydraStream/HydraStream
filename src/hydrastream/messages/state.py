@@ -3,7 +3,7 @@ from typing import TypeAlias
 
 from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.messages.base import TerminalPill
+from hydrastream.messages.base import PoisonPill
 
 # 1. Базовый маркерный класс для конкретного актора
 
@@ -31,6 +31,11 @@ class ProgressDeltaCmd:
 
 
 @hydra_dataclass(frozen=True)
+class UpdateBytesToCheckCmd:
+    bytes_to_check: int
+
+
+@hydra_dataclass(frozen=True)
 class GetUIDeltasCmd:
     reply_to: asyncio.Queue[dict[int, int]]
 
@@ -40,6 +45,7 @@ StateKeeperMsg: TypeAlias = (
     | RemoveFileCmd
     | GetSnapshotCmd
     | ProgressDeltaCmd
+    | UpdateBytesToCheckCmd
     | GetUIDeltasCmd
-    | TerminalPill
+    | PoisonPill
 )

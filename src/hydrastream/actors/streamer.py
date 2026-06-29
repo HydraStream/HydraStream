@@ -7,13 +7,19 @@ from hydrastream.actors.stater import RemoveFileCmd, StateKeeperMsg
 from hydrastream.domain.entities import Checksum, File
 from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
 from hydrastream.interfaces import Hasher, MonitorBackend
-from hydrastream.messages.base import ActorFifoQueue, ActorPriorityQueue, TerminalPill
+from hydrastream.messages.base import (
+    ActorFifoQueue,
+    ActorPriorityQueue,
+    PoisonPill,
+    StandardPill,
+    TerminalPill,
+)
 from hydrastream.messages.io import StreamChunk
 
 
 async def file_streamer(  # noqa
     file_obj: File,
-    stream_chunk_inbox: ActorPriorityQueue[StreamChunk | TerminalPill],
+    stream_chunk_inbox: ActorPriorityQueue[StreamChunk | PoisonPill],
     credit_outbox: asyncio.Queue[int],
     reg_events_q: ActorFifoQueue[StateKeeperMsg],
     file_limit_q: ActorFifoQueue[FileCompleted],
@@ -58,7 +64,7 @@ async def file_streamer(  # noqa
                     else:
                         buffer[offset] = chunk_data
 
-                case TerminalPill():
+                case StandardPill() | TerminalPill():
                     break
 
                 case _:

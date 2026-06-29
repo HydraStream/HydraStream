@@ -43,7 +43,7 @@ class HydraError(Exception):
         except (KeyError, IndexError):
             self.formatted_msg = self.message_tpl
 
-        super().__init__(f"[{self.error_id}] {self.formatted_msg}")
+        Exception.__init__(self, f"[{self.error_id}] {self.formatted_msg}")
 
 
 @hydra_dataclass
@@ -60,7 +60,7 @@ class HashMismatchError(HydraError):
             f"Hash mismatch for {self.filename}! ({self.algorithm}) "
             f"Expected {self.expected}, got {self.actual}"
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 @hydra_dataclass
@@ -74,7 +74,7 @@ class InsufficientSpaceError(HydraError):
             f"Insufficient space on {self.path}. "
             f"Need {format_size(self.required)}, have {format_size(self.free)}."
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 @hydra_dataclass
@@ -96,7 +96,7 @@ class DownloadFailedError(HydraError):
             parts.append(f": {self.reason}")
 
         self.message_tpl = " ".join(parts)
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 class WorkerScaleDown(Exception):  # noqa: N818
@@ -118,7 +118,7 @@ class FileSizeMismatchError(HydraError):
             f"Size mismatch for {self.filename}: "
             f"Expected {format_size(self.expected)}, got {format_size(self.actual)}."
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 @hydra_dataclass
@@ -130,7 +130,7 @@ class HydraFileNotFoundError(HydraError):
 
     def __post_init__(self) -> None:
         self.message_tpl = f"File not found: {self.filename} (Expected at: {self.path})"
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 @hydra_dataclass
@@ -146,7 +146,7 @@ class StateSaveError(HydraError):
             f"Failed to save state for {self.filename} "
             f"at {self.target_path}. Reason: {self.reason}"
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 @hydra_dataclass
@@ -162,7 +162,7 @@ class OrphanedChunkError(HydraError):
             f"Orphaned Chunk: Reference to File object lost! "
             f"Chunk range: {self.start_pos}-{self.end_pos}"
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 @hydra_dataclass
@@ -178,7 +178,7 @@ class InvalidChecksumError(HydraError):
             f"Invalid checksum for {self.algorithm}: {self.reason} "
             f"(Value: {self.value})"
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 @hydra_dataclass
@@ -192,7 +192,7 @@ class LogFileError(HydraError):
     )
 
     def __post_init__(self) -> None:
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 @hydra_dataclass
@@ -211,7 +211,7 @@ class SystemContextError(HydraError):
             msg += f" (Path: {self.path})"
 
         self.message_tpl = msg
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 @hydra_dataclass
@@ -225,7 +225,7 @@ class ValidationError(HydraError):
 
     def __post_init__(self) -> None:
         self.message_tpl = f"Invalid --{self.param} [{self.value}]: {self.reason}"
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
 @hydra_dataclass
@@ -261,4 +261,4 @@ class StreamError(HydraError):
             f"(Range requests) for {self.url}. "
             f"Cannot resume stream. Aborting."
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)

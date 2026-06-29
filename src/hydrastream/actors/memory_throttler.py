@@ -6,14 +6,16 @@ from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import MonitorBackend
 from hydrastream.messages.base import (
     ActorPriorityQueue,
+    PoisonPill,
+    StandardPill,
     TerminalPill,
 )
 
 
 @hydra_dataclass
 class MemoryThrottler:
-    chunk_inbox: ActorPriorityQueue[Chunk | TerminalPill]
-    chunk_outbox: ActorPriorityQueue[Chunk | TerminalPill]
+    chunk_inbox: ActorPriorityQueue[Chunk | PoisonPill]
+    chunk_outbox: ActorPriorityQueue[Chunk | PoisonPill]
     credit_inbox: asyncio.Queue[int]
 
     num_workers: int
@@ -39,7 +41,7 @@ class MemoryThrottler:
                         sort_key=(msg.file.meta.id, msg.current_pos), data=msg
                     )
 
-                case TerminalPill():
+                case StandardPill() | TerminalPill():
                     await self.chunk_outbox.send_poison_pills(self.num_workers)
                     break
 

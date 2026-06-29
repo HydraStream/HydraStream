@@ -34,7 +34,7 @@ from hydrastream.domain.entities import Checksum, File, TypeHash
 from hydrastream.exceptions import (
     LogStatus,
 )
-from hydrastream.messages.base import TerminalPill
+from hydrastream.messages.base import StandardPill, TerminalPill
 from hydrastream.messages.state import GetSnapshotCmd
 
 Ts = TypeVarTuple("Ts")
@@ -57,6 +57,8 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
     ctx.is_running = False
 
     await stop(ctx, complete=True)
+
+    ctx.fs.force_close_all()
 
     await ctx.ui.stop()
 
@@ -138,9 +140,9 @@ async def _bootstrap_engine(
 
     stater = StateKeeperActor(
         stater_inbox=ctx.state_q,
+        throttler_output=ctx.throttler_q,
         bytes_to_check=ctx.config.MIN_CHUNK,
         analyzer_checkpoint_event=ctx.analyzer_checkpoint_event,
-        throttler_checkpoint_event=ctx.throttler_checkpoint_event,
         ui=ctx.ui,
         fs=ctx.fs,
         is_stream=ctx.is_stream,
@@ -229,7 +231,6 @@ async def _bootstrap_engine(
             throttler_outbox=ctx.throttler_q,
             ack_inbox=ctx.ack_q,
             writer_outbox=ctx.writer_q,
-            flush_event=ctx.flush_event,
             MAX_BUFFER=int(ctx.config.BUFFER_SIZE / 3),
             ui=ctx.ui,
             fs=ctx.fs,
@@ -240,6 +241,8 @@ async def _bootstrap_engine(
         analyzer = TelemetryAnalyzer(
             threads=ctx.config.threads,
             _current_limit=ctx.start_works,
+            bytes_to_check=ctx.config.MIN_CHUNK,
+            state_outbox=ctx.state_q,
             analyzer_checkpoint_event=ctx.analyzer_checkpoint_event,
             controller_outbox=ctx.controller_q,
             ui=ctx.ui,
@@ -251,7 +254,6 @@ async def _bootstrap_engine(
         autosaver = FileAutosaver(
             interval=60,
             all_complete=ctx.all_complete,
-            flush_event=ctx.flush_event,
             disk_q=ctx.disk_q,
             reg_events_q=ctx.state_q,
             fs=ctx.fs,
@@ -273,10 +275,10 @@ async def _bootstrap_engine(
         throttler = ThrottleController(
             throttler_input=ctx.throttler_q,
             speed_limit=ctx.config.speed_limit,
+            bytes_to_check=ctx.config.MIN_CHUNK,
             is_debug=ctx.config.debug,
             ui=ctx.ui,
             all_complete=ctx.all_complete,
-            throttler_checkpoint_event=ctx.throttler_checkpoint_event,
         )
         tg.create_task(throttler.run(), name="ThrottleController")
 
@@ -329,7 +331,7 @@ async def stream_all(
                                 )
                                 yield filename, file_gen
 
-                            case TerminalPill():
+                            case StandardPill() | TerminalPill():
                                 break
 
                             case _:
@@ -374,7 +376,6 @@ async def run_downloads(
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(session_killer(ctx), name="SessionKiller")
                 await _bootstrap_engine(ctx, tg, links, expected_checksums)
-                print("1")
 
             if ctx.config.dry_run:
                 _get_shapshot: asyncio.Queue[dict[int, File]] = asyncio.Queue()

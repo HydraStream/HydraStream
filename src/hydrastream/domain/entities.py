@@ -8,9 +8,9 @@ from dataclasses import field, replace
 from typing import (
     TYPE_CHECKING,
     Annotated,
+    Any,
     Literal,
     Self,
-    get_args,
 )
 
 import orjson
@@ -25,28 +25,10 @@ from pydantic import (
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     OrphanedChunkError,
-    ValidationError,
 )
 
 if TYPE_CHECKING:
     pass
-
-TypeHash = Literal[
-    "md5",
-    "sha1",
-    "sha224",
-    "sha256",
-    "sha384",
-    "sha512",
-    "blake2b",
-    "blake2s",
-    "sha3_224",
-    "sha3_256",
-    "sha3_384",
-    "sha3_512",
-    "shake_128",
-    "shake_256",
-]
 
 
 @hydra_dataclass
@@ -84,17 +66,24 @@ class Chunk:
         return {"Range": f"bytes={self.current_pos}-{self.end}"}
 
 
-def validate_typehash(value: TypeHash) -> None:
-    allowed_hashes = get_args(TypeHash)
-    if value not in allowed_hashes:
-        raise ValidationError(
-            param="typehash",
-            value=value,
-            reason=f"Invalid hash algorithm. Supported: {', '.join(allowed_hashes)}",
-        )
+TypeHash = Literal[
+    "md5",
+    "sha1",
+    "sha224",
+    "sha256",
+    "sha384",
+    "sha512",
+    "blake2b",
+    "blake2s",
+    "sha3_224",
+    "sha3_256",
+    "sha3_384",
+    "sha3_512",
+    "shake_128",
+    "shake_256",
+]
 
 
-# 1. Список алгоритмов и их длин
 EXPECTED_LENGTHS = {
     "md5": 32,
     "sha1": 40,
@@ -110,24 +99,21 @@ EXPECTED_LENGTHS = {
     "sha3_512": 128,
 }
 
-# Алгоритмы с переменной длиной (просто проверяем на четность hex-строки)
 VARIABLE_LENGTH = {"shake_128", "shake_256"}
 
-# Валидатор строки: чистит пробелы, в нижний регистр, проверка на hex
 HashStr = Annotated[
     str, StringConstraints(pattern=r"^[0-9a-f]+$", strip_whitespace=True, to_lower=True)
 ]
 
 
 class Checksum(BaseModel):
-    # Настройки как в твоем value_object
     model_config = ConfigDict(frozen=True)
 
     algorithm: TypeHash
     value: HashStr
 
     @model_validator(mode="after")
-    def validate_hash_logic(self) -> Checksum:
+    def validate_hash_logic(self) -> Self:
         algo = self.algorithm
         length = len(self.value)
 
@@ -219,12 +205,6 @@ class File:
             return 0.0
         return (self.downloaded_size / self.meta.content_length) * 100
 
-    def to_json(self) -> bytes:
-        clear_file = replace(self, fd=None)
-        return orjson.dumps(
-            clear_file, option=orjson.OPT_SERIALIZE_DATACLASS | orjson.OPT_INDENT_2
-        )
-
     @classmethod
     def from_json(cls, content: bytes) -> Self:
         # 1. Сначала превращаем JSON в один большой словарь (через fast orjson)
@@ -240,3 +220,17 @@ class File:
             chunk._file = file_obj  # pyright: ignore[reportPrivateUsage]
 
         return file_obj
+
+    def to_json(self) -> bytes:
+        clear_file = replace(self, fd=None)
+        return orjson.dumps(
+            clear_file,
+            default=pydantic_default,
+            option=orjson.OPT_SERIALIZE_DATACLASS | orjson.OPT_INDENT_2,
+        )
+
+
+def pydantic_default(obj: object) -> dict[Any, Any]:
+    if isinstance(obj, BaseModel):
+        return obj.model_dump()
+    raise TypeError(f"Type {type(obj)} not serializable by orjson")

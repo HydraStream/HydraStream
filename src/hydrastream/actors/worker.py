@@ -12,8 +12,6 @@ from curl_cffi import Response
 from curl_cffi.requests import RequestsError
 
 from hydrastream.actors.controller import (
-    MaxLimitSignal,
-    TerminalPill,
     TrafficSignal,
 )
 from hydrastream.actors.dispatcher import FileCompleted
@@ -33,6 +31,7 @@ from hydrastream.interfaces import (
 from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
+    PoisonPill,
     StandardPill,
     TerminalPill,
 )
@@ -40,10 +39,12 @@ from hydrastream.messages.io import StreamChunk, WriteChunk
 from hydrastream.messages.state import ProgressDeltaCmd, RemoveFileCmd, StateKeeperMsg
 from hydrastream.messages.traffic import (
     FlushCmd,
+    NetworkCongestionSignal,
     RegisterStreamCmd,
     RemoveStreamCmd,
     ThrottlerMsg,
 )
+from hydrastream.network import stream_chunk
 
 
 class BaseWorkerKwargs(TypedDict):
@@ -61,7 +62,7 @@ class BaseWorkerKwargs(TypedDict):
 
 @hydra_dataclass
 class BaseDownloadWorker(ABC):
-    chunks_inbox: ActorPriorityQueue[Chunk | TerminalPill]
+    chunks_inbox: ActorPriorityQueue[Chunk | PoisonPill]
     throttler_outbox: ActorFifoQueue[ThrottlerMsg] | None = None
     controller_outbox: ActorFifoQueue[TrafficSignal]
     state_outbox: ActorFifoQueue[StateKeeperMsg]
@@ -89,8 +90,7 @@ class BaseDownloadWorker(ABC):
                 break
 
             try:
-                if chunk.current_pos > chunk.end:
-                    await self.process_chunk(chunk)
+                await self.process_chunk(chunk)
 
                 if not chunk.is_finished:
                     await self.ui.log(
@@ -118,7 +118,7 @@ class BaseDownloadWorker(ABC):
                 return msg
 
             case StandardPill():
-                await self.controller_outbox.send_data(MaxLimitSignal())
+                await self.controller_outbox.send_poison_pills()
                 return False
 
             case TerminalPill():
@@ -146,11 +146,13 @@ class BaseDownloadWorker(ABC):
                 sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),
                 data=chunk,
             )
+            return
 
         if isinstance(e, RequestsError):
             await self._handle_requests_error(chunk, e)
-            self.dynamic_limit = max(self.dynamic_limit - 1, 1)
+            await self.controller_outbox.send_data(NetworkCongestionSignal())
             await self.controller_outbox.send_poison_pills()
+            return
 
         if isinstance(e, TimeoutError):
             await self.requeue_chunk(chunk)
@@ -221,8 +223,8 @@ class BaseDownloadWorker(ABC):
 
 @hydra_dataclass
 class StreamDownloadWorker(BaseDownloadWorker):
-    stream_chunks_outbox: ActorPriorityQueue[StreamChunk | TerminalPill]
-    file_discovery_outbox: ActorFifoQueue[File | TerminalPill]
+    stream_chunks_outbox: ActorPriorityQueue[StreamChunk | PoisonPill]
+    file_discovery_outbox: ActorFifoQueue[File | PoisonPill]
 
     async def _finally(self) -> None:
         await self.file_discovery_outbox.send_poison_pills()
@@ -265,8 +267,10 @@ class StreamDownloadWorker(BaseDownloadWorker):
         buffer_list: list[bytes] = []
         current_buffer_size = 0
 
-        async with self.net.stream(
-            chunk.file.meta.url,
+        async with stream_chunk(
+            net=self.net,
+            ui=self.ui,
+            url=chunk.file.meta.url,
             headers=headers,
         ) as r:
             try:
@@ -318,7 +322,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
 
 @hydra_dataclass
 class DiskDownloadWorker(BaseDownloadWorker):
-    disk_outbox: ActorFifoQueue[WriteChunk | FlushCmd | TerminalPill]
+    disk_outbox: ActorFifoQueue[WriteChunk | FlushCmd | PoisonPill]
     file_limit_outbox: ActorFifoQueue[FileCompleted]
 
     fs: StorageBackend
@@ -390,8 +394,10 @@ class DiskDownloadWorker(BaseDownloadWorker):
         if fd is None:
             fd = self.fs.open_file(chunk.file.actual_filename)
         buffer_size = 1_048_576
-        async with self.net.stream(
-            chunk.file.meta.url,
+        async with stream_chunk(
+            net=self.net,
+            ui=self.ui,
+            url=chunk.file.meta.url,
             headers=headers,
         ) as r:
             try:
@@ -424,7 +430,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
                         )
                         chunk.current_pos += current_buffer_size
 
-                        buffer_list.clear()
+                        buffer_list = []
                         current_buffer_size = 0
 
                     if bytes_to_read <= 0:
@@ -462,8 +468,12 @@ class DiskDownloadWorker(BaseDownloadWorker):
             if chunk.file.verified or not chunk.file.is_complete:
                 return
             chunk.file.verified = True
-            if not self.fs.verify_size(filename, file_obj.meta.content_length):
-                return
+
+        sync_event = asyncio.Event()
+        await self.disk_outbox.send_data(FlushCmd(reply_to=sync_event))
+        await sync_event.wait()
+
+        self.fs.verify_size(filename, file_obj.meta.content_length)
         if file_obj.meta.expected_checksum:
             await self.ui.log(
                 f"Verifying Hash checksum for {chunk.file.actual_filename}...",

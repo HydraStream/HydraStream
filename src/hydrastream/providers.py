@@ -5,18 +5,19 @@ import base64
 import binascii
 
 from hydrastream.domain.entities import Checksum
-from hydrastream.interfaces import HashProvider, NetworkBackend
+from hydrastream.interfaces import HashProvider, MonitorBackend, NetworkBackend
+from hydrastream.network import safe_request
 
 
 # 2. КОНКРЕТНЫЙ ПРОВАЙДЕР ДЛЯ NCBI
 class NCBIProvider:
     async def resolve(
-        self, net: NetworkBackend, url: str, filename: str
+        self, net: NetworkBackend, ui: MonitorBackend, url: str, filename: str
     ) -> Checksum | None:
         base_url = url.rstrip("/").rsplit("/", 1)[0]
         checksum_url = f"{base_url}/md5checksums.txt"
 
-        resp = await net.request("GET", checksum_url)
+        resp = await safe_request(net=net, ui=ui, url=checksum_url, method="GET")
         if not resp:
             return None
 
@@ -30,9 +31,9 @@ class NCBIProvider:
 # 3. КОНКРЕТНЫЙ ПРОВАЙДЕР ДЛЯ ОБЛАКОВ (S3, GCS)
 class CloudProvider:
     async def resolve(
-        self, net: NetworkBackend, url: str, filename: str
+        self, net: NetworkBackend, ui: MonitorBackend, url: str, filename: str
     ) -> Checksum | None:
-        resp = await net.request("HEAD", url)
+        resp = await safe_request(net=net, ui=ui, url=url, method="HEAD")
         if not resp:
             return None
 
@@ -80,14 +81,14 @@ class ProviderRouter:
         self._routes[domain_keyword] = provider
 
     async def resolve_hash(
-        self, net: NetworkBackend, url: str, filename: str
+        self, net: NetworkBackend, ui: MonitorBackend, url: str, filename: str
     ) -> Checksum | None:
         """
         Ищет нужного провайдера по URL и делегирует ему задачу.
         """
         for keyword, provider in self._routes.items():
             if keyword in url:
-                return await provider.resolve(net, url, filename)
+                return await provider.resolve(net, ui, url, filename)
 
         # Если ни один домен не подошел, пробуем вытащить из стандартных заголовков
-        return await self._fallback.resolve(net, url, filename)
+        return await self._fallback.resolve(net, ui, url, filename)

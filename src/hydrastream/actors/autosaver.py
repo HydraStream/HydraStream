@@ -8,7 +8,7 @@ from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import MonitorBackend, StorageBackend
-from hydrastream.messages.base import ActorFifoQueue, TerminalPill
+from hydrastream.messages.base import ActorFifoQueue, PoisonPill
 from hydrastream.messages.io import WriteChunk
 from hydrastream.messages.state import GetSnapshotCmd, StateKeeperMsg
 from hydrastream.messages.traffic import FlushCmd
@@ -17,8 +17,8 @@ from hydrastream.messages.traffic import FlushCmd
 @hydra_dataclass
 class FileAutosaver:
     all_complete: asyncio.Event
-    flush_event: asyncio.Event
-    disk_q: ActorFifoQueue[WriteChunk | FlushCmd | TerminalPill]
+    _flush_event: asyncio.Event = field(default_factory=asyncio.Event)
+    disk_q: ActorFifoQueue[WriteChunk | FlushCmd | PoisonPill]
     reg_events_q: ActorFifoQueue[StateKeeperMsg]
     _get_shapshot: asyncio.Queue[dict[int, File]] = field(
         default_factory=asyncio.Queue[dict[int, File]]
@@ -39,13 +39,13 @@ class FileAutosaver:
                 break
             except TimeoutError:
                 try:
-                    self.flush_event.clear()
-                    await self.disk_q.send_data(FlushCmd())
+                    self._flush_event.clear()
+                    await self.disk_q.send_data(FlushCmd(reply_to=self._flush_event))
                     await self.reg_events_q.send_data(
                         GetSnapshotCmd(reply_to=self._get_shapshot)
                     )
                     files = await self._get_shapshot.get()
-                    await self.flush_event.wait()
+                    await self._flush_event.wait()
                     await loop.run_in_executor(None, self.save_all_states, files)
 
                 except Exception as e:

@@ -121,7 +121,7 @@ async def stream_chunk(
         yielded = False
         try:
             async with net.stream(url, headers=headers) as connect:
-                response = connect.response()
+                response = connect.response
 
                 if headers and "Range" in headers and response.status_code == 200:
                     raise RequestsError(
@@ -130,6 +130,15 @@ async def stream_chunk(
                     )
 
                 if response.status_code < 400:
+                    content_type = response.headers.get("Content-Type", "").lower()
+
+                    if "xml" in content_type or "html" in content_type:
+                        raise RequestsError(
+                            f"Fake Success! Server returned {content_type} "
+                            "instead of binary data. "
+                            f"Likely a WAF block or S3 error page.",
+                            response=response,
+                        )
                     yielded = True
                     yield connect
                     return

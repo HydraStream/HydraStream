@@ -6,6 +6,7 @@ from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import MonitorBackend
 from hydrastream.messages.base import ActorFifoQueue
+from hydrastream.messages.state import StateKeeperMsg, UpdateBytesToCheckCmd
 from hydrastream.messages.traffic import ScaleDownSignal, ScaleUpSignal, TrafficSignal
 from hydrastream.utils import format_size
 
@@ -16,11 +17,15 @@ class TelemetryAnalyzer:
     _current_limit: int
     analyzer_checkpoint_event: asyncio.Event
     controller_outbox: ActorFifoQueue[TrafficSignal]
+    state_outbox: ActorFifoQueue[StateKeeperMsg]
+    bytes_to_check: int
     _smoothed_speed: float = 0.0
     _prev_speed: float = 0.0
     _tau: float = 1.0
     _min_window: int = 1024
     _sensitivity: float = 0.05
+    _last_checkpoint_time: float = 0.0
+    _dynamic_limit: int = 1
     is_debug: bool
 
     ui: MonitorBackend
@@ -51,11 +56,14 @@ class TelemetryAnalyzer:
         alpha = 1.0 - math.exp(-elapsed / self._tau)
         return (alpha * speed_now) + ((1.0 - alpha) * self._smoothed_speed)
 
-    def _update_window(self, speed_now: float, elapsed: float) -> None:
+    async def _update_window(self, speed_now: float, elapsed: float) -> None:
         safe_speed = max(speed_now, 0.001)
         coef = 1 / safe_speed**0.25
         new_bytes = int(self.bytes_to_check * (1 - coef + elapsed))
         self.bytes_to_check = max(self._min_window, new_bytes)
+        await self.state_outbox.send_data(
+            UpdateBytesToCheckCmd(bytes_to_check=self.bytes_to_check)
+        )
 
     async def _log_scale_event(self, direction: str, speed: float) -> None:
         """Вспомогательный метод для чистого логирования."""
@@ -76,13 +84,13 @@ class TelemetryAnalyzer:
     async def _step(self) -> None:
         """Один шаг адаптации."""
         now = time.monotonic()
-        elapsed = min(1, now - self.last_checkpoint_time)
+        elapsed = min(1, now - self._last_checkpoint_time)
         if elapsed <= 0:
             return
 
         speed_now = self.bytes_to_check / elapsed
         self._smoothed_speed = self._calculate_ema(speed_now, elapsed)
-        self._update_window(speed_now, elapsed)
+        await self._update_window(speed_now, elapsed)
 
         # Логика изменения лимита
         if self._smoothed_speed > self._prev_speed * (1 + self._sensitivity):
@@ -100,12 +108,12 @@ class TelemetryAnalyzer:
             await self._log_scale_event("down", speed_now)
 
         # Применяем изменения
-        if self.dynamic_limit != self._current_limit:
+        if self._dynamic_limit != self._current_limit:
             await self.controller_outbox.send_data(
                 ScaleUpSignal()
-                if self._current_limit > self.dynamic_limit
+                if self._current_limit > self._dynamic_limit
                 else ScaleDownSignal()
             )
-            self.dynamic_limit = self._current_limit
+            self._dynamic_limit = self._current_limit
 
-        self.last_checkpoint_time = time.monotonic()
+        self._last_checkpoint_time = time.monotonic()

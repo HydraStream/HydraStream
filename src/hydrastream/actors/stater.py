@@ -6,7 +6,11 @@ from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import MonitorBackend, StorageBackend
-from hydrastream.messages.base import ActorFifoQueue, TerminalPill
+from hydrastream.messages.base import (
+    ActorFifoQueue,
+    StandardPill,
+    TerminalPill,
+)
 from hydrastream.messages.state import (
     GetSnapshotCmd,
     GetUIDeltasCmd,
@@ -14,12 +18,15 @@ from hydrastream.messages.state import (
     RegisterFileCmd,
     RemoveFileCmd,
     StateKeeperMsg,
+    UpdateBytesToCheckCmd,
 )
+from hydrastream.messages.traffic import CheckpointReachedCmd, ThrottlerMsg
 
 
 @hydra_dataclass
 class StateKeeperActor:
     stater_inbox: ActorFifoQueue[StateKeeperMsg]
+    throttler_output: ActorFifoQueue[ThrottlerMsg]
 
     _files: dict[int, File] = field(default_factory=dict[int, File])
     _ui_deltas: defaultdict[int, int] = field(default_factory=lambda: defaultdict(int))
@@ -30,7 +37,6 @@ class StateKeeperActor:
     bytes_to_check: int
 
     analyzer_checkpoint_event: asyncio.Event
-    throttler_checkpoint_event: asyncio.Event
 
     fs: StorageBackend
     ui: MonitorBackend
@@ -63,13 +69,18 @@ class StateKeeperActor:
                             self._prev_global_bytes += self.bytes_to_check
 
                             self.analyzer_checkpoint_event.set()
-                            self.throttler_checkpoint_event.set()
+                            await self.throttler_output.send_data(
+                                CheckpointReachedCmd(new_btc=self.bytes_to_check)
+                            )
+
+                    case UpdateBytesToCheckCmd(bytes_to_check=btc):
+                        self.bytes_to_check = btc
 
                     case GetUIDeltasCmd(reply_to=queue):
                         await queue.put(dict(self._ui_deltas))
                         self._ui_deltas.clear()
 
-                    case TerminalPill():
+                    case StandardPill() | TerminalPill():
                         break
 
                     case _:
@@ -89,3 +100,4 @@ class StateKeeperActor:
 
                     if file_obj.fd is not None:
                         self.fs.close_file(file_obj.fd)
+                        file_obj.fd = None

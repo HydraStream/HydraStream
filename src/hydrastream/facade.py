@@ -115,11 +115,9 @@ class HydraClient:
         input_file: str | None = None,
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
     ) -> None:
-        print("2")
         links = await self.validate(links, input_file)
         self.state = HydraContext(config=self.config, is_stream=False)
         await run_downloads(self.state, links, expected_checksums)
-        print("3")
 
     async def stream(
         self,

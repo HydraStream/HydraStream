@@ -1,8 +1,9 @@
+import asyncio
 from typing import TypeAlias
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.interfaces import NetworkStream
-from hydrastream.messages.base import TerminalPill
+from hydrastream.messages.base import PoisonPill
 from hydrastream.messages.io import WriteChunk
 
 
@@ -21,14 +22,19 @@ class ScaleDownSignal:
     pass
 
 
+@hydra_dataclass(frozen=True)
+class NetworkCongestionSignal:
+    pass
+
+
 TrafficSignal: TypeAlias = (
-    ScaleDownSignal | ScaleUpSignal | MaxLimitSignal | TerminalPill
+    ScaleDownSignal | ScaleUpSignal | NetworkCongestionSignal | PoisonPill
 )
 
 
 @hydra_dataclass(frozen=True)
 class CheckpointReachedCmd:
-    pass
+    new_btc: int
 
 
 @hydra_dataclass(frozen=True)
@@ -57,16 +63,16 @@ ThrottlerMsg: TypeAlias = (
     | RemoveStreamCmd
     | DiskBufferFullSignal
     | DiskBufferClearedSignal
-    | TerminalPill
+    | PoisonPill
 )
 
 
 @hydra_dataclass(frozen=True)
 class FlushCmd:
-    pass
+    reply_to: asyncio.Event
 
 
-DiskMsg: TypeAlias = WriteChunk | FlushCmd | TerminalPill
+DiskMsg: TypeAlias = WriteChunk | FlushCmd | PoisonPill
 
 
 @hydra_dataclass(frozen=True)
@@ -76,4 +82,14 @@ class WriteCompleted:
 
 @hydra_dataclass(frozen=True)
 class FileCompleted:
+    pass
+
+
+@hydra_dataclass(frozen=True)
+class AnalyzerCheckpointEvent:
+    pass
+
+
+@hydra_dataclass(frozen=True)
+class ThrottlerCheckpointEvent:
     pass

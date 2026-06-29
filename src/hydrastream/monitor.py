@@ -45,7 +45,6 @@ from hydrastream.utils import format_size
 
 
 class BaseMonitorKwargs(TypedDict):
-    is_running: bool
     is_cancelled: bool
     is_stream: bool
     is_verify: bool
@@ -57,7 +56,7 @@ class BaseMonitorKwargs(TypedDict):
 
 @hydra_dataclass
 class BaseMonitor(MonitorBackend, ABC):
-    is_running: bool = False
+    _is_running: bool = False
     is_cancelled: bool = False
     is_stream: bool = False
     is_verify: bool = True
@@ -82,6 +81,9 @@ class BaseMonitor(MonitorBackend, ABC):
     _buffer: defaultdict[int, int] = field(default_factory=lambda: defaultdict(int))
 
     is_debug: bool = False
+
+    def __post_init__(self) -> None:
+        self.log_file = self.log_file / "hydra.log"
 
     async def log(
         self,
@@ -194,10 +196,10 @@ class BaseMonitor(MonitorBackend, ABC):
 
     async def start(self) -> None:
         """Запускает фонового воркера (вызывать внутри async_main)"""
-        if self.is_running:
+        if self._is_running:
             return
 
-        self.is_running = True
+        self._is_running = True
 
         try:
             self._safe_init()
@@ -220,7 +222,7 @@ class BaseMonitor(MonitorBackend, ABC):
         await self._ui_start()
 
     async def _handle_exit(self) -> None:
-        self.is_running = False
+        self._is_running = False
 
         elapsed = time.monotonic() - self._start_time
         avg_speed = (
@@ -480,6 +482,8 @@ class RichMonitor(BaseMonitor):
     has_hash: int = 0
     has_ranges: int = 0
 
+    dynamic_title: str = ""
+
     refresh_per_second: int = 10
     renewal_rate: float = field(init=False)
 
@@ -639,7 +643,7 @@ class RichMonitor(BaseMonitor):
     ) -> None:
         reply_q: asyncio.Queue[dict[int, int]] = asyncio.Queue(maxsize=1)
 
-        while self.is_running:
+        while self._is_running:
             try:
                 # 1. Засыпаем до следующего "кадра" (например, на 0.1 сек)
                 await asyncio.sleep(self.renewal_rate)
@@ -697,7 +701,7 @@ class RichMonitor(BaseMonitor):
 
     def _make_panel(self) -> Panel | str:
 
-        if not self.rich.tasks and self.is_running:
+        if not self.rich.tasks and self._is_running:
             return ""
 
         elapsed = time.monotonic() - self._start_time
@@ -788,7 +792,7 @@ class RichMonitor(BaseMonitor):
         )
 
     async def _handle_exit(self) -> None:
-        self.is_running = False
+        self._is_running = False
         self.live.refresh()
         self.live.stop()
         self.refresh.cancel()
@@ -830,6 +834,7 @@ class RichMonitor(BaseMonitor):
         )
 
     async def _ui_start(self) -> None:
+
         self.live.start()
         self.refresh = asyncio.create_task(self._ui_refresh_actor(self.state_keeper_q))
         self._start_time = time.monotonic()

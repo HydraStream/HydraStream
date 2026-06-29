@@ -25,6 +25,8 @@ class StorageBackend(Protocol):
 
     def close_file(self, fd_or_conn: Any) -> None: ...
 
+    def force_close_all(self) -> None: ...
+
     def delete_file(self, filename: str) -> None: ...
 
     def save_state(self, file_obj: File) -> None: ...
@@ -124,7 +126,7 @@ class NetworkBackend(Protocol):
 @runtime_checkable
 class HashProvider(Protocol):
     async def resolve(
-        self, net: NetworkBackend, url: str, filename: str
+        self, net: NetworkBackend, ui: MonitorBackend, url: str, filename: str
     ) -> Checksum | None: ...
 
 
