@@ -8,91 +8,38 @@ from collections.abc import AsyncGenerator, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self, TextIO
+from typing import Self, TextIO
 from urllib.parse import urlparse
 
-from curl_cffi import BrowserTypeLiteral
-
 from hydrastream.domain.config import HydraConfig
-from hydrastream.domain.context import HydraContext
+from hydrastream.domain.context import HydraContext, build_context
 from hydrastream.domain.entities import Checksum, TypeHash
 from hydrastream.engine import run_downloads, stream_all, teardown_engine
 from hydrastream.exceptions import FileReadError, InvalidParameterError, ValidationError
 from hydrastream.interfaces import (
-    Hasher,
-    HashProvider,
     MonitorBackend,
-    NetworkBackend,
-    StorageBackend,
 )
-from hydrastream.monitor import QuietMonitor
+from hydrastream.monitor import (
+    BaseMonitorKwargs,
+    JsonMonitor,
+    PlainMonitor,
+    QuietMonitor,
+    RichMonitor,
+)
 
 
 class HydraClient:
     def __init__(
         self,
-        config: HydraConfig | None = None,
-        threads: int = 1,
-        no_ui: bool = False,
-        quiet: bool = False,
-        output_dir: str = "download",
-        dry_run: bool = False,
-        min_chunk_size_mb: int = 1,
-        max_stream_chunk_size_mb: int = 5,
-        buffer_size_mb: int | None = None,
-        speed_limit: float | None = None,
-        json_logs: bool = False,
-        verify: bool = True,
-        debug: bool = False,
-        impersonate: BrowserTypeLiteral = "chrome120",
-        client_kwargs: dict[str, Any] | None = None,
-        custom_providers: dict[str, "HashProvider"] | None = None,
-        custom_storage: StorageBackend | None = None,
-        custom_monitor: MonitorBackend | None = None,
-        custom_network: NetworkBackend | None = None,
-        custom_hasher: Hasher | None = None,
-        ui: MonitorBackend | None = None,
+        config: HydraConfig,
     ) -> None:
-        if config:
-            self.config = config
-        else:
-            self.config = HydraConfig(
-                threads=threads,
-                dry_run=dry_run,
-                min_chunk_size_mb=min_chunk_size_mb,
-                max_stream_chunk_size_mb=max_stream_chunk_size_mb,
-                speed_limit=speed_limit,
-                no_ui=no_ui,
-                quiet=quiet,
-                output_dir=Path(output_dir),
-                buffer_size_mb=buffer_size_mb,
-                json_logs=json_logs,
-                verify=verify,
-                impersonate=impersonate,
-                debug=debug,
-                client_kwargs=client_kwargs,
-                custom_providers=custom_providers,
-                custom_storage=custom_storage,
-                custom_monitor=custom_monitor,
-                custom_network=custom_network,
-                custom_hasher=custom_hasher,
-            )
+
+        self.config = config
+        self.ui = _create_monitor(config=config)
         self.state: HydraContext | None = None
-        if ui is None:
-            self.ui = QuietMonitor(
-                is_verify=verify,
-                log_file=Path(output_dir),
-                is_debug=debug,
-            )
-            self.ui_init = False
-        else:
-            self.ui = ui
-            self.ui_init = True
 
     async def __aenter__(self) -> Self:
-        if not self.ui_init:
-            await self.ui.start()
-            self.ui_init = True
+        await self.ui.start()
         return self
 
     async def __aexit__(
@@ -105,9 +52,7 @@ class HydraClient:
             loop = asyncio.get_running_loop()
             await teardown_engine(self.state, loop)
 
-        if self.ui_init:
-            await self.ui.stop()
-            self.ui_init = False
+        await self.ui.stop()
 
     async def run(
         self,
@@ -115,8 +60,9 @@ class HydraClient:
         input_file: str | None = None,
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
     ) -> None:
+
         links = await self.validate(links, input_file)
-        self.state = HydraContext(config=self.config, is_stream=False)
+        self.state = build_context(config=self.config, ui=self.ui, is_stream=False)
         await run_downloads(self.state, links, expected_checksums)
 
     async def stream(
@@ -126,7 +72,7 @@ class HydraClient:
         expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
     ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
         links = await self.validate(links, input_file)
-        self.state = HydraContext(config=self.config, is_stream=True)
+        self.state = build_context(config=self.config, ui=self.ui, is_stream=True)
         return stream_all(self.state, links, expected_checksums)
 
     async def validate(
@@ -230,3 +176,24 @@ async def parse_urls(
                     )
 
     return list(dict.fromkeys(all_links))
+
+
+def _create_monitor(config: HydraConfig) -> MonitorBackend:
+    if config.custom_monitor is None:
+        base_resolver_kwargs: BaseMonitorKwargs = {
+            "is_verify": config.verify,
+            "log_file": config.output_dir,
+            "is_debug": config.debug,
+        }
+
+        if config.json_logs:
+            ui = JsonMonitor(**base_resolver_kwargs)
+        elif config.quiet:
+            ui = QuietMonitor(**base_resolver_kwargs)
+        elif config.no_ui:
+            ui = PlainMonitor(**base_resolver_kwargs)
+        else:
+            ui = RichMonitor(**base_resolver_kwargs)
+    else:
+        ui = config.custom_monitor
+    return ui

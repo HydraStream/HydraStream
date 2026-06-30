@@ -18,7 +18,6 @@ from hydrastream.messages.traffic import (
     ThrottlerMsg,
     WriteCompleted,
 )
-from hydrastream.utils import verify_memory_chunk
 
 
 @hydra_dataclass
@@ -44,8 +43,7 @@ class DiskAggregator:
                 msg = await self.disk_inbox.get()
 
                 match msg:
-                    case WriteChunk() as w:
-                        verify_memory_chunk(data_bytes=w.data, offset=w.offset)
+                    case WriteChunk():
                         self._current_buffer.append(msg)
                         self._current_size += msg.length
 

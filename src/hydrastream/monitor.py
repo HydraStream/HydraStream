@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import asyncio
+import os
 import shutil
 import sys
 import time
@@ -45,8 +46,6 @@ from hydrastream.utils import format_size
 
 
 class BaseMonitorKwargs(TypedDict):
-    is_cancelled: bool
-    is_stream: bool
     is_verify: bool
 
     log_file: Path
@@ -57,7 +56,7 @@ class BaseMonitorKwargs(TypedDict):
 @hydra_dataclass
 class BaseMonitor(MonitorBackend, ABC):
     _is_running: bool = False
-    is_cancelled: bool = False
+    _is_cancelled: bool = False
     is_stream: bool = False
     is_verify: bool = True
 
@@ -96,7 +95,7 @@ class BaseMonitor(MonitorBackend, ABC):
         **kwargs: object,
     ) -> None:
         if status == LogStatus.INTERRUPT:
-            self.is_cancelled = True
+            self._is_cancelled = True
         if throttle_key:
             now = time.monotonic()
             last_time = self._log_throttle.get(throttle_key, 0.0)
@@ -133,6 +132,11 @@ class BaseMonitor(MonitorBackend, ABC):
     async def _date_print(self) -> None:
         current_date = datetime.now().strftime("%Y-%m-%d")
         await self.log(f"--- {current_date} ---")
+
+    def get_dup_fd(self) -> int | None:
+        if self._log_fd is not None:
+            return os.dup(self._log_fd.fileno())
+        return None
 
     async def _log_worker(self) -> None:
         """
@@ -208,6 +212,7 @@ class BaseMonitor(MonitorBackend, ABC):
             self._start_time = time.monotonic()
             await self.log("--- Session Started ---")
             await self._date_print()
+            await self._ui_start()
         except OSError as e:
             if self.is_debug:
                 raise
@@ -218,8 +223,6 @@ class BaseMonitor(MonitorBackend, ABC):
                 f"[bold yellow]LOGGING DISABLED:[/] {err.formatted_msg}",
                 status=LogStatus.WARNING,
             )
-
-        await self._ui_start()
 
     async def _handle_exit(self) -> None:
         self._is_running = False
@@ -237,7 +240,7 @@ class BaseMonitor(MonitorBackend, ABC):
         hours, mins = divmod(mins, 60)
         time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
 
-        status_word = "CANCELLED" if self.is_cancelled else "SUCCESS"
+        status_word = "CANCELLED" if self._is_cancelled else "SUCCESS"
         report = (
             f"\n--- Final Report ({status_word}) ---\n"
             f"Total files:   {self._files_completed}/{self._total_files}\n"
@@ -345,6 +348,8 @@ class BaseMonitor(MonitorBackend, ABC):
             )
 
     @abstractmethod
+    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None: ...
+    @abstractmethod
     async def _display_log(
         self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
     ) -> None:
@@ -360,14 +365,7 @@ class QuietMonitor(BaseMonitor):
     async def _display_log(
         self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
     ) -> None:
-        log_record = {
-            "timestamp": datetime.now(UTC),
-            "level": status.upper(),
-            "message": message,
-            **kwargs,  # Распаковываем дополнительные данные!
-        }
-        # Сериализуем в байты, потом в строку
-        sys.stdout.buffer.write(orjson.dumps(log_record) + b"\n")
+        pass
 
     async def _display_dry_run(
         self, data: dict[str, Any], output_dir: str | Path
@@ -377,16 +375,23 @@ class QuietMonitor(BaseMonitor):
     async def _ui_start(self) -> None:
         pass
 
+    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None:
+        pass
+
 
 @hydra_dataclass
 class JsonMonitor(BaseMonitor):
     async def _display_log(
-        self,
-        message: str | Rule | Table,
-        status: LogStatus | str,
-        **kwargs: object,
+        self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
     ) -> None:
-        pass
+        log_record = {
+            "timestamp": datetime.now(UTC),
+            "level": status.upper(),
+            "message": message,
+            **kwargs,  # Распаковываем дополнительные данные!
+        }
+        # Сериализуем в байты, потом в строку
+        sys.stdout.buffer.write(orjson.dumps(log_record) + b"\n")
 
     async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
         report_data = {
@@ -423,6 +428,9 @@ class JsonMonitor(BaseMonitor):
     async def _ui_start(self) -> None:
         pass
 
+    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None:
+        pass
+
 
 @hydra_dataclass
 class PlainMonitor(BaseMonitor):
@@ -441,6 +449,9 @@ class PlainMonitor(BaseMonitor):
         pass
 
     async def _ui_start(self) -> None:
+        pass
+
+    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None:
         pass
 
 
@@ -494,7 +505,7 @@ class RichMonitor(BaseMonitor):
     progress: Progress = field(init=False)
     live: Live = field(init=False)
 
-    state_keeper_q: ActorFifoQueue[StateKeeperMsg]
+    state_keeper_q: ActorFifoQueue[StateKeeperMsg] = field(init=False)
 
     def __post_init__(self) -> None:
         self.renewal_rate = 1 / self.refresh_per_second
@@ -595,7 +606,7 @@ class RichMonitor(BaseMonitor):
         **kwargs: object,
     ) -> None:
         if status == LogStatus.INTERRUPT:
-            self.is_cancelled = True
+            self._is_cancelled = True
         if throttle_key:
             now = time.monotonic()
             last_time = self._log_throttle.get(throttle_key, 0.0)
@@ -735,7 +746,7 @@ class RichMonitor(BaseMonitor):
             not self.rich.tasks
             and self._total_files > 0
             and self._total_files == self._files_completed
-        ) or self.is_cancelled:
+        ) or self._is_cancelled:
             grid = Table.grid(expand=True)
             grid.add_column()
             grid.add_column(justify="center")
@@ -748,7 +759,7 @@ class RichMonitor(BaseMonitor):
             grid.add_row("[white]Average Speed:", f"[bold yellow]{speed_str}[/]")
             grid.add_row("[white]Total Time:", f"[bold magenta]{time_str}[/]")
             return Panel(
-                grid if self.is_cancelled else content,
+                grid if self._is_cancelled else content,
                 title="[#2e8b57]Final Report",
                 border_style="#2e8b57",
                 expand=False,
@@ -809,7 +820,7 @@ class RichMonitor(BaseMonitor):
         hours, mins = divmod(mins, 60)
         time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
 
-        status_word = "CANCELLED" if self.is_cancelled else "SUCCESS"
+        status_word = "CANCELLED" if self._is_cancelled else "SUCCESS"
         report = (
             f"\n--- Final Report ({status_word}) ---\n"
             f"Total files:   {self._files_completed}/{self._total_files}\n"
@@ -836,5 +847,7 @@ class RichMonitor(BaseMonitor):
     async def _ui_start(self) -> None:
 
         self.live.start()
+
+    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None:
+        self.state_keeper_q = state_q
         self.refresh = asyncio.create_task(self._ui_refresh_actor(self.state_keeper_q))
-        self._start_time = time.monotonic()

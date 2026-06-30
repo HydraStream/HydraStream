@@ -317,10 +317,8 @@ class DiskMetadataResolver(BaseMetadataResolver):
         )
 
     async def _on_file_registered(self, file_obj: File) -> None:
-        filename = file_obj.meta.original_filename
         chunks = file_obj.chunks or []
 
-        self.ui.add_file(file_obj.meta.id, filename, file_obj.meta.content_length)
         downloaded = sum(c.uploaded for c in chunks)
         if downloaded - len(chunks) > 0:
             await self.state_outbox.send_data(

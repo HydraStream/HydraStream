@@ -122,6 +122,9 @@ class BaseDownloadWorker(ABC):
                 return False
 
             case TerminalPill():
+                if self.throttler_outbox is not None:
+                    await self.throttler_outbox.send_poison_pills()
+                await self.state_outbox.send_poison_pills()
                 await self._finally()
                 return False
 

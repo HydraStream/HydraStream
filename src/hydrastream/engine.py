@@ -92,7 +92,6 @@ async def prepare_runtime(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
     )
     loop.set_default_executor(custom_pool)
 
-    await ctx.ui.start()
     main_task = asyncio.current_task()
 
     def handle_signal() -> None:

@@ -146,7 +146,7 @@ async def async_main(  # noqa: C901, PLR0912
             debug=debug,
         )
 
-        async with HydraClient(config=config, ui=ui) as loader:
+        async with HydraClient(config=config) as loader:
             if stream and not config.dry_run:
                 assert sys.__stdout__ is not None
                 is_terminal = sys.__stdout__.isatty()

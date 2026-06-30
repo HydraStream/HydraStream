@@ -150,13 +150,7 @@ def verify_memory_chunk(
     Выводит точное место расхождения, если оно есть.
     """
     if original_path is None:
-        original_path = (
-            Path(
-                "/home/valentin/my_project/src/hydrastream/download/original/GCF_000001405.40_GRCh38.p14_cds_from_genomic.fna.gz"
-            )
-            .expanduser()
-            .resolve()
-        )
+        original_path = Path().expanduser().resolve()
     # 1. Склеиваем текущие байты из списка, чтобы получить один монолитный кусок
     current_data = b"".join(data_bytes)
     chunk_len = len(current_data)

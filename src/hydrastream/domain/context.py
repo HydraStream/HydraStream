@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import field
-from functools import partial
+from typing import TypedDict
 
 from hydrastream.adapters.network_curl import CurlNetworkAdapter
 from hydrastream.domain.config import HydraConfig
@@ -31,13 +31,6 @@ from hydrastream.messages.traffic import (
     TrafficSignal,
     WriteCompleted,
 )
-from hydrastream.monitor import (
-    BaseMonitorKwargs,
-    JsonMonitor,
-    PlainMonitor,
-    QuietMonitor,
-    RichMonitor,
-)
 from hydrastream.providers import ProviderRouter
 from hydrastream.storage import LocalStorageManager
 
@@ -46,67 +39,40 @@ from hydrastream.storage import LocalStorageManager
 class HydraContext:
     is_running: bool = True
     is_stopping: bool = False
-    is_cancelled: bool = False
     is_stream: bool
     # =========================================================================
     # 1. ГЛОБАЛЬНЫЕ ЗАВИСИМОСТИ (Передаются снаружи при создании)
     # =========================================================================
     config: HydraConfig
-    ui: MonitorBackend = field(init=False)
-    net: NetworkBackend = field(init=False)
-    fs: StorageBackend = field(init=False)
+    ui: MonitorBackend
+    net: NetworkBackend
+    fs: StorageBackend
     provider: ProviderRouter = field(default_factory=ProviderRouter)
 
     # =========================================================================
     # 2. ОЧЕРЕДИ С ПРИОРИТЕТОМ (Priority Queues)
     # =========================================================================
-    links_q: ActorPriorityQueue[LinkData | PoisonPill] = field(
-        default_factory=partial(ActorPriorityQueue[LinkData | PoisonPill])
-    )
-    files_q: ActorPriorityQueue[File | PoisonPill] = field(
-        default_factory=ActorPriorityQueue[File | PoisonPill]
-    )
-    chunks_q: ActorPriorityQueue[Chunk | PoisonPill] = field(
-        default_factory=ActorPriorityQueue[Chunk | PoisonPill]
-    )
-    ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill] = field(
-        default_factory=ActorPriorityQueue[Chunk | PoisonPill]
-    )
-    stream_chunks_q: ActorPriorityQueue[StreamChunk | PoisonPill] = field(
-        default_factory=ActorPriorityQueue[StreamChunk | PoisonPill]
-    )
+    links_q: ActorPriorityQueue[LinkData | PoisonPill]
+    files_q: ActorPriorityQueue[File | PoisonPill]
+    chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
+    ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
+    stream_chunks_q: ActorPriorityQueue[StreamChunk | PoisonPill]
 
     # =========================================================================
     # 3. ОБЫЧНЫЕ ОЧЕРЕДИ (FIFO Queues)
     # =========================================================================
     # Диск и агрегация
-    disk_q: ActorFifoQueue[DiskMsg] = field(default_factory=ActorFifoQueue[DiskMsg])
-    writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill] = field(
-        default_factory=ActorFifoQueue[list[WriteChunk] | PoisonPill]
-    )
-    ack_q: ActorFifoQueue[WriteCompleted | PoisonPill] = field(
-        default_factory=ActorFifoQueue[WriteCompleted | PoisonPill]
-    )
-
+    disk_q: ActorFifoQueue[DiskMsg]
+    writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill]
+    ack_q: ActorFifoQueue[WriteCompleted | PoisonPill]
     # Управление и телеметрия
-    throttler_q: ActorFifoQueue[ThrottlerMsg] = field(
-        default_factory=ActorFifoQueue[ThrottlerMsg]
-    )
-    controller_q: ActorFifoQueue[TrafficSignal] = field(
-        default_factory=ActorFifoQueue[TrafficSignal]
-    )
-    state_q: ActorFifoQueue[StateKeeperMsg] = field(
-        default_factory=ActorFifoQueue[StateKeeperMsg]
-    )
-    credit_q: asyncio.Queue[int] = field(default_factory=asyncio.Queue[int])
-
+    throttler_q: ActorFifoQueue[ThrottlerMsg]
+    controller_q: ActorFifoQueue[TrafficSignal]
+    state_q: ActorFifoQueue[StateKeeperMsg]
+    credit_q: asyncio.Queue[int]
     # Жизненный цикл файлов
-    file_limit_q: ActorFifoQueue[FileCompleted] = field(
-        default_factory=ActorFifoQueue[FileCompleted]
-    )
-    file_discovery_q: ActorFifoQueue[File | PoisonPill] = field(
-        default_factory=ActorFifoQueue[File | PoisonPill]
-    )
+    file_limit_q: ActorFifoQueue[FileCompleted]
+    file_discovery_q: ActorFifoQueue[File | PoisonPill]
 
     workers: int = field(init=False)
     start_works: int = field(init=False)
@@ -124,41 +90,6 @@ class HydraContext:
     worker_events: list[asyncio.Event] = field(init=False)
 
     def __post_init__(self) -> None:
-        if self.config.custom_monitor is None:
-            base_resolver_kwargs: BaseMonitorKwargs = {
-                "is_cancelled": self.is_cancelled,
-                "is_stream": self.is_stream,
-                "is_verify": self.config.verify,
-                "log_file": self.config.output_dir,
-                "is_debug": self.config.debug,
-            }
-
-            if self.config.json_logs:
-                self.ui = JsonMonitor(**base_resolver_kwargs)
-            elif self.config.quiet:
-                self.ui = QuietMonitor(**base_resolver_kwargs)
-            elif self.config.no_ui:
-                self.ui = PlainMonitor(**base_resolver_kwargs)
-            else:
-                self.ui = RichMonitor(
-                    **base_resolver_kwargs, state_keeper_q=self.state_q
-                )
-        else:
-            self.ui = self.config.custom_monitor
-
-        if self.config.custom_storage is None:
-            self.fs = LocalStorageManager(
-                output_dir=self.config.output_dir, debug=self.config.debug
-            )
-        else:
-            self.fs = self.config.custom_storage
-
-        if self.config.custom_network is None:
-            self.net = CurlNetworkAdapter(
-                threads=self.config.threads,
-                impersonate=self.config.impersonate,
-                client_kwargs=self.config.client_kwargs,
-            )
 
         if self.config.custom_providers:
             for domain, provider in self.config.custom_providers.items():
@@ -179,3 +110,84 @@ class HydraContext:
         self.start_works = 5 if self.workers >= 5 else self.workers
         # Создаем массив светофоров и барьер под конкретное количество потоков!
         self.worker_events = [asyncio.Event() for _ in range(self.workers)]
+
+
+def build_context(
+    config: HydraConfig, ui: MonitorBackend, is_stream: bool
+) -> HydraContext:
+    channels = _create_channels()
+    ui.bind_to_state_keeper(channels["state_q"])
+    net = _create_network(config)
+    fs = _create_storage(config)
+
+    return HydraContext(
+        config=config, net=net, fs=fs, is_stream=is_stream, ui=ui, **channels
+    )
+
+
+class AppQueuesSchema(TypedDict):
+    links_q: ActorPriorityQueue[LinkData | PoisonPill]
+    files_q: ActorPriorityQueue[File | PoisonPill]
+    chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
+    ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
+    stream_chunks_q: ActorPriorityQueue[StreamChunk | PoisonPill]
+
+    disk_q: ActorFifoQueue[DiskMsg]
+    writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill]
+    ack_q: ActorFifoQueue[WriteCompleted | PoisonPill]
+    throttler_q: ActorFifoQueue[ThrottlerMsg]
+    controller_q: ActorFifoQueue[TrafficSignal]
+    state_q: ActorFifoQueue[StateKeeperMsg]
+    credit_q: asyncio.Queue[int]
+    file_limit_q: ActorFifoQueue[FileCompleted]
+    file_discovery_q: ActorFifoQueue[File | PoisonPill]
+
+
+def _create_channels() -> AppQueuesSchema:
+
+    channels = {}
+
+    actor_p_queues = {
+        "links_q": 0,
+        "files_q": 0,
+        "chunks_q": 0,
+        "ready_chunks_q": 0,
+        "stream_chunks_q": 0,
+    }
+
+    for k, v in actor_p_queues.items():
+        channels[k] = ActorPriorityQueue(maxsize=v)
+
+    actor_queues = {
+        "disk_q": 0,
+        "writer_q": 0,
+        "ack_q": 0,
+        "throttler_q": 0,
+        "controller_q": 0,
+        "state_q": 0,
+        "file_limit_q": 0,
+        "file_discovery_q": 0,
+    }
+    for k, v in actor_queues.items():
+        channels[k] = ActorFifoQueue(maxsize=v)
+
+    channels["credit_q"] = asyncio.Queue(maxsize=0)
+
+    return channels  # type: ignore
+
+
+def _create_network(config: HydraConfig) -> NetworkBackend:
+
+    if config.custom_network is None:
+        return CurlNetworkAdapter(
+            threads=config.threads,
+            impersonate=config.impersonate,
+            client_kwargs=config.client_kwargs,
+        )
+    return config.custom_network
+
+
+def _create_storage(config: HydraConfig) -> StorageBackend:
+    if config.custom_storage is None:
+        return LocalStorageManager(output_dir=config.output_dir, debug=config.debug)
+    return config.custom_storage

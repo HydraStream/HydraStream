@@ -19,7 +19,6 @@ from hydrastream.exceptions import (
     InsufficientSpaceError,
     StateSaveError,
 )
-from hydrastream.utils import debug_allocated_file
 
 
 class LocalStorageManager:
@@ -87,9 +86,7 @@ class LocalStorageManager:
         """Сложная векторная запись (Zero-Copy) для
         Linux/macOS с обходом лимита IOV_MAX и точной обработкой частичной записи."""
 
-        # Задаем жесткий безопасный лимит. Использование динамического getattr
-        # может вернуть слишком большое число, лучше ограничить до стабильных 1000.
-        IOV_MAX = 1000  # noqa: N806
+        IOV_MAX = getattr(os, "UIO_MAXIOV", 1024)  # noqa: N806
 
         current_offset = offset
 
@@ -114,9 +111,8 @@ class LocalStorageManager:
                         raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
 
                     written += n
-                    current_offset += (
-                        n  # Сдвигаем смещение для следующего вызова pwritev
-                    )
+                    # Сдвигаем смещение для следующего вызова pwritev
+                    current_offset += n
 
                     if written < batch_len:
                         views = self._rebuild_memoryviews(views, n)
@@ -294,7 +290,6 @@ class LocalStorageManager:
 
         if calculated != expected_checksum:
             filepath = self.output_dir / filename
-            debug_allocated_file(self.output_dir / "original" / filename, filepath)
             filepath.unlink(missing_ok=True)
             raise HashMismatchError(
                 filename=filename,

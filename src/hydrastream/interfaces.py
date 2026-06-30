@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 from typing_extensions import Buffer, runtime_checkable
 
 from hydrastream.exceptions import HydraError, LogStatus
+from hydrastream.messages.base import ActorFifoQueue
+from hydrastream.messages.state import StateKeeperMsg
 
 if TYPE_CHECKING:
     from hydrastream.domain.entities import Checksum, File, TypeHash
@@ -79,7 +81,13 @@ class MonitorBackend(Protocol):
         """Отметить файл как завершенный"""
         ...
 
+    def get_dup_fd(self) -> int | None: ...
+
     async def start(self) -> None: ...
+
+    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None:
+        """Позволяет привязать очередь состояния ПОСЛЕ создания UI"""
+        ...
 
     async def stop(self) -> None:
         """Остановить отрисовку и закрыть ресурсы"""
