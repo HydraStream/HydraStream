@@ -3,7 +3,6 @@ from typing import TypeAlias
 
 from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.messages.base import PoisonPill
 
 # 1. Базовый маркерный класс для конкретного актора
 
@@ -47,5 +46,4 @@ StateKeeperMsg: TypeAlias = (
     | ProgressDeltaCmd
     | UpdateBytesToCheckCmd
     | GetUIDeltasCmd
-    | PoisonPill
 )

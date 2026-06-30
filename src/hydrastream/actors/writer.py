@@ -1,63 +1,45 @@
 import asyncio
 import errno
 import os
+from typing import assert_never
 
+from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.interfaces import MonitorBackend, StorageBackend
+from hydrastream.interfaces import StorageBackend
 from hydrastream.messages.base import (
     ActorFifoQueue,
     PoisonPill,
-    StandardPill,
-    TerminalPill,
 )
 from hydrastream.messages.io import WriteChunk
 from hydrastream.messages.traffic import WriteCompleted
 
 
 @hydra_dataclass
-class DiskWriter:
-    writer_inbox: ActorFifoQueue[list[WriteChunk] | PoisonPill]
+class DiskWriter(BaseActor[list[WriteChunk]]):
     ack_outbox: ActorFifoQueue[WriteCompleted | PoisonPill]
 
     fs: StorageBackend
-    ui: MonitorBackend
 
-    is_debug: bool
+    async def _handle_msg(self, msg: list[WriteChunk]) -> None:
+        match msg:
+            case list() as batch:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._write_all_sync, batch)
+                await self.ack_outbox.send_data(WriteCompleted())
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
 
-    async def run(self) -> None:
-        loop = asyncio.get_running_loop()
-
-        while True:
-            msg = await self.writer_inbox.get()
-
-            match msg:
-                case list() as batch:
-                    try:
-                        await loop.run_in_executor(None, self._write_all_sync, batch)
-
-                        await self.ack_outbox.send_data(WriteCompleted())
-
-                    except Exception as e:
-                        msg = self._handle_disk_error(e)
-                        await self.ui.log(
-                            f"Disk Write Failure: {msg}",
-                            status=LogStatus.CRITICAL,
-                        )
-                        raise RuntimeError(msg) from e
-
-                case StandardPill() | TerminalPill():
-                    break
-
-                case _:
-                    if self.is_debug:
-                        raise RuntimeError(
-                            f"Unknown message type in writer_inbox: {type(msg)}"
-                        )
-                    await self.ui.log(
-                        f"Received unknown message: {msg}",
-                        status=LogStatus.ERROR,
-                    )
+    async def _on_error(
+        self, e: Exception, msg: list[WriteChunk] | PoisonPill | None = None
+    ) -> None:
+        _msg = self._handle_disk_error(e)
+        await self.ui.log(
+            f"Disk Write Failure: {_msg}",
+            status=LogStatus.CRITICAL,
+        )
+        raise RuntimeError(_msg) from e
 
     def _write_all_sync(self, coalesced: list[WriteChunk]) -> None:
         for chunk in coalesced:

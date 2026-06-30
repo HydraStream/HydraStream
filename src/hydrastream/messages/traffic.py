@@ -27,9 +27,7 @@ class NetworkCongestionSignal:
     pass
 
 
-TrafficSignal: TypeAlias = (
-    ScaleDownSignal | ScaleUpSignal | NetworkCongestionSignal | PoisonPill
-)
+TrafficSignal: TypeAlias = ScaleDownSignal | ScaleUpSignal | NetworkCongestionSignal
 
 
 @hydra_dataclass(frozen=True)
@@ -63,7 +61,6 @@ ThrottlerMsg: TypeAlias = (
     | RemoveStreamCmd
     | DiskBufferFullSignal
     | DiskBufferClearedSignal
-    | PoisonPill
 )
 
 

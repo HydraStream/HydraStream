@@ -226,7 +226,7 @@ async def _bootstrap_engine(
         tg.create_task(writer.run(), name="DiskWriter")
 
         aggregator = DiskAggregator(
-            disk_inbox=ctx.disk_q,
+            inbox=ctx.disk_q,
             throttler_outbox=ctx.throttler_q,
             ack_inbox=ctx.ack_q,
             writer_outbox=ctx.writer_q,

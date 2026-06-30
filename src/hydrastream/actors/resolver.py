@@ -4,11 +4,12 @@
 import asyncio
 import random
 from abc import ABC, abstractmethod
-from typing import TypedDict
+from typing import TypedDict, assert_never
 
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
+from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.entities import Checksum, File, FileMeta, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
@@ -21,8 +22,6 @@ from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
     PoisonPill,
-    StandardPill,
-    TerminalPill,
 )
 from hydrastream.messages.io import LinkData
 from hydrastream.messages.state import ProgressDeltaCmd, RegisterFileCmd, StateKeeperMsg
@@ -52,11 +51,10 @@ class BaseResolverKwargs(TypedDict):
 
 
 @hydra_dataclass
-class BaseMetadataResolver(ABC):
+class BaseMetadataResolver(BaseActor[LinkData], ABC):
     threads: int
     MIN_CHUNK: int
 
-    links_inbox: ActorPriorityQueue[LinkData | PoisonPill]
     files_outbox: ActorPriorityQueue[File | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg]
 
@@ -64,60 +62,74 @@ class BaseMetadataResolver(ABC):
 
     is_dry_run: bool
     is_verify: bool
-    is_debug: bool
 
-    ui: MonitorBackend
     net: NetworkBackend
     provider: ProviderRouter
 
-    async def run(self) -> None:
-        """Это ШАБЛОННЫЙ МЕТОД. Наследники не переопределяют его!"""
+    async def _handle_msg(self, msg: LinkData) -> None:
         checksum = None
-        while True:
-            msg = await self.links_inbox.get()
+        match msg:
+            case LinkData() as data:
+                meta = await self._fetch_metadata(data.url)
+                filename, total_size, supports_ranges = meta
 
-            match msg:
-                case LinkData() as data:
-                    try:
-                        meta = await self._fetch_metadata(data.url)
-                        filename, total_size, supports_ranges = meta
+                if self.is_verify and not data.checksum:
+                    checksum = await self._resolve_hash(
+                        data.id, data.url, filename, data.checksum
+                    )
 
-                        if self.is_verify and not data.checksum:
-                            checksum = await self._resolve_hash(
-                                data.id, data.url, filename, data.checksum
-                            )
+                file_obj = await self._prepare_file_object(
+                    data=data,
+                    filename=filename,
+                    total_size=total_size,
+                    supports_ranges=supports_ranges,
+                    checksum=checksum,
+                )
 
-                        file_obj = await self._prepare_file_object(
-                            data=data,
-                            filename=filename,
-                            total_size=total_size,
-                            supports_ranges=supports_ranges,
-                            checksum=checksum,
-                        )
+                await self._register_file(file_obj)
 
-                        await self._register_file(file_obj)
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
 
-                    except Exception as e:
-                        await self._handle_error(e, msg)
+    async def _on_terminal_pill(self) -> None:
+        await self.files_outbox.send_poison_pills()
+        if self.is_dry_run:
+            self.all_complete.set()
 
-                case StandardPill():
-                    break
+    async def _on_error(
+        self, e: Exception, msg: LinkData | PoisonPill | None = None
+    ) -> None:
+        if not isinstance(msg, LinkData):
+            return
 
-                case TerminalPill():
-                    await self.files_outbox.send_poison_pills()
-                    if self.is_dry_run:
-                        self.all_complete.set()
-                    break
+        if isinstance(e, RequestsError):
+            response = self.net.get_error_response
 
-                case _:
-                    if self.is_debug:
-                        raise RuntimeError(
-                            f"Unknown message type in links_inbox: {type(msg)}"
-                        )
+            if isinstance(response, Response):
+                status = response.status_code
+                # Постоянные ошибки: логируем и забываем
+                if status in {400, 401, 403, 404, 410, 416}:
                     await self.ui.log(
-                        f"Received unknown message: {msg}",
+                        f"Link {redact_url(msg.url)} failed permanently "
+                        f"(HTTP {status}).",
                         status=LogStatus.ERROR,
                     )
+
+                # Временные ошибки сервера (5xx, 429) — в очередь
+                await self._requeue_chunk(msg, delay_range=(0.5, 2.0))
+            else:
+                # Сетевая ошибка без ответа
+                await self._requeue_chunk(msg)
+
+        if isinstance(e, TimeoutError):
+            await self._requeue_chunk(msg)
+
+        # Если мы здесь, значит ошибка критическая (Exception)
+        await self.ui.log(
+            f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL
+        )
+        raise e
 
     async def _register_file(self, file_obj: File) -> None:
         """Общая логика регистрации, внутри которой есть ХУК для наследников."""
@@ -148,47 +160,12 @@ class BaseMetadataResolver(ABC):
     async def _on_file_registered(self, file_obj: File) -> None:
         pass
 
-    async def _handle_error(
-        self,
-        e: Exception,
-        data: LinkData,
-    ) -> None:
-        """Возвращает True, если нужно пропустить итерацию (continue)."""
-
-        if isinstance(e, RequestsError):
-            response = self.net.get_error_response
-
-            if isinstance(response, Response):
-                status = response.status_code
-                # Постоянные ошибки: логируем и забываем
-                if status in {400, 401, 403, 404, 410, 416}:
-                    await self.ui.log(
-                        f"Link {redact_url(data.url)} failed permanently "
-                        f"(HTTP {status}).",
-                        status=LogStatus.ERROR,
-                    )
-
-                # Временные ошибки сервера (5xx, 429) — в очередь
-                await self._requeue_chunk(data, delay_range=(0.5, 2.0))
-            else:
-                # Сетевая ошибка без ответа
-                await self._requeue_chunk(data)
-
-        if isinstance(e, TimeoutError):
-            await self._requeue_chunk(data)
-
-        # Если мы здесь, значит ошибка критическая (Exception)
-        await self.ui.log(
-            f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL
-        )
-        raise e
-
     async def _requeue_chunk(
         self,
         data: LinkData,
         delay_range: tuple[float, float] = (1.0, 3.0),
     ) -> None:
-        await self.links_inbox.send_data(data)
+        await self.inbox.send_data(data)
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 

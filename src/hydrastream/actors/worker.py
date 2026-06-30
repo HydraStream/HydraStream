@@ -6,7 +6,7 @@ import os
 import random
 import traceback
 from abc import ABC, abstractmethod
-from typing import TypedDict
+from typing import TypedDict, assert_never
 
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
@@ -15,6 +15,7 @@ from hydrastream.actors.controller import (
     TrafficSignal,
 )
 from hydrastream.actors.dispatcher import FileCompleted
+from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.entities import Chunk, File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
@@ -32,8 +33,6 @@ from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
     PoisonPill,
-    StandardPill,
-    TerminalPill,
 )
 from hydrastream.messages.io import StreamChunk, WriteChunk
 from hydrastream.messages.state import ProgressDeltaCmd, RemoveFileCmd, StateKeeperMsg
@@ -61,36 +60,26 @@ class BaseWorkerKwargs(TypedDict):
 
 
 @hydra_dataclass
-class BaseDownloadWorker(ABC):
-    chunks_inbox: ActorPriorityQueue[Chunk | PoisonPill]
+class BaseDownloadWorker(BaseActor[Chunk], ABC):
     throttler_outbox: ActorFifoQueue[ThrottlerMsg] | None = None
     controller_outbox: ActorFifoQueue[TrafficSignal]
     state_outbox: ActorFifoQueue[StateKeeperMsg]
 
     all_complete: asyncio.Event
 
-    ui: MonitorBackend
     net: NetworkBackend
-
-    is_debug: bool
 
     wakeup_event: asyncio.Event
 
-    async def run(self) -> None:
+    async def _handle_msg(self, msg: Chunk) -> None:
 
-        while True:
-            await self.wakeup_event.wait()
-            chunk = await self.get_chunk()
+        match msg:
+            case Chunk() as chunk:
+                file_obj = chunk.file
+                if not file_obj or file_obj.is_failed:
+                    return
 
-            if isinstance(chunk, Chunk):
-                pass
-            elif chunk:
-                continue
-            else:
-                break
-
-            try:
-                await self.process_chunk(chunk)
+                await self._process_chunk(chunk)
 
                 if not chunk.is_finished:
                     await self.ui.log(
@@ -100,65 +89,49 @@ class BaseDownloadWorker(ABC):
                         throttle_key="truncated_read",
                         throttle_sec=2.0,
                     )
-                    await self.requeue_chunk(chunk, delay_range=(0.1, 1.0))
-                    continue
-                await self.file_done(chunk)
-            except Exception as e:
-                await self.handle_worker_error(chunk, e)
+                    await self._requeue_chunk(chunk, delay_range=(0.1, 1.0))
+                    return
 
-    async def get_chunk(self) -> Chunk | bool:
-        msg = await self.chunks_inbox.get()
+                await self._file_done(chunk)
 
-        match msg:
-            case Chunk() as chunk:
-                file_obj = chunk.file
-                if not file_obj or file_obj.is_failed:
-                    return True
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
 
-                return msg
+    async def _on_standard_pill(self) -> None:
+        await self.controller_outbox.send_poison_pills()
 
-            case StandardPill():
-                await self.controller_outbox.send_poison_pills()
-                return False
-
-            case TerminalPill():
-                if self.throttler_outbox is not None:
-                    await self.throttler_outbox.send_poison_pills()
-                await self.state_outbox.send_poison_pills()
-                await self._finally()
-                return False
-
-            case _:
-                if self.is_debug:
-                    raise RuntimeError(
-                        f"Unknown message type in links_inbox: {type(msg)}"
-                    )
-                await self.ui.log(
-                    f"Received unknown message: {msg}",
-                    status=LogStatus.ERROR,
-                )
-                return True
+    async def _on_terminal_pill(self) -> None:
+        if self.throttler_outbox is not None:
+            await self.throttler_outbox.send_poison_pills()
+        await self.state_outbox.send_poison_pills()
+        await self._finally()
 
     @abstractmethod
     async def _finally(self) -> None:
         pass
 
-    async def handle_worker_error(self, chunk: Chunk, e: Exception) -> None:
+    async def _on_error(
+        self, e: Exception, msg: Chunk | PoisonPill | None = None
+    ) -> None:
+        if not isinstance(msg, Chunk):
+            return
+
         if isinstance(e, WorkerScaleDown):
-            await self.chunks_inbox.send_data(
-                sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),
-                data=chunk,
+            await self.inbox.send_data(
+                sort_key=self._get_sort_key(msg.file.meta.id, msg.current_pos),
+                data=msg,
             )
             return
 
         if isinstance(e, RequestsError):
-            await self._handle_requests_error(chunk, e)
+            await self._handle_requests_error(msg, e)
             await self.controller_outbox.send_data(NetworkCongestionSignal())
             await self.controller_outbox.send_poison_pills()
             return
 
         if isinstance(e, TimeoutError):
-            await self.requeue_chunk(chunk)
+            await self._requeue_chunk(msg)
             return
 
         tb_str = traceback.format_exc()
@@ -178,7 +151,7 @@ class BaseDownloadWorker(ABC):
         """Разбирает сетевые ошибки и решает: убить файл или переповторить чанк."""
         response = self.net.get_error_response(e)
         if not isinstance(response, Response):
-            await self.requeue_chunk(chunk)
+            await self._requeue_chunk(chunk)
             return
 
         status = response.status_code
@@ -191,7 +164,7 @@ class BaseDownloadWorker(ABC):
             )
             await self._handle_critical_requests_error(chunk, response)
         else:
-            await self.requeue_chunk(chunk, delay_range=(0.5, 2.0))
+            await self._requeue_chunk(chunk, delay_range=(0.5, 2.0))
 
     @abstractmethod
     async def _handle_critical_requests_error(
@@ -200,7 +173,7 @@ class BaseDownloadWorker(ABC):
         pass
 
     @abstractmethod
-    async def requeue_chunk(
+    async def _requeue_chunk(
         self,
         chunk: Chunk,
         delay_range: tuple[float, float] = (1.0, 3.0),
@@ -208,7 +181,7 @@ class BaseDownloadWorker(ABC):
         pass
 
     @abstractmethod
-    async def process_chunk(self, chunk: Chunk) -> None:
+    async def _process_chunk(self, chunk: Chunk) -> None:
         pass
 
     @abstractmethod
@@ -217,7 +190,7 @@ class BaseDownloadWorker(ABC):
         pass
 
     @abstractmethod
-    async def file_done(
+    async def _file_done(
         self,
         chunk: Chunk,
     ) -> None:
@@ -243,7 +216,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
             reason=response.reason,
         )
 
-    async def requeue_chunk(
+    async def _requeue_chunk(
         self,
         chunk: Chunk,
         delay_range: tuple[float, float] = (1.0, 3.0),
@@ -255,14 +228,14 @@ class StreamDownloadWorker(BaseDownloadWorker):
             raise StreamError(
                 url=chunk.file.meta.url, filename=chunk.file.actual_filename
             )
-        await self.chunks_inbox.send_data(
+        await self.inbox.send_data(
             sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),
             data=chunk,
         )
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
-    async def process_chunk(self, chunk: Chunk) -> None:
+    async def _process_chunk(self, chunk: Chunk) -> None:
         if chunk.file.meta.supports_ranges:
             headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
         else:
@@ -312,7 +285,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
                     )
                     chunk.current_pos = chunk.current_pos + current_buffer_size
 
-    async def file_done(
+    async def _file_done(
         self,
         chunk: Chunk,
     ) -> None:
@@ -340,7 +313,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
         chunk.file.is_failed = True
         self.fs.delete_file(chunk.file.actual_filename)
 
-    async def requeue_chunk(
+    async def _requeue_chunk(
         self,
         chunk: Chunk,
         delay_range: tuple[float, float] = (1.0, 3.0),
@@ -376,14 +349,14 @@ class DiskDownloadWorker(BaseDownloadWorker):
                     await loop.run_in_executor(
                         None, os.ftruncate, fd, file_obj.meta.content_length
                     )
-        await self.chunks_inbox.send_data(
+        await self.inbox.send_data(
             sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),
             data=chunk,
         )
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
-    async def process_chunk(self, chunk: Chunk) -> None:  # noqa
+    async def _process_chunk(self, chunk: Chunk) -> None:  # noqa
         if chunk.file.meta.supports_ranges:
             headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
         else:
@@ -460,7 +433,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
         # ДИСК: Сначала позиция, потом ID файла (Round-Robin параллельность!)
         return (current_pos, file_id)
 
-    async def file_done(
+    async def _file_done(
         self,
         chunk: Chunk,
     ) -> None:

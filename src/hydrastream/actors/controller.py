@@ -2,9 +2,10 @@
 # Licensed under the MIT License.
 
 import asyncio
+from typing import assert_never
 
+from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.messages.base import ActorFifoQueue, StandardPill, TerminalPill
 from hydrastream.messages.traffic import (
     NetworkCongestionSignal,
     ScaleDownSignal,
@@ -14,8 +15,7 @@ from hydrastream.messages.traffic import (
 
 
 @hydra_dataclass
-class TrafficController:
-    reg_events_q: ActorFifoQueue[TrafficSignal]
+class TrafficController(BaseActor[TrafficSignal]):
     worker_events: list[asyncio.Event]
     stop_analyzer: asyncio.Event
     analyzer_checkpoint_event: asyncio.Event
@@ -27,29 +27,21 @@ class TrafficController:
         for i in range(self.dynamic_limit):
             self.worker_events[i].set()
 
-    async def run(self) -> None:
-        while True:
-            msg = await self.reg_events_q.get()
+    async def _handle_msg(self, msg: TrafficSignal) -> None:
+        match msg:
+            case NetworkCongestionSignal() | ScaleDownSignal():
+                self.dynamic_limit = max(1, self.dynamic_limit - 1)
 
-            match msg:
-                case NetworkCongestionSignal() | ScaleDownSignal():
-                    self.dynamic_limit = max(1, self.dynamic_limit - 1)
+            case ScaleUpSignal():
+                self.dynamic_limit = min(
+                    len(self.worker_events), self.dynamic_limit + 1
+                )
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
 
-                case ScaleUpSignal():
-                    self.dynamic_limit = min(
-                        len(self.worker_events), self.dynamic_limit + 1
-                    )
-
-                case StandardPill() | TerminalPill():
-                    self.dynamic_limit = len(self.worker_events)
-                    self._update_lights()
-                    self.stop_analyzer.set()
-                    self.analyzer_checkpoint_event.set()
-
-                    break
-
-            if self.dynamic_limit != self.prev_dynamic_limit:
-                self._update_lights()
+        if self.dynamic_limit != self.prev_dynamic_limit:
+            self._update_lights()
 
     def _update_lights(self) -> None:
         start, end = sorted((self.prev_dynamic_limit, self.dynamic_limit))
@@ -62,4 +54,9 @@ class TrafficController:
             for event in events_to_update:
                 event.clear()
 
+    async def _on_terminal_pill(self) -> None:
         self.prev_dynamic_limit = self.dynamic_limit
+        self.dynamic_limit = len(self.worker_events)
+        self._update_lights()
+        self.stop_analyzer.set()
+        self.analyzer_checkpoint_event.set()

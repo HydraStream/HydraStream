@@ -1,14 +1,13 @@
 import asyncio
 from dataclasses import field
+from typing import assert_never
 
+from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.exceptions import LogStatus
-from hydrastream.interfaces import MonitorBackend, StorageBackend
+from hydrastream.interfaces import StorageBackend
 from hydrastream.messages.base import (
     ActorFifoQueue,
     PoisonPill,
-    StandardPill,
-    TerminalPill,
 )
 from hydrastream.messages.io import WriteChunk
 from hydrastream.messages.traffic import (
@@ -21,77 +20,58 @@ from hydrastream.messages.traffic import (
 
 
 @hydra_dataclass
-class DiskAggregator:
-    disk_inbox: ActorFifoQueue[WriteChunk | FlushCmd | PoisonPill]
+class DiskAggregator(BaseActor[WriteChunk | FlushCmd]):
     throttler_outbox: ActorFifoQueue[ThrottlerMsg]
     ack_inbox: ActorFifoQueue[WriteCompleted | PoisonPill]
     writer_outbox: ActorFifoQueue[list[WriteChunk] | PoisonPill]
     MAX_BUFFER: int
 
-    ui: MonitorBackend
     fs: StorageBackend
-
-    is_debug: bool
 
     _current_buffer: list[WriteChunk] = field(default_factory=list[WriteChunk])
     _current_size: int = 0
     _is_writing_now: bool = False
 
-    async def run(self) -> None:
-        try:
-            while True:
-                msg = await self.disk_inbox.get()
+    async def _handle_msg(self, msg: WriteChunk | FlushCmd) -> None:
+        match msg:
+            case WriteChunk():
+                self._current_buffer.append(msg)
+                self._current_size += msg.length
 
-                match msg:
-                    case WriteChunk():
-                        self._current_buffer.append(msg)
-                        self._current_size += msg.length
+                if self._current_size >= self.MAX_BUFFER:
+                    await self._persist_buffer()
 
-                        if self._current_size >= self.MAX_BUFFER:
-                            await self._persist_buffer()
+            case FlushCmd() as cmd:
+                await self._persist_buffer()
 
-                    case FlushCmd() as cmd:
-                        await self._persist_buffer()
+                if self._is_writing_now:
+                    try:
+                        async with asyncio.timeout(60.0):
+                            await self.ack_inbox.get()
+                    except TimeoutError as e:
+                        raise RuntimeError("DiskWriter hung during Flush!") from e
 
-                        if self._is_writing_now:
-                            try:
-                                async with asyncio.timeout(60.0):
-                                    await self.ack_inbox.get()
-                            except TimeoutError as e:
-                                raise RuntimeError(
-                                    "DiskWriter hung during Flush!"
-                                ) from e
+                    self._is_writing_now = False
 
-                            self._is_writing_now = False
+                    await self.throttler_outbox.send_data(DiskBufferClearedSignal())
 
-                            await self.throttler_outbox.send_data(
-                                DiskBufferClearedSignal()
-                            )
+                cmd.reply_to.set()
 
-                        cmd.reply_to.set()
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
 
-                    case StandardPill() | TerminalPill():
-                        await self._persist_buffer()
+    async def _on_terminal_pill(self) -> None:
+        await self._persist_buffer()
+        await self.writer_outbox.send_poison_pills()
 
-                        await self.writer_outbox.send_poison_pills()
-                        break
-
-                    case _:
-                        if self.is_debug:
-                            raise RuntimeError(
-                                f"Unknown message type in disk_inbox: {type(msg)}"
-                            )
-                        await self.ui.log(
-                            f"Received unknown message: {msg}",
-                            status=LogStatus.ERROR,
-                        )
-        finally:
-            if self._current_buffer:
-                coalesced = await self._coalesce(self._current_buffer)
-                for chunk in coalesced:
-                    self.fs.write_chunk_data(
-                        chunk.fd, chunk.data, chunk.length, chunk.offset
-                    )
+    async def _on_stop(self) -> None:
+        if self._current_buffer:
+            coalesced = await self._coalesce(self._current_buffer)
+            for chunk in coalesced:
+                self.fs.write_chunk_data(
+                    chunk.fd, chunk.data, chunk.length, chunk.offset
+                )
 
     async def _persist_buffer(self) -> None:
 

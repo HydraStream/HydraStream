@@ -3,81 +3,64 @@
 
 import asyncio
 from abc import ABC, abstractmethod
+from typing import assert_never
 
+from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.entities import Chunk, File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.interfaces import MonitorBackend, StorageBackend
+from hydrastream.interfaces import StorageBackend
 from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
     PoisonPill,
-    StandardPill,
-    TerminalPill,
 )
 from hydrastream.messages.traffic import FileCompleted
 
 
 @hydra_dataclass
-class BaseFileDispatcher(ABC):
+class BaseFileDispatcher(BaseActor[File], ABC):
     limit: int
     current_files: int = 0
     num_workers: int
 
-    files_inbox: ActorPriorityQueue[File | PoisonPill]
     chunks_outbox: ActorPriorityQueue[Chunk | PoisonPill]
     file_limit_inbox: ActorFifoQueue[FileCompleted]
 
-    ui: MonitorBackend
+    async def _handle_msg(self, msg: File) -> None:
+        match msg:
+            case File() as file_obj:
+                if self.current_files >= self.limit:
+                    await self.file_limit_inbox.get()
+                    self.current_files -= 1
 
-    is_debug: bool
+                self.current_files += 1
 
-    async def run(self) -> None:
+                await self._prepare_file(file_obj)
 
-        while True:
-            msg = await self.files_inbox.get()
-
-            match msg:
-                case File() as file_obj:
-                    if self.current_files >= self.limit:
-                        await self.file_limit_inbox.get()
-                        self.current_files -= 1
-
-                    self.current_files += 1
-
-                    await self._prepare_file(file_obj)
-
-                    if file_obj.meta.original_filename != file_obj.actual_filename:
-                        await self.ui.log(
-                            f"{file_obj.meta.original_filename} already exists. "
-                            f"Saving as {file_obj.actual_filename}.",
-                            status=LogStatus.WARNING,
-                        )
-
-                    file_obj.create_chunks()
-
-                    for c in file_obj.chunks:
-                        if c.current_pos <= c.end:
-                            await self.chunks_outbox.send_data(
-                                sort_key=self._get_sort_key(
-                                    file_obj.meta.id, c.current_pos
-                                ),
-                                data=c,
-                            )
-
-                case StandardPill() | TerminalPill():
-                    await self.chunks_outbox.send_poison_pills(self.num_workers)
-                    break
-
-                case _:
-                    if self.is_debug:
-                        raise RuntimeError(
-                            f"Unknown message type in files_inbox: {type(msg)}"
-                        )
+                if file_obj.meta.original_filename != file_obj.actual_filename:
                     await self.ui.log(
-                        f"Received unknown message: {msg}",
-                        status=LogStatus.ERROR,
+                        f"{file_obj.meta.original_filename} already exists. "
+                        f"Saving as {file_obj.actual_filename}.",
+                        status=LogStatus.WARNING,
                     )
+
+                file_obj.create_chunks()
+
+                for c in file_obj.chunks:
+                    if c.current_pos <= c.end:
+                        await self.chunks_outbox.send_data(
+                            sort_key=self._get_sort_key(
+                                file_obj.meta.id, c.current_pos
+                            ),
+                            data=c,
+                        )
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
+
+    async def _on_terminal_pill(self) -> None:
+        await self.chunks_outbox.send_poison_pills(self.num_workers)
 
     @abstractmethod
     async def _prepare_file(self, file_obj: File) -> None:
