@@ -99,12 +99,6 @@ class DownloadFailedError(HydraError):
         HydraError.__post_init__(self)
 
 
-class WorkerScaleDown(Exception):  # noqa: N818
-    """Сигнал для воркера уйти в спячку при сужении лимита AIMD."""
-
-    pass
-
-
 @hydra_dataclass
 class FileSizeMismatchError(HydraError):
     filename: str

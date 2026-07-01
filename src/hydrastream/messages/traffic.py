@@ -66,7 +66,11 @@ ThrottlerMsg: TypeAlias = (
 
 @hydra_dataclass(frozen=True)
 class FlushCmd:
-    reply_to: asyncio.Event
+    reply_to: asyncio.Future[bool]
+
+    @classmethod
+    def create_request(cls, future: asyncio.Future[bool]) -> "FlushCmd":
+        return cls(reply_to=future)
 
 
 DiskMsg: TypeAlias = WriteChunk | FlushCmd | PoisonPill

@@ -20,7 +20,13 @@ class RemoveFileCmd:
 
 @hydra_dataclass(frozen=True)
 class GetSnapshotCmd:
-    reply_to: asyncio.Queue[dict[int, File]]
+    reply_to: asyncio.Future[dict[int, File]]
+
+    @classmethod
+    def create_request(
+        cls, future: asyncio.Future[dict[int, File]]
+    ) -> "GetSnapshotCmd":
+        return cls(reply_to=future)
 
 
 @hydra_dataclass(frozen=True)
@@ -36,7 +42,11 @@ class UpdateBytesToCheckCmd:
 
 @hydra_dataclass(frozen=True)
 class GetUIDeltasCmd:
-    reply_to: asyncio.Queue[dict[int, int]]
+    reply_to: asyncio.Future[dict[int, int]]
+
+    @classmethod
+    def create_request(cls, future: asyncio.Future[dict[int, int]]) -> "GetUIDeltasCmd":
+        return cls(reply_to=future)
 
 
 StateKeeperMsg: TypeAlias = (

@@ -1,21 +1,25 @@
-import asyncio
 import math
 import time
+from typing import assert_never
 
+from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.interfaces import MonitorBackend
-from hydrastream.messages.base import ActorFifoQueue
+from hydrastream.messages.base import ActorFifoQueue, PoisonPill
 from hydrastream.messages.state import StateKeeperMsg, UpdateBytesToCheckCmd
 from hydrastream.messages.traffic import ScaleDownSignal, ScaleUpSignal, TrafficSignal
 from hydrastream.utils import format_size
 
 
 @hydra_dataclass
-class TelemetryAnalyzer:
+class CheckpointEvent:
+    pass
+
+
+@hydra_dataclass
+class TelemetryAnalyzer(BaseActor[CheckpointEvent]):
     threads: int
     _current_limit: int
-    analyzer_checkpoint_event: asyncio.Event
     controller_outbox: ActorFifoQueue[TrafficSignal]
     state_outbox: ActorFifoQueue[StateKeeperMsg]
     bytes_to_check: int
@@ -26,29 +30,26 @@ class TelemetryAnalyzer:
     _sensitivity: float = 0.05
     _last_checkpoint_time: float = 0.0
     _dynamic_limit: int = 1
-    is_debug: bool
 
-    ui: MonitorBackend
-
-    stop_analyzer: asyncio.Event
-
-    async def run(self) -> None:
-        while not self.stop_analyzer.is_set():
-            try:
-                await self.analyzer_checkpoint_event.wait()
-
-                self.analyzer_checkpoint_event.clear()
-
-                # Просто делаем шаг
+    async def _handle_msg(self, msg: CheckpointEvent) -> None:
+        match msg:
+            case CheckpointEvent():
                 await self._step()
 
-            except Exception as e:
-                if self.is_debug:
-                    raise
-                await self.ui.log(
-                    f"Adaptive controller failed: {e}",
-                    status=LogStatus.ERROR,
-                )
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
+
+    async def _on_error(
+        self, e: Exception, msg: CheckpointEvent | PoisonPill | None = None
+    ) -> None:
+
+        if self.is_debug:
+            raise e
+        await self.ui.log(
+            f"Adaptive controller failed: {e}",
+            status=LogStatus.ERROR,
+        )
 
     def _calculate_ema(self, speed_now: float, elapsed: float) -> float:
         if self._smoothed_speed == 0.0:

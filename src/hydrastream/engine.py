@@ -34,7 +34,7 @@ from hydrastream.domain.entities import Checksum, File, TypeHash
 from hydrastream.exceptions import (
     LogStatus,
 )
-from hydrastream.messages.base import StandardPill, TerminalPill
+from hydrastream.messages.base import StandardPill, TerminalPill, ask
 from hydrastream.messages.state import GetSnapshotCmd
 
 Ts = TypeVarTuple("Ts")
@@ -377,9 +377,12 @@ async def run_downloads(
                 await _bootstrap_engine(ctx, tg, links, expected_checksums)
 
             if ctx.config.dry_run:
-                _get_shapshot: asyncio.Queue[dict[int, File]] = asyncio.Queue()
-                await ctx.state_q.send_data(GetSnapshotCmd(reply_to=_get_shapshot))
-                files = await _get_shapshot.get()
+                files = await ask(
+                    inbox=ctx.state_q,
+                    msg_factory=GetSnapshotCmd.create_request,
+                    timeout=5.0,
+                    sort_key=(-1,),
+                )
                 await ctx.ui.dry_run(files, ctx.config.output_dir)
 
         except* Exception as eg:

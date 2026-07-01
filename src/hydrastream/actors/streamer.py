@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 from collections.abc import AsyncGenerator
 
@@ -20,7 +19,7 @@ from hydrastream.messages.io import StreamChunk
 async def file_streamer(  # noqa
     file_obj: File,
     stream_chunk_inbox: ActorPriorityQueue[StreamChunk | PoisonPill],
-    credit_outbox: asyncio.Queue[int],
+    credit_outbox: ActorFifoQueue[int],
     reg_events_q: ActorFifoQueue[StateKeeperMsg],
     file_limit_q: ActorFifoQueue[FileCompleted],
     ui: MonitorBackend,
@@ -49,7 +48,7 @@ async def file_streamer(  # noqa
 
                             yield data
                             expected_offset += len(data)
-                            await credit_outbox.put(len(data))
+                            await credit_outbox.send_data(len(data))
 
                             while expected_offset in buffer:
                                 next_data = buffer.pop(expected_offset)
@@ -60,7 +59,7 @@ async def file_streamer(  # noqa
 
                                     yield n_data
                                     expected_offset += len(n_data)
-                                    await credit_outbox.put(len(n_data))
+                                    await credit_outbox.send_data(len(n_data))
                     else:
                         buffer[offset] = chunk_data
 

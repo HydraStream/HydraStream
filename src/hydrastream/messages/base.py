@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from dataclasses import field
 from typing import Any, Generic, TypeAlias, TypeVar
 
@@ -61,6 +61,10 @@ class ActorQueue(Generic[T], ABC):
         pass
 
     @abstractmethod
+    def get_nowait(self) -> T | PoisonPill:
+        pass
+
+    @abstractmethod
     def empty(self) -> bool:
         pass
 
@@ -91,6 +95,9 @@ class ActorFifoQueue(ActorQueue[T]):
 
     async def get(self) -> T | PoisonPill:
         return await self._raw_queue.get()
+
+    def get_nowait(self) -> T | PoisonPill:
+        return self._raw_queue.get_nowait()
 
     def empty(self) -> bool:
         return self._raw_queue.empty()
@@ -137,5 +144,43 @@ class ActorPriorityQueue(ActorQueue[T]):
         env = await self._raw_queue.get()
         return env.payload
 
+    def get_nowait(self) -> T | PoisonPill:
+        env = self._raw_queue.get_nowait()
+        return env.payload
+
     def empty(self) -> bool:
         return self._raw_queue.empty()
+
+
+T_Res = TypeVar("T_Res")
+T_Msg = TypeVar("T_Msg")
+
+
+async def ask(
+    inbox: ActorQueue[T_Msg],
+    msg_factory: Callable[[asyncio.Future[T_Res]], T_Msg],
+    timeout: float = 10.0,
+    sort_key: tuple[int, ...] = (0,),
+) -> T_Res:
+    """
+    Sends a message to an actor and awaits a single response via Future.
+    Fails fast with a RuntimeError if the target actor deadlocks or hangs.
+    """
+    loop = asyncio.get_running_loop()
+    reply_future: asyncio.Future[T_Res] = loop.create_future()
+
+    # Construct the message embedding our future
+    msg = msg_factory(reply_future)
+    await inbox.send_data(msg, sort_key=sort_key)
+
+    try:
+        async with asyncio.timeout(timeout):
+            return await reply_future
+    except TimeoutError as e:
+        # Crucial clean-up: if we timeout, cancel the future so the
+        # target actor doesn't try to set a result on a dead request.
+        reply_future.cancel()
+        raise RuntimeError(
+            f"Ask request timed out after {timeout}s. "
+            "Target actor is dead or overloaded."
+        ) from e

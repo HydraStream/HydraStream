@@ -1,10 +1,10 @@
-import asyncio
 from typing import assert_never
 
 from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.entities import Chunk
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.messages.base import (
+    ActorFifoQueue,
     ActorPriorityQueue,
     PoisonPill,
 )
@@ -13,7 +13,7 @@ from hydrastream.messages.base import (
 @hydra_dataclass
 class MemoryThrottler(BaseActor[Chunk]):
     chunk_outbox: ActorPriorityQueue[Chunk | PoisonPill]
-    credit_inbox: asyncio.Queue[int]
+    credit_inbox: ActorFifoQueue[int]
 
     num_workers: int
     budget: int
@@ -23,7 +23,8 @@ class MemoryThrottler(BaseActor[Chunk]):
             case Chunk() as pending_chunk:
                 if pending_chunk.size > self.budget:
                     credit = await self.credit_inbox.get()
-                    self.budget += credit
+                    if isinstance(credit, int):
+                        self.budget += credit
                     return
 
                 self.budget -= pending_chunk.size

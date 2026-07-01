@@ -41,7 +41,7 @@ class DiskAggregator(BaseActor[WriteChunk | FlushCmd]):
                 if self._current_size >= self.MAX_BUFFER:
                     await self._persist_buffer()
 
-            case FlushCmd() as cmd:
+            case FlushCmd(reply_to=reply_future):
                 await self._persist_buffer()
 
                 if self._is_writing_now:
@@ -55,7 +55,8 @@ class DiskAggregator(BaseActor[WriteChunk | FlushCmd]):
 
                     await self.throttler_outbox.send_data(DiskBufferClearedSignal())
 
-                cmd.reply_to.set()
+                if not reply_future.cancelled():
+                    reply_future.set_result(True)
 
             case _ as unreachable:
                 await super()._handle_msg(unreachable)

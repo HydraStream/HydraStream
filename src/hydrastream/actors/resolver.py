@@ -39,8 +39,6 @@ class BaseResolverKwargs(TypedDict):
     files_outbox: ActorPriorityQueue[File | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg]
 
-    all_complete: asyncio.Event
-
     is_dry_run: bool
     is_verify: bool
     is_debug: bool
@@ -57,8 +55,6 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
 
     files_outbox: ActorPriorityQueue[File | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg]
-
-    all_complete: asyncio.Event
 
     is_dry_run: bool
     is_verify: bool
@@ -94,8 +90,6 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
 
     async def _on_terminal_pill(self) -> None:
         await self.files_outbox.send_poison_pills()
-        if self.is_dry_run:
-            self.all_complete.set()
 
     async def _on_error(
         self, e: Exception, msg: LinkData | PoisonPill | None = None

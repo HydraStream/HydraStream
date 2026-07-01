@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import math
 from dataclasses import field
 from typing import TypedDict
@@ -69,7 +68,7 @@ class HydraContext:
     throttler_q: ActorFifoQueue[ThrottlerMsg]
     controller_q: ActorFifoQueue[TrafficSignal]
     state_q: ActorFifoQueue[StateKeeperMsg]
-    credit_q: asyncio.Queue[int]
+    credit_q: ActorFifoQueue[int]
     # Жизненный цикл файлов
     file_limit_q: ActorFifoQueue[FileCompleted]
     file_discovery_q: ActorFifoQueue[File | PoisonPill]
@@ -77,17 +76,6 @@ class HydraContext:
     workers: int = field(init=False)
     start_works: int = field(init=False)
     resolvers: int = 1
-
-    # =========================================================================
-    # 4. СОБЫТИЯ И БАРЬЕРЫ (Синхронизация)
-    # =========================================================================
-    all_complete: asyncio.Event = field(default_factory=asyncio.Event)
-
-    analyzer_checkpoint_event: asyncio.Event = field(default_factory=asyncio.Event)
-    stop_analyzer: asyncio.Event = field(default_factory=asyncio.Event)
-
-    # Будут созданы в __post_init__ в зависимости от конфига
-    worker_events: list[asyncio.Event] = field(init=False)
 
     def __post_init__(self) -> None:
 
@@ -108,8 +96,6 @@ class HydraContext:
             )
 
         self.start_works = 5 if self.workers >= 5 else self.workers
-        # Создаем массив светофоров и барьер под конкретное количество потоков!
-        self.worker_events = [asyncio.Event() for _ in range(self.workers)]
 
 
 def build_context(
@@ -138,7 +124,7 @@ class AppQueuesSchema(TypedDict):
     throttler_q: ActorFifoQueue[ThrottlerMsg]
     controller_q: ActorFifoQueue[TrafficSignal]
     state_q: ActorFifoQueue[StateKeeperMsg]
-    credit_q: asyncio.Queue[int]
+    credit_q: ActorFifoQueue[int]
     file_limit_q: ActorFifoQueue[FileCompleted]
     file_discovery_q: ActorFifoQueue[File | PoisonPill]
 
@@ -167,11 +153,10 @@ def _create_channels() -> AppQueuesSchema:
         "state_q": 0,
         "file_limit_q": 0,
         "file_discovery_q": 0,
+        "credit_q": 0,
     }
     for k, v in actor_queues.items():
         channels[k] = ActorFifoQueue(maxsize=v)
-
-    channels["credit_q"] = asyncio.Queue(maxsize=0)
 
     return channels  # type: ignore
 

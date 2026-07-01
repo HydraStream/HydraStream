@@ -1,11 +1,12 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
-import asyncio
 from typing import assert_never
 
+from hydrastream.actors.worker import GoToSleepPill, WakeUpPill
 from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
+from hydrastream.messages.base import ActorFifoQueue
 from hydrastream.messages.traffic import (
     NetworkCongestionSignal,
     ScaleDownSignal,
@@ -16,16 +17,15 @@ from hydrastream.messages.traffic import (
 
 @hydra_dataclass
 class TrafficController(BaseActor[TrafficSignal]):
-    worker_events: list[asyncio.Event]
-    stop_analyzer: asyncio.Event
-    analyzer_checkpoint_event: asyncio.Event
-
+    sleep_signals_indox: ActorFifoQueue[GoToSleepPill]
+    wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill]
+    workers: int
     dynamic_limit: int
     prev_dynamic_limit: int
 
-    def __post_init__(self) -> None:
-        for i in range(self.dynamic_limit):
-            self.worker_events[i].set()
+    async def _on_start(self) -> None:
+        for _ in range(self.workers - self.dynamic_limit):
+            await self.sleep_signals_indox.send_data(GoToSleepPill())
 
     async def _handle_msg(self, msg: TrafficSignal) -> None:
         match msg:
@@ -33,30 +33,24 @@ class TrafficController(BaseActor[TrafficSignal]):
                 self.dynamic_limit = max(1, self.dynamic_limit - 1)
 
             case ScaleUpSignal():
-                self.dynamic_limit = min(
-                    len(self.worker_events), self.dynamic_limit + 1
-                )
+                self.dynamic_limit = min(self.workers, self.dynamic_limit + 1)
             case _ as unreachable:
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
         if self.dynamic_limit != self.prev_dynamic_limit:
-            self._update_lights()
+            await self._update_lights()
 
-    def _update_lights(self) -> None:
-        start, end = sorted((self.prev_dynamic_limit, self.dynamic_limit))
-        events_to_update = self.worker_events[start:end]
+    async def _update_lights(self) -> None:
 
         if self.dynamic_limit > self.prev_dynamic_limit:
-            for event in events_to_update:
-                event.set()
+            for _ in range(self.dynamic_limit - self.prev_dynamic_limit):
+                await self.wait_in_sleep_inbox.send_data(WakeUpPill())
         else:
-            for event in events_to_update:
-                event.clear()
+            for _ in range(self.prev_dynamic_limit - self.dynamic_limit):
+                await self.sleep_signals_indox.send_data(GoToSleepPill())
 
     async def _on_terminal_pill(self) -> None:
         self.prev_dynamic_limit = self.dynamic_limit
-        self.dynamic_limit = len(self.worker_events)
-        self._update_lights()
-        self.stop_analyzer.set()
-        self.analyzer_checkpoint_event.set()
+        self.dynamic_limit = self.workers
+        await self._update_lights()

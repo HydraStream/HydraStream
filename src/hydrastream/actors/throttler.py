@@ -32,8 +32,6 @@ class ThrottleController(BaseActor[ThrottlerMsg]):
     _prev_bytes: int = 0
     _last_checkpoint_time: float = 0.0
 
-    all_complete: asyncio.Event
-
     is_disk_choked: bool = False
 
     def __post_init__(self) -> None:

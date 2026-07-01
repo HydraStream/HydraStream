@@ -22,7 +22,6 @@ from hydrastream.exceptions import (
     DownloadFailedError,
     LogStatus,
     StreamError,
-    WorkerScaleDown,
 )
 from hydrastream.interfaces import (
     MonitorBackend,
@@ -33,6 +32,7 @@ from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
     PoisonPill,
+    ask,
 )
 from hydrastream.messages.io import StreamChunk, WriteChunk
 from hydrastream.messages.state import ProgressDeltaCmd, RemoveFileCmd, StateKeeperMsg
@@ -46,12 +46,20 @@ from hydrastream.messages.traffic import (
 from hydrastream.network import stream_chunk
 
 
+@hydra_dataclass(frozen=True)
+class GoToSleepPill:
+    pass
+
+
+@hydra_dataclass(frozen=True)
+class WakeUpPill:
+    pass
+
+
 class BaseWorkerKwargs(TypedDict):
     throttler_outbox: ActorFifoQueue[ThrottlerMsg]
     controller_outbox: ActorFifoQueue[TrafficSignal]
     state_outbox: ActorFifoQueue[StateKeeperMsg]
-
-    all_complete: asyncio.Event
 
     ui: MonitorBackend
     net: NetworkBackend
@@ -64,17 +72,31 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
     throttler_outbox: ActorFifoQueue[ThrottlerMsg] | None = None
     controller_outbox: ActorFifoQueue[TrafficSignal]
     state_outbox: ActorFifoQueue[StateKeeperMsg]
-
-    all_complete: asyncio.Event
+    sleep_signals_indox: ActorFifoQueue[GoToSleepPill]
+    wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill]
 
     net: NetworkBackend
-
-    wakeup_event: asyncio.Event
 
     async def _handle_msg(self, msg: Chunk) -> None:
 
         match msg:
             case Chunk() as chunk:
+                if not self.sleep_signals_indox.empty():
+                    try:
+                        _ = self.sleep_signals_indox.get_nowait()
+
+                        await self.inbox.send_data(
+                            sort_key=self._get_sort_key(
+                                msg.file.meta.id, msg.current_pos
+                            ),
+                            data=msg,
+                        )
+
+                        await self.wait_in_sleep_inbox.get()
+
+                        return
+                    except Exception:
+                        pass
                 file_obj = chunk.file
                 if not file_obj or file_obj.is_failed:
                     return
@@ -115,13 +137,6 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
         self, e: Exception, msg: Chunk | PoisonPill | None = None
     ) -> None:
         if not isinstance(msg, Chunk):
-            return
-
-        if isinstance(e, WorkerScaleDown):
-            await self.inbox.send_data(
-                sort_key=self._get_sort_key(msg.file.meta.id, msg.current_pos),
-                data=msg,
-            )
             return
 
         if isinstance(e, RequestsError):
@@ -205,8 +220,6 @@ class StreamDownloadWorker(BaseDownloadWorker):
     async def _finally(self) -> None:
         await self.file_discovery_outbox.send_poison_pills()
 
-        self.all_complete.set()
-
     async def _handle_critical_requests_error(
         self, chunk: Chunk, response: Response
     ) -> None:
@@ -268,9 +281,6 @@ class StreamDownloadWorker(BaseDownloadWorker):
                         )
                     )
 
-                    if not self.wakeup_event.is_set():
-                        raise WorkerScaleDown
-
                     if bytes_to_read <= 0:
                         break
 
@@ -304,7 +314,6 @@ class DiskDownloadWorker(BaseDownloadWorker):
     fs: StorageBackend
 
     async def _finally(self) -> None:
-        self.all_complete.set()
         await self.disk_outbox.send_poison_pills()
 
     async def _handle_critical_requests_error(
@@ -356,7 +365,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
-    async def _process_chunk(self, chunk: Chunk) -> None:  # noqa
+    async def _process_chunk(self, chunk: Chunk) -> None:
         if chunk.file.meta.supports_ranges:
             headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
         else:
@@ -412,9 +421,6 @@ class DiskDownloadWorker(BaseDownloadWorker):
                     if bytes_to_read <= 0:
                         break
 
-                    if not self.wakeup_event.is_set():
-                        raise WorkerScaleDown
-
             finally:
                 if self.throttler_outbox is not None:
                     await self.throttler_outbox.send_data(RemoveStreamCmd(stream=r))
@@ -445,9 +451,12 @@ class DiskDownloadWorker(BaseDownloadWorker):
                 return
             chunk.file.verified = True
 
-        sync_event = asyncio.Event()
-        await self.disk_outbox.send_data(FlushCmd(reply_to=sync_event))
-        await sync_event.wait()
+        await ask(
+            inbox=self.disk_outbox,
+            msg_factory=FlushCmd.create_request,
+            timeout=60.0,
+            sort_key=(-1,),
+        )
 
         self.fs.verify_size(filename, file_obj.meta.content_length)
         if file_obj.meta.expected_checksum:

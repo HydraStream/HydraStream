@@ -1,4 +1,3 @@
-import asyncio
 from collections import defaultdict
 from dataclasses import field
 from typing import assert_never
@@ -34,8 +33,6 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
 
     bytes_to_check: int
 
-    analyzer_checkpoint_event: asyncio.Event
-
     fs: StorageBackend
 
     is_stream: bool
@@ -48,8 +45,9 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
             case RemoveFileCmd(file_id=fid):
                 self._files.pop(fid, None)
 
-            case GetSnapshotCmd(reply_to=queue):
-                await queue.put(self._files.copy())
+            case GetSnapshotCmd(reply_to=reply_future):
+                if not reply_future.cancelled():
+                    reply_future.set_result(self._files.copy())
 
             case ProgressDeltaCmd(file_id=fid, delta_bytes=delta):
                 self._ui_deltas[fid] += delta
@@ -58,7 +56,6 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                 if self._global_bytes - self._prev_global_bytes >= self.bytes_to_check:
                     self._prev_global_bytes += self.bytes_to_check
 
-                    self.analyzer_checkpoint_event.set()
                     await self.throttler_output.send_data(
                         CheckpointReachedCmd(new_btc=self.bytes_to_check)
                     )
@@ -66,8 +63,10 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
             case UpdateBytesToCheckCmd(bytes_to_check=btc):
                 self.bytes_to_check = btc
 
-            case GetUIDeltasCmd(reply_to=queue):
-                await queue.put(dict(self._ui_deltas))
+            case GetUIDeltasCmd(reply_to=reply_future):
+                if not reply_future.cancelled():
+                    reply_future.set_result(dict(self._ui_deltas))
+
                 self._ui_deltas.clear()
 
             case _ as unreachable:

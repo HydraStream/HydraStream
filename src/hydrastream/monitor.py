@@ -41,7 +41,7 @@ from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import HydraError, LogFileError, LogStatus
 from hydrastream.interfaces import MonitorBackend
-from hydrastream.messages.base import ActorFifoQueue
+from hydrastream.messages.base import ActorFifoQueue, ask
 from hydrastream.utils import format_size
 
 
@@ -652,7 +652,6 @@ class RichMonitor(BaseMonitor):
     async def _ui_refresh_actor(
         self, state_keeper_q: ActorFifoQueue[StateKeeperMsg]
     ) -> None:
-        reply_q: asyncio.Queue[dict[int, int]] = asyncio.Queue(maxsize=1)
 
         while self._is_running:
             try:
@@ -660,8 +659,12 @@ class RichMonitor(BaseMonitor):
                 await asyncio.sleep(self.renewal_rate)
 
                 # 2. Запрашиваем дельты у базы данных (StateKeeper)
-                await state_keeper_q.send_data(GetUIDeltasCmd(reply_to=reply_q))
-                deltas = await reply_q.get()
+                deltas = await ask(
+                    inbox=state_keeper_q,
+                    msg_factory=GetUIDeltasCmd.create_request,
+                    timeout=5.0,
+                    sort_key=(-1,),
+                )
 
                 # 3. Отрисовываем!
                 for file_id, bytes_to_advance in deltas.items():

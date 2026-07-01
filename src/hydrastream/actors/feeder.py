@@ -1,5 +1,7 @@
-from collections.abc import Iterable
+from dataclasses import dataclass, field
+from typing import assert_never
 
+from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.entities import Checksum, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.messages.base import (
@@ -9,26 +11,38 @@ from hydrastream.messages.base import (
 from hydrastream.messages.io import LinkData
 
 
-@hydra_dataclass
-class LinkFeeder:
-    links: str | Iterable[str]
-    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None
-    links_outbox: ActorPriorityQueue[LinkData | PoisonPill]
-    num_resolvers: int
+@dataclass(frozen=True)
+class RawLinkItem:
+    """The clean singular item sent by any external producer or network listener."""
 
-    async def run(
-        self,
-    ) -> None:
-        checksums = None
-        for id, link in enumerate(self.links):
-            if self.expected_checksums is not None:
-                checksums = self.expected_checksums.get(link)
-                if checksums and not isinstance(checksums, Checksum):
-                    checksums = Checksum(algorithm=checksums[0], value=checksums[1])
-            else:
-                self.expected_checksums = None
-            await self.links_outbox.send_data(
-                data=LinkData(id=id, url=link, checksum=checksums),
-                sort_key=(id,),
-            )
-        await self.links_outbox.send_poison_pills(count=self.num_resolvers)
+    url: str
+    checksum: Checksum | tuple[TypeHash, str] | None = None
+
+
+@hydra_dataclass
+class LinkFeederDaemon(BaseActor[RawLinkItem]):
+    links_outbox: ActorPriorityQueue[LinkData | PoisonPill]
+
+    _link_counter: int = field(default=0, init=False)
+
+    async def _handle_msg(self, msg: RawLinkItem) -> None:
+        """Reacts to a single raw link item, stamps it, and forwards it."""
+        match msg:
+            case RawLinkItem(url=url, checksum=checksum):
+                if isinstance(checksum, tuple):
+                    checksum = Checksum(algorithm=checksum[0], value=checksum[1])
+
+                stamped_data = LinkData(
+                    id=self._link_counter, url=url, checksum=checksum
+                )
+
+                await self.links_outbox.send_data(
+                    data=stamped_data,
+                    sort_key=(self._link_counter,),
+                )
+
+                self._link_counter += 1
+
+            case _ as unreachable:
+                await super().handle_msg(unreachable)
+                assert_never(unreachable)
