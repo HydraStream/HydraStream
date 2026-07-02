@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from dataclasses import field
 from typing import TypedDict
@@ -79,6 +80,8 @@ class HydraContext:
     file_limit_q: ActorFifoQueue[FileCompleted]
     file_discovery_q: ActorFifoQueue[File | PoisonPill]
     autosaver_q: ActorFifoQueue[None | PoisonPill]
+
+    session_killer: asyncio.Event = field(default_factory=asyncio.Event)
 
     workers: int = field(init=False)
     start_works: int = field(init=False)

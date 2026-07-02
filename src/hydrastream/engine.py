@@ -27,6 +27,7 @@ from hydrastream.actors.worker import (
     BaseWorkerKwargs,
     DiskDownloadWorker,
     StreamDownloadWorker,
+    WakeUpPill,
 )
 from hydrastream.actors.writer import DiskWriter
 from hydrastream.domain.base_actor import BaseActorKwargs
@@ -52,10 +53,10 @@ async def delayed_task(
 
 
 async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) -> None:
-    if not ctx.is_running:
+    if not ctx.session_killer.is_set():
         return
 
-    ctx.is_running = False
+    ctx.session_killer.set()
 
     await stop(ctx, complete=True)
 
@@ -70,9 +71,10 @@ async def teardown_engine(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
 
 
 async def stop(ctx: HydraContext, complete: bool = False) -> None:
-    if ctx.is_stopping:
+    if ctx.session_killer.is_set():
         return
-    ctx.is_stopping = True
+
+    ctx.session_killer.clear()
 
     if not complete:
         await ctx.ui.log(
@@ -106,8 +108,6 @@ async def prepare_runtime(ctx: HydraContext, loop: asyncio.AbstractEventLoop) ->
 async def _bootstrap_engine(  # noqa
     ctx: HydraContext,
     tg: asyncio.TaskGroup,
-    links: list[str],
-    expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None,
 ) -> None:
     base_actor_kwargs: BaseActorKwargs = {
         "ui": ctx.ui,
@@ -131,7 +131,7 @@ async def _bootstrap_engine(  # noqa
         "net": ctx.net,
         "provider": ctx.provider,
     }
-    resolvers: list[DiskMetadataResolver | StreamMetadataResolver] = []
+    resolvers: list[DiskMetadataResolver | StreamMetadataResolver] | None = []
 
     for _ in range(ctx.resolvers):
         resolvers.append(
@@ -154,6 +154,16 @@ async def _bootstrap_engine(  # noqa
         is_stream=ctx.is_stream,
         is_debug=ctx.config.debug,
     )
+
+    dispatcher = None
+    workers = None
+    memory_throttler = None
+    aggregator = None
+    analyzer = None
+    autosaver = None
+    controller = None
+    throttler = None
+    writer = None
 
     if not ctx.config.dry_run:
         dispatcher = (
@@ -197,7 +207,7 @@ async def _bootstrap_engine(  # noqa
             "wait_in_sleep_inbox": ctx.wait_in_sleep,
             "net": ctx.net,
         }
-        workers: list[DiskDownloadWorker | StreamDownloadWorker] = []
+        workers: list[DiskDownloadWorker | StreamDownloadWorker] | None = []
 
         for _ in range(ctx.workers):
             workers.append(
@@ -270,106 +280,121 @@ async def _bootstrap_engine(  # noqa
             bytes_to_check=ctx.config.MIN_CHUNK,
         )
 
-        async def stage_1_feeding() -> None:
-            try:
-                await feeder.run()
-            finally:
-                await ctx.links_q.send_poison_pills(count=ctx.resolvers)
+    async def session_killer() -> None:
+        try:
+            await ctx.session_killer.wait()
+            ctx.session_killer.clear()
+        except asyncio.CancelledError:
+            await ctx.net.close()
+            raise
 
-        async def stage_2_resolving() -> None:
-            try:
-                async with asyncio.TaskGroup() as stage_tg:
-                    for i, resolver in enumerate(resolvers):
-                        stage_tg.create_task(resolver.run(), name=f"resolver_{i}")
-            finally:
-                await ctx.files_q.send_poison_pills(count=1)
+    tg.create_task(session_killer(), name="stage:killer")
+
+    async def stage_0_stating() -> None:
+        try:
+            await stater.run()
+        finally:
+            ctx.session_killer.set()
+
+    tg.create_task(stage_0_stating(), name="stage:stater")
+
+    async def stage_1_feeding() -> None:
+        try:
+            await feeder.run()
+        finally:
+            ctx.links_q.send_poison_pills_nowait(count=ctx.resolvers)
+
+    tg.create_task(stage_1_feeding(), name="stage:feeder")
+
+    async def stage_2_resolving() -> None:
+        try:
+            async with asyncio.TaskGroup() as stage_tg:
+                for i, resolver in enumerate(resolvers):
+                    stage_tg.create_task(resolver.run(), name=f"resolver_{i}")
+        finally:
+            if not ctx.config.dry_run:
+                ctx.files_q.send_poison_pills_nowait(count=1)
+            else:
+                ctx.state_q.send_poison_pills_nowait(count=1)
+
+    tg.create_task(stage_2_resolving(), name="stage:resolvers")
+
+    if (
+        not ctx.config.dry_run
+        and dispatcher is not None
+        and workers is not None
+        and aggregator is not None
+        and analyzer is not None
+        and autosaver is not None
+        and controller is not None
+        and throttler is not None
+    ):
 
         async def stage_3_dispatching() -> None:
             try:
                 await dispatcher.run()
             finally:
-                await ctx.chunks_q.send_poison_pills(count=ctx.config.threads)
+                if not ctx.is_stream:
+                    ctx.chunks_q.send_poison_pills_nowait(count=ctx.workers)
+                    for _ in range(ctx.workers):
+                        await ctx.wait_in_sleep.send_data(WakeUpPill())
+                else:
+                    ctx.chunks_q.send_poison_pills_nowait(count=1)
 
-        async def stage_4_memory_throttling() -> None:
-            try:
-                await memory_throttler.run()
-            finally:
-                await ctx.chunks_q.send_poison_pills(count=ctx.config.threads)
+        tg.create_task(stage_3_dispatching(), name="stage:dispatcher")
+
+        if ctx.is_stream and memory_throttler is not None:
+
+            async def stage_4_memory_throttling() -> None:
+                try:
+                    await memory_throttler.run()
+                finally:
+                    ctx.ready_chunks_q.send_poison_pills_nowait(count=ctx.workers)
+                    for _ in range(ctx.workers):
+                        await ctx.wait_in_sleep.send_data(WakeUpPill())
+
+            tg.create_task(stage_4_memory_throttling(), name="stage:feeder")
 
         async def stage_5_working() -> None:
             try:
                 async with asyncio.TaskGroup() as stage_tg:
-                    for i, resolver in enumerate(workers):
-                        stage_tg.create_task(resolver.run(), name=f"worker_{i}")
+                    for i, worker in enumerate(workers):
+                        stage_tg.create_task(worker.run(), name=f"worker_{i}")
             finally:
-                await ctx.files_q.send_poison_pills(count=1)
+                ctx.disk_q.send_poison_pills_nowait(count=1)
+                ctx.writer_q.send_poison_pills_nowait(count=1)
+                ctx.analyzer_q.send_poison_pills_nowait(count=1)
+                ctx.controller_q.send_poison_pills_nowait(count=1)
+                ctx.file_discovery_q.send_poison_pills_nowait(count=1)
+                ctx.autosaver_q.send_poison_pills_nowait(count=1)
 
-        async def stage_6_writing() -> None:
+        tg.create_task(stage_5_working(), name="stage:feeder")
+
+        async def stage_6_servicing() -> None:
             try:
-                await writer.run()
+                async with asyncio.TaskGroup() as stage_tg:
+                    stage_tg.create_task(aggregator.run(), name="aggregator")
+                    stage_tg.create_task(analyzer.run(), name="analyzer")
+                    stage_tg.create_task(autosaver.run(), name="autosaver")
+                    stage_tg.create_task(controller.run(), name="traffic_tontroller")
+                    stage_tg.create_task(throttler.run(), name="throttle_controller")
             finally:
-                await ctx.chunks_q.send_poison_pills(count=ctx.config.threads)
+                if not ctx.is_stream:
+                    ctx.writer_q.send_poison_pills_nowait(count=1)
+                else:
+                    ctx.state_q.send_poison_pills_nowait(count=1)
 
-        async def stage_7_writing() -> None:
-            try:
-                await writer.run()
-            finally:
-                await ctx.chunks_q.send_poison_pills(count=ctx.config.threads)
+        tg.create_task(stage_6_servicing(), name="stage:service")
 
-        async def stage_6_writing() -> None:
-            try:
-                await writer.run()
-            finally:
-                await ctx.chunks_q.send_poison_pills(count=ctx.config.threads)
+        if not ctx.is_stream and writer is not None:
 
-        async def stage_6_writing() -> None:
-            try:
-                await writer.run()
-            finally:
-                await ctx.chunks_q.send_poison_pills(count=ctx.config.threads)
+            async def stage_7_writing() -> None:
+                try:
+                    await writer.run()
+                finally:
+                    ctx.state_q.send_poison_pills_nowait(count=1)
 
-        async def stage_7_writing() -> None:
-            try:
-                await writer.run()
-            finally:
-                await ctx.chunks_q.send_poison_pills(count=ctx.config.threads)
-
-        async def stage_6_writing() -> None:
-            try:
-                await writer.run()
-            finally:
-                await ctx.chunks_q.send_poison_pills(count=ctx.config.threads)
-
-        async def stage_6_writing() -> None:
-            try:
-                await writer.run()
-            finally:
-                await ctx.chunks_q.send_poison_pills(count=ctx.config.threads)
-
-        # tg.create_task(feeder.run(), name="LinkFeeder")
-        # tg.create_task(resolvers.run(), name=f"MetadataResolver: {i}")
-        tg.create_task(stater.run(), name="StateKeeper")
-        # tg.create_task(dispatcher.run(), name="FileDispatcher")
-        # tg.create_task(memory_throttler.run(), name="MemoryThrottler")
-        # tg.create_task(workers.run(), name=f"DownloadWorker-{i}")
-        tg.create_task(writer.run(), name="DiskWriter")
-        tg.create_task(aggregator.run(), name="DiskAggregator")
-        tg.create_task(analyzer.run(), name="TelemetryAnalyzer")
-        tg.create_task(autosaver.run(), name="FileAutosaver")
-        tg.create_task(controller.run(), name="TrafficController")
-        tg.create_task(throttler.run(), name="ThrottleController")
-
-        tg.create_task(stage_1_feeding(), name="stage:feeder")
-        tg.create_task(stage_2_resolving(), name="stage:resolvers")
-        tg.create_task(stage_3_dispatching(), name="stage:dispatcher")
-
-
-async def session_killer(ctx: HydraContext) -> None:
-    try:
-        await ctx.all_complete.wait()
-    except asyncio.CancelledError:
-        await ctx.net.close()
-        raise
+            tg.create_task(stage_7_writing(), name="stage:writer")
 
 
 async def stream_all(
@@ -383,8 +408,7 @@ async def stream_all(
     try:
         try:
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(session_killer(ctx), name="SessionKiller")
-                await _bootstrap_engine(ctx, tg, links, expected_checksums)
+                await _bootstrap_engine(ctx, tg)
 
                 if not ctx.config.dry_run:
                     file_gen = None
@@ -447,8 +471,7 @@ async def run_downloads(
     try:
         try:
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(session_killer(ctx), name="SessionKiller")
-                await _bootstrap_engine(ctx, tg, links, expected_checksums)
+                await _bootstrap_engine(ctx, tg)
 
             if ctx.config.dry_run:
                 files = await ask(
