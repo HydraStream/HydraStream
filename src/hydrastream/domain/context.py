@@ -7,6 +7,9 @@ import math
 from dataclasses import field
 from typing import TypedDict
 
+from hydrastream.actors.analyzer import CheckpointEvent
+from hydrastream.actors.feeder import RawLinkItem
+from hydrastream.actors.worker import GoToSleepPill, WakeUpPill
 from hydrastream.adapters.network_curl import CurlNetworkAdapter
 from hydrastream.domain.config import HydraConfig
 from hydrastream.domain.entities import Chunk, File
@@ -56,22 +59,26 @@ class HydraContext:
     chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
     ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
     stream_chunks_q: ActorPriorityQueue[StreamChunk | PoisonPill]
-
     # =========================================================================
     # 3. ОБЫЧНЫЕ ОЧЕРЕДИ (FIFO Queues)
     # =========================================================================
+    raw_links_q: ActorFifoQueue[RawLinkItem | PoisonPill]
     # Диск и агрегация
-    disk_q: ActorFifoQueue[DiskMsg]
+    disk_q: ActorFifoQueue[DiskMsg | PoisonPill]
     writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill]
     ack_q: ActorFifoQueue[WriteCompleted | PoisonPill]
     # Управление и телеметрия
-    throttler_q: ActorFifoQueue[ThrottlerMsg]
-    controller_q: ActorFifoQueue[TrafficSignal]
-    state_q: ActorFifoQueue[StateKeeperMsg]
+    analyzer_q: ActorFifoQueue[CheckpointEvent | PoisonPill]
+    throttler_q: ActorFifoQueue[ThrottlerMsg | PoisonPill]
+    controller_q: ActorFifoQueue[TrafficSignal | PoisonPill]
+    state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     credit_q: ActorFifoQueue[int]
+    sleep_signals: ActorFifoQueue[GoToSleepPill]
+    wait_in_sleep: ActorFifoQueue[WakeUpPill]
     # Жизненный цикл файлов
     file_limit_q: ActorFifoQueue[FileCompleted]
     file_discovery_q: ActorFifoQueue[File | PoisonPill]
+    autosaver_q: ActorFifoQueue[None | PoisonPill]
 
     workers: int = field(init=False)
     start_works: int = field(init=False)
@@ -118,15 +125,20 @@ class AppQueuesSchema(TypedDict):
     ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
     stream_chunks_q: ActorPriorityQueue[StreamChunk | PoisonPill]
 
-    disk_q: ActorFifoQueue[DiskMsg]
+    raw_links_q: ActorFifoQueue[RawLinkItem | PoisonPill]
+    disk_q: ActorFifoQueue[DiskMsg | PoisonPill]
     writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill]
     ack_q: ActorFifoQueue[WriteCompleted | PoisonPill]
-    throttler_q: ActorFifoQueue[ThrottlerMsg]
-    controller_q: ActorFifoQueue[TrafficSignal]
-    state_q: ActorFifoQueue[StateKeeperMsg]
+    analyzer_q: ActorFifoQueue[CheckpointEvent | PoisonPill]
+    throttler_q: ActorFifoQueue[ThrottlerMsg | PoisonPill]
+    controller_q: ActorFifoQueue[TrafficSignal | PoisonPill]
+    state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     credit_q: ActorFifoQueue[int]
+    sleep_signals: ActorFifoQueue[GoToSleepPill]
+    wait_in_sleep: ActorFifoQueue[WakeUpPill]
     file_limit_q: ActorFifoQueue[FileCompleted]
     file_discovery_q: ActorFifoQueue[File | PoisonPill]
+    autosaver_q: ActorFifoQueue[None | PoisonPill]
 
 
 def _create_channels() -> AppQueuesSchema:
@@ -145,15 +157,20 @@ def _create_channels() -> AppQueuesSchema:
         channels[k] = ActorPriorityQueue(maxsize=v)
 
     actor_queues = {
+        "raw_links_q": 0,
         "disk_q": 0,
         "writer_q": 0,
         "ack_q": 0,
         "throttler_q": 0,
+        "analyzer_q": 0,
         "controller_q": 0,
         "state_q": 0,
         "file_limit_q": 0,
         "file_discovery_q": 0,
         "credit_q": 0,
+        "sleep_signals": 0,
+        "wait_in_sleep": 0,
+        "autosaver_q": 0,
     }
     for k, v in actor_queues.items():
         channels[k] = ActorFifoQueue(maxsize=v)

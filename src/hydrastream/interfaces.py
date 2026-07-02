@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from typing_extensions import Buffer, runtime_checkable
 
 from hydrastream.exceptions import HydraError, LogStatus
-from hydrastream.messages.base import ActorFifoQueue
+from hydrastream.messages.base import ActorFifoQueue, PoisonPill
 from hydrastream.messages.state import StateKeeperMsg
 
 if TYPE_CHECKING:
@@ -85,7 +85,9 @@ class MonitorBackend(Protocol):
 
     async def start(self) -> None: ...
 
-    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None:
+    def bind_to_state_keeper(
+        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    ) -> None:
         """Позволяет привязать очередь состояния ПОСЛЕ создания UI"""
         ...
 

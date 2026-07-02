@@ -19,9 +19,9 @@ class CheckpointEvent:
 @hydra_dataclass
 class TelemetryAnalyzer(BaseActor[CheckpointEvent]):
     threads: int
-    _current_limit: int
-    controller_outbox: ActorFifoQueue[TrafficSignal]
-    state_outbox: ActorFifoQueue[StateKeeperMsg]
+    current_limit: int
+    controller_outbox: ActorFifoQueue[TrafficSignal | PoisonPill]
+    state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     bytes_to_check: int
     _smoothed_speed: float = 0.0
     _prev_speed: float = 0.0
@@ -71,12 +71,12 @@ class TelemetryAnalyzer(BaseActor[CheckpointEvent]):
         if direction == "up":
             msg = (
                 f"Speed increased to {format_size(speed)}/s. "
-                f"Scaling up to {self._current_limit} workers."
+                f"Scaling up to {self.current_limit} workers."
             )
             status = LogStatus.INFO
             key = "scale_up"
         else:
-            msg = f"Network congested. Scaling down to {self._current_limit} workers."
+            msg = f"Network congested. Scaling down to {self.current_limit} workers."
             status = LogStatus.WARNING
             key = "scale_down"
 
@@ -95,26 +95,26 @@ class TelemetryAnalyzer(BaseActor[CheckpointEvent]):
 
         # Логика изменения лимита
         if self._smoothed_speed > self._prev_speed * (1 + self._sensitivity):
-            if self._current_limit < self.threads:
-                self._current_limit += 1
+            if self.current_limit < self.threads:
+                self.current_limit += 1
                 self._prev_speed = self._smoothed_speed
                 await self._log_scale_event("up", speed_now)
 
         elif (
             self._smoothed_speed < self._prev_speed * (1 - self._sensitivity)
-            and self._current_limit > 2
+            and self.current_limit > 2
         ):
-            self._current_limit -= 1
+            self.current_limit -= 1
             self._prev_speed = self._smoothed_speed
             await self._log_scale_event("down", speed_now)
 
         # Применяем изменения
-        if self._dynamic_limit != self._current_limit:
+        if self._dynamic_limit != self.current_limit:
             await self.controller_outbox.send_data(
                 ScaleUpSignal()
-                if self._current_limit > self._dynamic_limit
+                if self.current_limit > self._dynamic_limit
                 else ScaleDownSignal()
             )
-            self._dynamic_limit = self._current_limit
+            self._dynamic_limit = self.current_limit
 
         self._last_checkpoint_time = time.monotonic()

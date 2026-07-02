@@ -41,7 +41,7 @@ from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import HydraError, LogFileError, LogStatus
 from hydrastream.interfaces import MonitorBackend
-from hydrastream.messages.base import ActorFifoQueue, ask
+from hydrastream.messages.base import ActorFifoQueue, PoisonPill, ask
 from hydrastream.utils import format_size
 
 
@@ -348,7 +348,9 @@ class BaseMonitor(MonitorBackend, ABC):
             )
 
     @abstractmethod
-    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None: ...
+    def bind_to_state_keeper(
+        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    ) -> None: ...
     @abstractmethod
     async def _display_log(
         self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
@@ -375,7 +377,9 @@ class QuietMonitor(BaseMonitor):
     async def _ui_start(self) -> None:
         pass
 
-    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None:
+    def bind_to_state_keeper(
+        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    ) -> None:
         pass
 
 
@@ -428,7 +432,9 @@ class JsonMonitor(BaseMonitor):
     async def _ui_start(self) -> None:
         pass
 
-    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None:
+    def bind_to_state_keeper(
+        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    ) -> None:
         pass
 
 
@@ -451,7 +457,9 @@ class PlainMonitor(BaseMonitor):
     async def _ui_start(self) -> None:
         pass
 
-    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None:
+    def bind_to_state_keeper(
+        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    ) -> None:
         pass
 
 
@@ -505,7 +513,7 @@ class RichMonitor(BaseMonitor):
     progress: Progress = field(init=False)
     live: Live = field(init=False)
 
-    state_keeper_q: ActorFifoQueue[StateKeeperMsg] = field(init=False)
+    state_keeper_q: ActorFifoQueue[StateKeeperMsg | PoisonPill] = field(init=False)
 
     def __post_init__(self) -> None:
         self.renewal_rate = 1 / self.refresh_per_second
@@ -650,7 +658,7 @@ class RichMonitor(BaseMonitor):
         self.rich.update(self.tasks[file_id], description=new_filename)
 
     async def _ui_refresh_actor(
-        self, state_keeper_q: ActorFifoQueue[StateKeeperMsg]
+        self, state_keeper_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     ) -> None:
 
         while self._is_running:
@@ -851,6 +859,8 @@ class RichMonitor(BaseMonitor):
 
         self.live.start()
 
-    def bind_to_state_keeper(self, state_q: ActorFifoQueue[StateKeeperMsg]) -> None:
+    def bind_to_state_keeper(
+        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    ) -> None:
         self.state_keeper_q = state_q
         self.refresh = asyncio.create_task(self._ui_refresh_actor(self.state_keeper_q))

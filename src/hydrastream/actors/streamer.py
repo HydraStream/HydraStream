@@ -20,7 +20,7 @@ async def file_streamer(  # noqa
     file_obj: File,
     stream_chunk_inbox: ActorPriorityQueue[StreamChunk | PoisonPill],
     credit_outbox: ActorFifoQueue[int],
-    reg_events_q: ActorFifoQueue[StateKeeperMsg],
+    reg_events_q: ActorFifoQueue[StateKeeperMsg | PoisonPill],
     file_limit_q: ActorFifoQueue[FileCompleted],
     ui: MonitorBackend,
     is_debug: bool,

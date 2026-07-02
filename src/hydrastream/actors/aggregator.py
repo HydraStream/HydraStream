@@ -21,7 +21,7 @@ from hydrastream.messages.traffic import (
 
 @hydra_dataclass
 class DiskAggregator(BaseActor[WriteChunk | FlushCmd]):
-    throttler_outbox: ActorFifoQueue[ThrottlerMsg]
+    throttler_outbox: ActorFifoQueue[ThrottlerMsg | PoisonPill]
     ack_inbox: ActorFifoQueue[WriteCompleted | PoisonPill]
     writer_outbox: ActorFifoQueue[list[WriteChunk] | PoisonPill]
     MAX_BUFFER: int

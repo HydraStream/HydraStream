@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar, final
+from typing import Generic, TypedDict, TypeVar, final
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
@@ -7,6 +7,11 @@ from hydrastream.interfaces import MonitorBackend
 from hydrastream.messages.base import ActorQueue, PoisonPill, StandardPill, TerminalPill
 
 T_Payload = TypeVar("T_Payload")
+
+
+class BaseActorKwargs(TypedDict):
+    ui: MonitorBackend
+    is_debug: bool
 
 
 @hydra_dataclass

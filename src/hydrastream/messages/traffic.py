@@ -3,7 +3,6 @@ from typing import TypeAlias
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.interfaces import NetworkStream
-from hydrastream.messages.base import PoisonPill
 from hydrastream.messages.io import WriteChunk
 
 
@@ -73,7 +72,7 @@ class FlushCmd:
         return cls(reply_to=future)
 
 
-DiskMsg: TypeAlias = WriteChunk | FlushCmd | PoisonPill
+DiskMsg: TypeAlias = WriteChunk | FlushCmd
 
 
 @hydra_dataclass(frozen=True)

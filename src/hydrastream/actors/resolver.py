@@ -4,17 +4,16 @@
 import asyncio
 import random
 from abc import ABC, abstractmethod
-from typing import TypedDict, assert_never
+from typing import assert_never
 
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
-from hydrastream.domain.base_actor import BaseActor
+from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs
 from hydrastream.domain.entities import Checksum, File, FileMeta, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import (
-    MonitorBackend,
     NetworkBackend,
     StorageBackend,
 )
@@ -30,20 +29,18 @@ from hydrastream.providers import ProviderRouter
 from hydrastream.utils import extract_filename, redact_url
 
 
-class BaseResolverKwargs(TypedDict):
+class BaseResolverKwargs(BaseActorKwargs):
     threads: int
     MIN_CHUNK: int
 
-    links_inbox: ActorPriorityQueue[LinkData | PoisonPill]
+    inbox: ActorPriorityQueue[LinkData | PoisonPill]
 
     files_outbox: ActorPriorityQueue[File | PoisonPill]
-    state_outbox: ActorFifoQueue[StateKeeperMsg]
+    state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
 
     is_dry_run: bool
     is_verify: bool
-    is_debug: bool
 
-    ui: MonitorBackend
     net: NetworkBackend
     provider: ProviderRouter
 
@@ -54,7 +51,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
     MIN_CHUNK: int
 
     files_outbox: ActorPriorityQueue[File | PoisonPill]
-    state_outbox: ActorFifoQueue[StateKeeperMsg]
+    state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
 
     is_dry_run: bool
     is_verify: bool

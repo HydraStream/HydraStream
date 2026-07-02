@@ -19,7 +19,7 @@ from hydrastream.messages.traffic import FlushCmd
 @hydra_dataclass
 class FileAutosaver(BaseActor[None]):
     disk_q: ActorFifoQueue[WriteChunk | FlushCmd | PoisonPill]
-    reg_events_q: ActorFifoQueue[StateKeeperMsg]
+    reg_events_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     interval: float
     fs: StorageBackend
     _ticker_task: asyncio.Task[None] = field(init=False)

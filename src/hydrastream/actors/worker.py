@@ -6,7 +6,7 @@ import os
 import random
 import traceback
 from abc import ABC, abstractmethod
-from typing import TypedDict, assert_never
+from typing import assert_never
 
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
@@ -15,7 +15,7 @@ from hydrastream.actors.controller import (
     TrafficSignal,
 )
 from hydrastream.actors.dispatcher import FileCompleted
-from hydrastream.domain.base_actor import BaseActor
+from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs
 from hydrastream.domain.entities import Chunk, File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
@@ -24,7 +24,6 @@ from hydrastream.exceptions import (
     StreamError,
 )
 from hydrastream.interfaces import (
-    MonitorBackend,
     NetworkBackend,
     StorageBackend,
 )
@@ -56,22 +55,21 @@ class WakeUpPill:
     pass
 
 
-class BaseWorkerKwargs(TypedDict):
-    throttler_outbox: ActorFifoQueue[ThrottlerMsg]
-    controller_outbox: ActorFifoQueue[TrafficSignal]
-    state_outbox: ActorFifoQueue[StateKeeperMsg]
+class BaseWorkerKwargs(BaseActorKwargs):
+    throttler_outbox: ActorFifoQueue[ThrottlerMsg | PoisonPill]
+    controller_outbox: ActorFifoQueue[TrafficSignal | PoisonPill]
+    state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    sleep_signals_indox: ActorFifoQueue[GoToSleepPill]
+    wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill]
 
-    ui: MonitorBackend
     net: NetworkBackend
-
-    is_debug: bool
 
 
 @hydra_dataclass
 class BaseDownloadWorker(BaseActor[Chunk], ABC):
-    throttler_outbox: ActorFifoQueue[ThrottlerMsg] | None = None
-    controller_outbox: ActorFifoQueue[TrafficSignal]
-    state_outbox: ActorFifoQueue[StateKeeperMsg]
+    throttler_outbox: ActorFifoQueue[ThrottlerMsg | PoisonPill] | None = None
+    controller_outbox: ActorFifoQueue[TrafficSignal | PoisonPill]
+    state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     sleep_signals_indox: ActorFifoQueue[GoToSleepPill]
     wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill]
 
@@ -81,22 +79,19 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
 
         match msg:
             case Chunk() as chunk:
-                if not self.sleep_signals_indox.empty():
-                    try:
-                        _ = self.sleep_signals_indox.get_nowait()
+                try:
+                    _ = self.sleep_signals_indox.get_nowait()
 
-                        await self.inbox.send_data(
-                            sort_key=self._get_sort_key(
-                                msg.file.meta.id, msg.current_pos
-                            ),
-                            data=msg,
-                        )
+                    await self.inbox.send_data(
+                        sort_key=self._get_sort_key(msg.file.meta.id, msg.current_pos),
+                        data=msg,
+                    )
 
-                        await self.wait_in_sleep_inbox.get()
+                    await self.wait_in_sleep_inbox.get()
 
-                        return
-                    except Exception:
-                        pass
+                    return
+                except asyncio.QueueEmpty:
+                    pass
                 file_obj = chunk.file
                 if not file_obj or file_obj.is_failed:
                     return
@@ -261,6 +256,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
             ui=self.ui,
             url=chunk.file.meta.url,
             headers=headers,
+            max_retries=1,
         ) as r:
             try:
                 if self.throttler_outbox is not None:
@@ -384,6 +380,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
             ui=self.ui,
             url=chunk.file.meta.url,
             headers=headers,
+            max_retries=1,
         ) as r:
             try:
                 if self.throttler_outbox is not None:

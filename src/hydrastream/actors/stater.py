@@ -8,6 +8,7 @@ from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.interfaces import StorageBackend
 from hydrastream.messages.base import (
     ActorFifoQueue,
+    PoisonPill,
 )
 from hydrastream.messages.state import (
     GetSnapshotCmd,
@@ -23,7 +24,7 @@ from hydrastream.messages.traffic import CheckpointReachedCmd, ThrottlerMsg
 
 @hydra_dataclass
 class StateKeeperActor(BaseActor[StateKeeperMsg]):
-    throttler_output: ActorFifoQueue[ThrottlerMsg]
+    throttler_output: ActorFifoQueue[ThrottlerMsg | PoisonPill]
 
     _files: dict[int, File] = field(default_factory=dict[int, File])
     _ui_deltas: defaultdict[int, int] = field(default_factory=lambda: defaultdict(int))
