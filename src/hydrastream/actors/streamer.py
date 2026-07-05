@@ -8,7 +8,6 @@ from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, Log
 from hydrastream.interfaces import Hasher, MonitorBackend
 from hydrastream.messages.base import (
     ActorFifoQueue,
-    ActorPriorityQueue,
     PoisonPill,
     StandardPill,
     TerminalPill,
@@ -18,10 +17,9 @@ from hydrastream.messages.io import StreamChunk
 
 async def file_streamer(  # noqa
     file_obj: File,
-    stream_chunk_inbox: ActorPriorityQueue[StreamChunk | PoisonPill],
     credit_outbox: ActorFifoQueue[int],
-    reg_events_q: ActorFifoQueue[StateKeeperMsg | PoisonPill],
-    file_limit_q: ActorFifoQueue[FileCompleted],
+    reg_events_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill],
+    file_limit_outbox: ActorFifoQueue[FileCompleted],
     ui: MonitorBackend,
     is_debug: bool,
 ) -> AsyncGenerator[bytes, None]:
@@ -37,7 +35,7 @@ async def file_streamer(  # noqa
 
     try:
         while expected_offset < total_size:
-            msg = await stream_chunk_inbox.get()
+            msg = await file_obj.stream_q.get()
 
             match msg:
                 case StreamChunk(start=offset, data=chunk_data):
@@ -98,8 +96,8 @@ async def file_streamer(  # noqa
     finally:
         buffer.clear()
 
-        await reg_events_q.send_data(RemoveFileCmd(file_id=file_obj.meta.id))
-        await file_limit_q.send_data(FileCompleted())
+        await reg_events_outbox.send_data(RemoveFileCmd(file_id=file_obj.meta.id))
+        await file_limit_outbox.send_data(FileCompleted())
 
 
 def verify_stream(

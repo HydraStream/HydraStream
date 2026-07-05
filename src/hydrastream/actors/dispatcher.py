@@ -59,9 +59,6 @@ class BaseFileDispatcher(BaseActor[File], ABC):
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
-    async def _on_terminal_pill(self) -> None:
-        await self.chunks_outbox.send_poison_pills(self.num_workers)
-
     @abstractmethod
     async def _prepare_file(self, file_obj: File) -> None:
         """Специфичная логика подготовки файла"""
@@ -75,11 +72,8 @@ class BaseFileDispatcher(BaseActor[File], ABC):
 
 @hydra_dataclass
 class StreamFileDispatcher(BaseFileDispatcher):
-    file_discovery: ActorFifoQueue[File | PoisonPill]
-
     async def _prepare_file(self, file_obj: File) -> None:
-        # Для стрима просто закидываем файл в трубу (имя не меняется)
-        await self.file_discovery.send_data(file_obj)
+        pass
 
     def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
         # СТРИМ: Сначала ID файла, потом позиция (Качаем файлы по очереди!)

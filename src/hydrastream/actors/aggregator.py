@@ -64,7 +64,6 @@ class DiskAggregator(BaseActor[WriteChunk | FlushCmd]):
 
     async def _on_terminal_pill(self) -> None:
         await self._persist_buffer()
-        await self.writer_outbox.send_poison_pills()
 
     async def _on_stop(self) -> None:
         if self._current_buffer:

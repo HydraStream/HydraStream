@@ -14,6 +14,12 @@ class RegisterFileCmd:
 
 
 @hydra_dataclass(frozen=True)
+class GetReadyFileCmd:
+    file_id: int
+    reply_to: asyncio.Future[File]
+
+
+@hydra_dataclass(frozen=True)
 class RemoveFileCmd:
     file_id: int
 
@@ -51,6 +57,7 @@ class GetUIDeltasCmd:
 
 StateKeeperMsg: TypeAlias = (
     RegisterFileCmd
+    | GetReadyFileCmd
     | RemoveFileCmd
     | GetSnapshotCmd
     | ProgressDeltaCmd

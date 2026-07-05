@@ -34,6 +34,3 @@ class MemoryThrottler(BaseActor[Chunk]):
             case _ as unreachable:
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
-
-    async def _on_terminal_pill(self) -> None:
-        await self.chunk_outbox.send_poison_pills(self.num_workers)

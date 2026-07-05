@@ -85,9 +85,6 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
-    async def _on_terminal_pill(self) -> None:
-        await self.files_outbox.send_poison_pills()
-
     async def _on_error(
         self, e: Exception, msg: LinkData | PoisonPill | None = None
     ) -> None:

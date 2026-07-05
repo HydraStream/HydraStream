@@ -1,3 +1,4 @@
+import asyncio
 from collections import defaultdict
 from dataclasses import field
 from typing import assert_never
@@ -11,6 +12,7 @@ from hydrastream.messages.base import (
     PoisonPill,
 )
 from hydrastream.messages.state import (
+    GetReadyFileCmd,
     GetSnapshotCmd,
     GetUIDeltasCmd,
     ProgressDeltaCmd,
@@ -32,6 +34,9 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
     _global_bytes: int = 0
     _prev_global_bytes: int = 0
 
+    _waiting_clients: defaultdict[int, list[asyncio.Future[File]]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
     bytes_to_check: int
 
     fs: StorageBackend
@@ -42,9 +47,26 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
         match msg:
             case RegisterFileCmd(file_id=fid, file_obj=fobj):
                 self._files[fid] = fobj
+                # Будим ВСЕХ, кто ждал этот файл!
+                if fid in self._waiting_clients:
+                    for fut in self._waiting_clients.pop(fid):
+                        if not fut.cancelled():
+                            fut.set_result(fobj)
+
+            case GetReadyFileCmd(file_id=fid, reply_to=reply_future):
+                if fid in self._files:
+                    if not reply_future.cancelled():
+                        reply_future.set_result(self._files[fid])
+                else:
+                    # Добавляем в СПИСОК ожидающих
+                    self._waiting_clients[fid].append(reply_future)
 
             case RemoveFileCmd(file_id=fid):
                 self._files.pop(fid, None)
+                # Отменяем ВСЕХ, кто ждал несуществующий файл
+                for fut in self._waiting_clients.pop(fid, []):
+                    if not fut.done():
+                        fut.cancel()
 
             case GetSnapshotCmd(reply_to=reply_future):
                 if not reply_future.cancelled():
@@ -83,3 +105,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                 if file_obj.fd is not None:
                     self.fs.close_file(file_obj.fd)
                     file_obj.fd = None
+        else:
+            for file_obj in self._files.values():
+                if file_obj._stream_queue is not None:  # pyright: ignore[reportPrivateUsage]
+                    file_obj.stream_q.send_poison_pills_nowait()

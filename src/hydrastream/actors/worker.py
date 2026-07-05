@@ -16,7 +16,7 @@ from hydrastream.actors.controller import (
 )
 from hydrastream.actors.dispatcher import FileCompleted
 from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs
-from hydrastream.domain.entities import Chunk, File
+from hydrastream.domain.entities import Chunk
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     DownloadFailedError,
@@ -29,7 +29,6 @@ from hydrastream.interfaces import (
 )
 from hydrastream.messages.base import (
     ActorFifoQueue,
-    ActorPriorityQueue,
     PoisonPill,
     ask,
 )
@@ -115,13 +114,7 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
-    async def _on_standard_pill(self) -> None:
-        await self.controller_outbox.send_poison_pills()
-
     async def _on_terminal_pill(self) -> None:
-        if self.throttler_outbox is not None:
-            await self.throttler_outbox.send_poison_pills()
-        await self.state_outbox.send_poison_pills()
         await self._finally()
 
     @abstractmethod
@@ -137,7 +130,6 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
         if isinstance(e, RequestsError):
             await self._handle_requests_error(msg, e)
             await self.controller_outbox.send_data(NetworkCongestionSignal())
-            await self.controller_outbox.send_poison_pills()
             return
 
         if isinstance(e, TimeoutError):
@@ -209,11 +201,8 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
 
 @hydra_dataclass
 class StreamDownloadWorker(BaseDownloadWorker):
-    stream_chunks_outbox: ActorPriorityQueue[StreamChunk | PoisonPill]
-    file_discovery_outbox: ActorFifoQueue[File | PoisonPill]
-
     async def _finally(self) -> None:
-        await self.file_discovery_outbox.send_poison_pills()
+        pass
 
     async def _handle_critical_requests_error(
         self, chunk: Chunk, response: Response
@@ -285,7 +274,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
                     await self.throttler_outbox.send_data(RemoveStreamCmd(stream=r))
 
                 if buffer_list:
-                    await self.stream_chunks_outbox.send_data(
+                    await chunk.file.stream_q.send_data(
                         sort_key=(chunk.current_pos,),
                         data=StreamChunk(start=chunk.current_pos, data=buffer_list),
                     )
@@ -310,7 +299,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
     fs: StorageBackend
 
     async def _finally(self) -> None:
-        await self.disk_outbox.send_poison_pills()
+        pass
 
     async def _handle_critical_requests_error(
         self, chunk: Chunk, response: Response

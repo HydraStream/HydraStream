@@ -39,6 +39,7 @@ class HydraConfig(BaseSettings):
         frozen=True,
         arbitrary_types_allowed=True,
     )
+    is_stream: bool = False
 
     # --- Поля с базовой валидацией Pydantic ---
     threads: int = Field(default=128, ge=1, le=128)

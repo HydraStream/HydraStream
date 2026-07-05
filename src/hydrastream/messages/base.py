@@ -52,7 +52,7 @@ class ActorQueue(Generic[T], ABC):
         pass
 
     @abstractmethod
-    def send_poison_pills(self, count: int = 1) -> None:
+    def send_poison_pills_nowait(self, count: int = 1) -> None:
         """Экстренная неблокирующая отправка пилюль (безопасная к переполнению)."""
         pass
 
@@ -87,7 +87,7 @@ class ActorFifoQueue(ActorQueue[T]):
             await self._raw_queue.put(StandardPill())
         await self._raw_queue.put(TerminalPill())
 
-    def send_poison_pills(self, count: int = 1) -> None:
+    def send_poison_pills_nowait(self, count: int = 1) -> None:
         with contextlib.suppress(asyncio.QueueFull):
             for _ in range(count - 1):
                 self._raw_queue.put_nowait(StandardPill())
@@ -130,7 +130,7 @@ class ActorPriorityQueue(ActorQueue[T]):
             _Envelope(sort_key=(sys.maxsize,), payload=TerminalPill())
         )
 
-    def send_poison_pills(self, count: int = 1) -> None:
+    def send_poison_pills_nowait(self, count: int = 1) -> None:
         with contextlib.suppress(asyncio.QueueFull):
             for i in range(count - 1, 0, -1):
                 self._raw_queue.put_nowait(

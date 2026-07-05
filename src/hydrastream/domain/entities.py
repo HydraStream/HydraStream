@@ -26,6 +26,8 @@ from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     OrphanedChunkError,
 )
+from hydrastream.messages.base import ActorPriorityQueue, PoisonPill
+from hydrastream.messages.io import StreamChunk
 
 if TYPE_CHECKING:
     pass
@@ -155,7 +157,7 @@ class File:
     fd: int | None = field(default=None, repr=False)
     verified: bool = field(default=False)
     is_failed: bool = field(default=False)
-    # _stream_queue: ActorFifoQueue[StreamChunk | None]] | None = None
+    _stream_queue: ActorPriorityQueue[StreamChunk | PoisonPill] | None = None
 
     def create_chunks(self) -> None:
         if self.chunks:
@@ -204,6 +206,12 @@ class File:
         if self.meta.content_length <= 0:
             return 0.0
         return (self.downloaded_size / self.meta.content_length) * 100
+
+    @property
+    def stream_q(self) -> ActorPriorityQueue[StreamChunk | PoisonPill]:
+        if self._stream_queue is None:
+            self._stream_queue = ActorPriorityQueue()
+        return self._stream_queue
 
     @classmethod
     def from_json(cls, content: bytes) -> Self:

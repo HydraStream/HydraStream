@@ -1,199 +1,210 @@
-# Copyright (c) 2026 Valentin Zhukovetski
-# Licensed under the MIT License.
-
-
 import asyncio
-import sys
-from collections.abc import AsyncGenerator, Generator
-from contextlib import contextmanager
-from pathlib import Path
-from types import TracebackType
-from typing import Self, TextIO
+import contextlib
+import itertools
+from collections.abc import AsyncGenerator
 from urllib.parse import urlparse
 
+from hydrastream.actors.streamer import file_streamer
 from hydrastream.domain.config import HydraConfig
-from hydrastream.domain.context import HydraContext, build_context
+from hydrastream.domain.context import build_context, create_monitor
 from hydrastream.domain.entities import Checksum, TypeHash
-from hydrastream.engine import run_downloads, stream_all, teardown_engine
-from hydrastream.exceptions import FileReadError, InvalidParameterError, ValidationError
-from hydrastream.interfaces import (
-    MonitorBackend,
-)
-from hydrastream.monitor import (
-    BaseMonitorKwargs,
-    JsonMonitor,
-    PlainMonitor,
-    QuietMonitor,
-    RichMonitor,
-)
+from hydrastream.engine import bootstrap_engine, prepare_runtime, teardown_engine
+from hydrastream.exceptions import LogStatus
+from hydrastream.messages.base import ask
+from hydrastream.messages.io import LinkData
+from hydrastream.messages.state import GetReadyFileCmd, GetSnapshotCmd
 
 
-class HydraClient:
-    def __init__(
-        self,
-        config: HydraConfig,
-    ) -> None:
+class HydraDaemon:
+    def __init__(self, config: HydraConfig) -> None:
+        self._config = config
+        self._ui = create_monitor(config=self._config)
+        self._ctx = build_context(config, ui=self._ui)
+        self._counter = itertools.count()
+        self._engine_task: asyncio.Task[None] | None = None
+        self._is_stopping: bool = False
 
-        self.config = config
-        self.ui = _create_monitor(config=config)
-        self.state: HydraContext | None = None
+    async def start(self) -> None:
+        """Включает завод. Он работает в фоне и ждет задач."""
+        if self._engine_task is not None:
+            await self._ui.log("Daemon is already running.", status=LogStatus.WARNING)
+            return
 
-    async def __aenter__(self) -> Self:
-        await self.ui.start()
-        return self
+        self._is_stopping = False
+        # Запускаем движок стандартным способом в фоне
+        self._engine_task = asyncio.create_task(
+            self._run_engine_in_background(), name="hydra:engine_main"
+        )
+        await self._ui.log(
+            "HydraEngine successfully started in background.", status=LogStatus.INFO
+        )
 
-    async def __aexit__(
-        self,
-        _exc_type: type[BaseException] | None,
-        _exc: BaseException | None,
-        _tb: TracebackType | None,
-    ) -> None:
-        if self.state is not None:
-            loop = asyncio.get_running_loop()
-            await teardown_engine(self.state, loop)
+    async def get_stream(self, id: int) -> AsyncGenerator[bytes, None] | None:
+        """
+        Блокируется, пока Диспетчер не подготовит следующий файл для стриминга.
+        Возвращает Асинхронный Генератор с байтами!
+        """
+        loop = asyncio.get_running_loop()
+        reply_future = loop.create_future()
 
-        await self.ui.stop()
+        await self._ctx.state_q.send_data(
+            GetReadyFileCmd(file_id=id, reply_to=reply_future)
+        )
 
-    async def run(
-        self,
-        links: list[str] | str | None = None,
-        input_file: str | None = None,
-        expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
-    ) -> None:
+        try:
+            msg = await reply_future
 
-        links = await self.validate(links, input_file)
-        self.state = build_context(config=self.config, ui=self.ui, is_stream=False)
-        await run_downloads(self.state, links, expected_checksums)
-
-    async def stream(
-        self,
-        links: list[str] | str | None = None,
-        input_file: str | None = None,
-        expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] | None = None,
-    ) -> AsyncGenerator[tuple[str, AsyncGenerator[bytes]]]:
-        links = await self.validate(links, input_file)
-        self.state = build_context(config=self.config, ui=self.ui, is_stream=True)
-        return stream_all(self.state, links, expected_checksums)
-
-    async def validate(
-        self,
-        links: list[str] | str | None,
-        input_file: str | None,
-    ) -> list[str]:
-        if not links and not input_file:
-            raise ValidationError(
-                param="links",
-                reason="You must provide either[LINKS] or an --input file.",
+        except asyncio.CancelledError:
+            await self._ui.log(
+                "Engine background task was explicitly cancelled.",
+                status=LogStatus.INFO,
             )
-        validate_input_file(input_file)
-        if links is not None:
-            links = [links] if isinstance(links, str) else list(links)
-        valid_links = await parse_urls(self.ui, links, input_file)
-        if not valid_links:
-            raise ValidationError(
-                param="links", reason="No valid URLs found to process!"
-            )
+            if self._config.debug:
+                raise
+            return None
 
-        return valid_links
+        return file_streamer(
+            ui=self._ctx.ui,
+            is_debug=self._ctx.config.debug,
+            file_obj=msg,
+            credit_outbox=self._ctx.credit_q,
+            reg_events_outbox=self._ctx.state_q,
+            file_limit_outbox=self._ctx.file_limit_q,
+        )
 
+    async def _run_engine_in_background(self) -> None:
+        try:
+            await prepare_runtime(self._ctx)
 
-def validate_input_file(value: str | None) -> None:
-    if value is None or value == "-":
-        return
+            try:
+                async with asyncio.TaskGroup() as tg:
+                    await bootstrap_engine(self._ctx, tg)
 
-    path = Path(value)
-    if not path.exists():
-        raise ValidationError(param="input", value=value, reason="File does not exist")
-    if not path.is_file():
-        raise ValidationError(param="input", value=value, reason="Target is not a file")
-
-
-def is_valid_url(url: str) -> bool:
-    """Checks if a given string is a structurally valid HTTP/HTTPS URL."""
-    try:
-        result = urlparse(url)
-        return result.scheme in ("http", "https") and bool(result.netloc)
-    except ValueError:
-        return False
-
-
-@contextmanager
-def get_input_stream(filepath: str) -> Generator[TextIO, None, None]:
-    if filepath == "-":
-        yield sys.stdin
-        return
-
-    path = Path(filepath).expanduser().resolve()
-
-    if not path.exists():
-        raise FileReadError(path=str(path), reason="Path does not exist")
-    if not path.is_file():
-        raise FileReadError(path=str(path), reason="Target is a directory, not a file")
-
-    try:
-        with path.open(encoding="utf-8") as f:
-            yield f
-    except PermissionError as e:
-        raise FileReadError(path=str(path), reason="Permission denied") from e
-    except OSError as e:
-        raise FileReadError(path=str(path), reason=str(e)) from e
-
-
-async def parse_urls(
-    ui: MonitorBackend, links_from_args: list[str] | None, filepath: str | None
-) -> list[str]:
-    all_links: list[str] = []
-
-    # Обработка аргументов
-    if links_from_args:
-        for url in links_from_args:
-            if is_valid_url(url):
-                all_links.append(url)
-            else:
-                await ui.report(
-                    InvalidParameterError(
-                        param="url", value=url, reason="Invalid HTTP/HTTPS format"
-                    ),
-                )
-
-    if filepath:
-        with get_input_stream(filepath) as stream:
-            for line in stream:
-                clean_line = line.strip()
-                if not clean_line or clean_line.startswith("#"):
-                    continue
-
-                url = clean_line.split()[0]
-                if is_valid_url(url):
-                    all_links.append(url)
-                else:
-                    await ui.report(
-                        InvalidParameterError(
-                            param="file_link",
-                            value=url,
-                            reason="Invalid URL in input file",
-                        ),
+                if self._ctx.config.dry_run:
+                    files = await ask(
+                        inbox=self._ctx.state_q,
+                        msg_factory=GetSnapshotCmd.create_request,
+                        timeout=5.0,
+                        sort_key=(-1,),
                     )
+                    await self._ctx.ui.dry_run(files, self._ctx.config.output_dir)
 
-    return list(dict.fromkeys(all_links))
+            except* Exception as eg:
+                await self._ctx.ui.log(
+                    f"Critical failure in TaskGroup: {eg.exceptions}",
+                    status=LogStatus.CRITICAL,
+                )
+                if self._config.debug:
+                    raise
 
+        except asyncio.CancelledError:
+            await self._ui.log(
+                "Engine background was explicitly cancelled.",
+                status=LogStatus.INFO,
+            )
+            if self._config.debug:
+                raise
 
-def _create_monitor(config: HydraConfig) -> MonitorBackend:
-    if config.custom_monitor is None:
-        base_resolver_kwargs: BaseMonitorKwargs = {
-            "is_verify": config.verify,
-            "log_file": config.output_dir,
-            "is_debug": config.debug,
-        }
+        except GeneratorExit:
+            if self._config.debug:
+                raise
 
-        if config.json_logs:
-            ui = JsonMonitor(**base_resolver_kwargs)
-        elif config.quiet:
-            ui = QuietMonitor(**base_resolver_kwargs)
-        elif config.no_ui:
-            ui = PlainMonitor(**base_resolver_kwargs)
-        else:
-            ui = RichMonitor(**base_resolver_kwargs)
-    else:
-        ui = config.custom_monitor
-    return ui
+        except Exception as e:
+            await self._ui.log(
+                f"Fatal crash in HydraEngine: {e}", status=LogStatus.CRITICAL
+            )
+            if self._config.debug:
+                raise
+        finally:
+            await teardown_engine(self._ctx)
+
+    async def stop(self, timeout: float = 10.0) -> None:
+        """Останавливает завод изящно с ограничением по времени."""
+        if self._engine_task is None or self._is_stopping:
+            return
+
+        self._is_stopping = True
+        await self._ui.log("Initiating graceful shutdown...", status=LogStatus.INFO)
+
+        try:
+            # 1. Запускаем каскад смерти через пилюлю фидеру
+            self._ctx.links_q.send_poison_pills_nowait(count=self._ctx.resolvers)
+
+            # 2. Ждем штатного закрытия, но не вечно (защита от зависания)
+            await asyncio.wait_for(asyncio.shield(self._engine_task), timeout=timeout)
+            await self._ui.log("Daemon stopped gracefully.", status=LogStatus.INFO)
+
+        except TimeoutError:
+            await self._ui.log(
+                f"Graceful shutdown timed out after {timeout}s! Forcing cancel...",
+                status=LogStatus.ERROR,
+            )
+            # Если завод застрял — жестко рубим корневой TaskGroup движка
+            self._engine_task.cancel()
+
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._engine_task
+        finally:
+            self._engine_task = None
+            self._is_stopping = False
+
+    # ==========================================
+    # ПУБЛИЧНОЕ API С ЗАЩИТОЙ
+    # ==========================================
+    async def add_download(
+        self,
+        url: str,
+        priority: int = 0,
+        type_hash: TypeHash | None = None,
+        expected_checksums: str | None = None,
+    ) -> int | None:
+
+        if self._engine_task is None or self._is_stopping:
+            await self._ui.log(
+                f"Rejected download for {url}: Daemon is stopped or stopping.",
+                status=LogStatus.WARNING,
+            )
+            return None
+        try:
+            result = urlparse(url)
+            if not (result.scheme in ("http", "https") and result.netloc):
+                raise ValueError()
+
+        except ValueError:
+            await self._ui.log(
+                f"Rejected: Invalid HTTP/HTTPS URL -> {url}", status=LogStatus.WARNING
+            )
+            return None
+
+        checksum = None
+        if type_hash and expected_checksums:
+            try:
+                checksum = Checksum(algorithm=type_hash, value=expected_checksums)
+            except Exception as e:
+                await self._ui.log(
+                    f"Failed to push hash to queue: {e}", status=LogStatus.ERROR
+                )
+                return None
+        elif type_hash:
+            await self._ui.log(
+                f"Skipped checksums for {url}",
+                status=LogStatus.WARNING,
+            )
+            return None
+        elif expected_checksums:
+            await self._ui.log(
+                f"Skipped type hash for {url}",
+                status=LogStatus.WARNING,
+            )
+            return None
+        id = next(self._counter)
+        try:
+            await self._ctx.links_q.send_data(
+                LinkData(id=id, url=url, checksum=checksum), sort_key=(priority, id)
+            )
+            return id if self._config.is_stream else None
+        except Exception as e:
+            await self._ui.log(
+                f"Failed to push link to queue: {e}", status=LogStatus.ERROR
+            )
+            return None

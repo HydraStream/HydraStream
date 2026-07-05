@@ -438,3 +438,105 @@ def cli(
 
 if __name__ == "__main__":
     app()
+
+    async def validate(
+        self,
+        links: list[str] | str | None,
+        input_file: str | None,
+    ) -> list[str]:
+        if not links and not input_file:
+            raise ValidationError(
+                param="links",
+                reason="You must provide either[LINKS] or an --input file.",
+            )
+        validate_input_file(input_file)
+        if links is not None:
+            links = [links] if isinstance(links, str) else list(links)
+        valid_links = await parse_urls(self.ui, links, input_file)
+        if not valid_links:
+            raise ValidationError(
+                param="links", reason="No valid URLs found to process!"
+            )
+
+        return valid_links
+
+
+def validate_input_file(value: str | None) -> None:
+    if value is None or value == "-":
+        return
+
+    path = Path(value)
+    if not path.exists():
+        raise ValidationError(param="input", value=value, reason="File does not exist")
+    if not path.is_file():
+        raise ValidationError(param="input", value=value, reason="Target is not a file")
+
+
+def is_valid_url(url: str) -> bool:
+    """Checks if a given string is a structurally valid HTTP/HTTPS URL."""
+    try:
+        result = urlparse(url)
+        return result.scheme in ("http", "https") and bool(result.netloc)
+    except ValueError:
+        return False
+
+
+@contextmanager
+def get_input_stream(filepath: str) -> Generator[TextIO, None, None]:
+    if filepath == "-":
+        yield sys.stdin
+        return
+
+    path = Path(filepath).expanduser().resolve()
+
+    if not path.exists():
+        raise FileReadError(path=str(path), reason="Path does not exist")
+    if not path.is_file():
+        raise FileReadError(path=str(path), reason="Target is a directory, not a file")
+
+    try:
+        with path.open(encoding="utf-8") as f:
+            yield f
+    except PermissionError as e:
+        raise FileReadError(path=str(path), reason="Permission denied") from e
+    except OSError as e:
+        raise FileReadError(path=str(path), reason=str(e)) from e
+
+
+async def parse_urls(
+    ui: MonitorBackend, links_from_args: list[str] | None, filepath: str | None
+) -> list[str]:
+    all_links: list[str] = []
+
+    # Обработка аргументов
+    if links_from_args:
+        for url in links_from_args:
+            if is_valid_url(url):
+                all_links.append(url)
+            else:
+                await ui.report(
+                    InvalidParameterError(
+                        param="url", value=url, reason="Invalid HTTP/HTTPS format"
+                    ),
+                )
+
+    if filepath:
+        with get_input_stream(filepath) as stream:
+            for line in stream:
+                clean_line = line.strip()
+                if not clean_line or clean_line.startswith("#"):
+                    continue
+
+                url = clean_line.split()[0]
+                if is_valid_url(url):
+                    all_links.append(url)
+                else:
+                    await ui.report(
+                        InvalidParameterError(
+                            param="file_link",
+                            value=url,
+                            reason="Invalid URL in input file",
+                        ),
+                    )
+
+    return list(dict.fromkeys(all_links))

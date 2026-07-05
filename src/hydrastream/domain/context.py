@@ -9,7 +9,6 @@ from dataclasses import field
 from typing import TypedDict
 
 from hydrastream.actors.analyzer import CheckpointEvent
-from hydrastream.actors.feeder import RawLinkItem
 from hydrastream.actors.worker import GoToSleepPill, WakeUpPill
 from hydrastream.adapters.network_curl import CurlNetworkAdapter
 from hydrastream.domain.config import HydraConfig
@@ -25,7 +24,7 @@ from hydrastream.messages.base import (
     ActorPriorityQueue,
     PoisonPill,
 )
-from hydrastream.messages.io import LinkData, StreamChunk, WriteChunk
+from hydrastream.messages.io import LinkData, RawLinkItem, WriteChunk
 from hydrastream.messages.state import StateKeeperMsg
 from hydrastream.messages.traffic import (
     DiskMsg,
@@ -33,6 +32,13 @@ from hydrastream.messages.traffic import (
     ThrottlerMsg,
     TrafficSignal,
     WriteCompleted,
+)
+from hydrastream.monitor import (
+    BaseMonitorKwargs,
+    JsonMonitor,
+    PlainMonitor,
+    QuietMonitor,
+    RichMonitor,
 )
 from hydrastream.providers import ProviderRouter
 from hydrastream.storage import LocalStorageManager
@@ -42,7 +48,6 @@ from hydrastream.storage import LocalStorageManager
 class HydraContext:
     is_running: bool = True
     is_stopping: bool = False
-    is_stream: bool
     # =========================================================================
     # 1. ГЛОБАЛЬНЫЕ ЗАВИСИМОСТИ (Передаются снаружи при создании)
     # =========================================================================
@@ -59,7 +64,6 @@ class HydraContext:
     files_q: ActorPriorityQueue[File | PoisonPill]
     chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
     ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
-    stream_chunks_q: ActorPriorityQueue[StreamChunk | PoisonPill]
     # =========================================================================
     # 3. ОБЫЧНЫЕ ОЧЕРЕДИ (FIFO Queues)
     # =========================================================================
@@ -78,7 +82,6 @@ class HydraContext:
     wait_in_sleep: ActorFifoQueue[WakeUpPill]
     # Жизненный цикл файлов
     file_limit_q: ActorFifoQueue[FileCompleted]
-    file_discovery_q: ActorFifoQueue[File | PoisonPill]
     autosaver_q: ActorFifoQueue[None | PoisonPill]
 
     session_killer: asyncio.Event = field(default_factory=asyncio.Event)
@@ -96,7 +99,7 @@ class HydraContext:
         # self.resolvers = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
         # self.resolvers = min(self.resolvers, 20)
 
-        if self.is_stream:
+        if self.config.is_stream:
             self.workers = self.config.threads
         else:
             self.workers = (
@@ -108,17 +111,13 @@ class HydraContext:
         self.start_works = 5 if self.workers >= 5 else self.workers
 
 
-def build_context(
-    config: HydraConfig, ui: MonitorBackend, is_stream: bool
-) -> HydraContext:
+def build_context(config: HydraConfig, ui: MonitorBackend) -> HydraContext:
     channels = _create_channels()
     ui.bind_to_state_keeper(channels["state_q"])
     net = _create_network(config)
     fs = _create_storage(config)
 
-    return HydraContext(
-        config=config, net=net, fs=fs, is_stream=is_stream, ui=ui, **channels
-    )
+    return HydraContext(config=config, net=net, fs=fs, ui=ui, **channels)
 
 
 class AppQueuesSchema(TypedDict):
@@ -126,7 +125,6 @@ class AppQueuesSchema(TypedDict):
     files_q: ActorPriorityQueue[File | PoisonPill]
     chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
     ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
-    stream_chunks_q: ActorPriorityQueue[StreamChunk | PoisonPill]
 
     raw_links_q: ActorFifoQueue[RawLinkItem | PoisonPill]
     disk_q: ActorFifoQueue[DiskMsg | PoisonPill]
@@ -140,7 +138,6 @@ class AppQueuesSchema(TypedDict):
     sleep_signals: ActorFifoQueue[GoToSleepPill]
     wait_in_sleep: ActorFifoQueue[WakeUpPill]
     file_limit_q: ActorFifoQueue[FileCompleted]
-    file_discovery_q: ActorFifoQueue[File | PoisonPill]
     autosaver_q: ActorFifoQueue[None | PoisonPill]
 
 
@@ -153,7 +150,6 @@ def _create_channels() -> AppQueuesSchema:
         "files_q": 0,
         "chunks_q": 0,
         "ready_chunks_q": 0,
-        "stream_chunks_q": 0,
     }
 
     for k, v in actor_p_queues.items():
@@ -169,7 +165,6 @@ def _create_channels() -> AppQueuesSchema:
         "controller_q": 0,
         "state_q": 0,
         "file_limit_q": 0,
-        "file_discovery_q": 0,
         "credit_q": 0,
         "sleep_signals": 0,
         "wait_in_sleep": 0,
@@ -196,3 +191,24 @@ def _create_storage(config: HydraConfig) -> StorageBackend:
     if config.custom_storage is None:
         return LocalStorageManager(output_dir=config.output_dir, debug=config.debug)
     return config.custom_storage
+
+
+def create_monitor(config: HydraConfig) -> MonitorBackend:
+    if config.custom_monitor is None:
+        base_resolver_kwargs: BaseMonitorKwargs = {
+            "is_verify": config.verify,
+            "log_file": config.output_dir,
+            "is_debug": config.debug,
+        }
+
+        if config.json_logs:
+            ui = JsonMonitor(**base_resolver_kwargs)
+        elif config.quiet:
+            ui = QuietMonitor(**base_resolver_kwargs)
+        elif config.no_ui:
+            ui = PlainMonitor(**base_resolver_kwargs)
+        else:
+            ui = RichMonitor(**base_resolver_kwargs)
+    else:
+        ui = config.custom_monitor
+    return ui
