@@ -2,27 +2,43 @@ import asyncio
 import contextlib
 import itertools
 from collections.abc import AsyncGenerator
+from dataclasses import InitVar, field
 from urllib.parse import urlparse
 
 from hydrastream.actors.streamer import file_streamer
 from hydrastream.domain.config import HydraConfig
-from hydrastream.domain.context import build_context, create_monitor
+from hydrastream.domain.context import HydraContext, build_context, create_monitor
 from hydrastream.domain.entities import Checksum, TypeHash
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.engine import bootstrap_engine, prepare_runtime, teardown_engine
 from hydrastream.exceptions import LogStatus
+from hydrastream.interfaces import MonitorBackend
 from hydrastream.messages.base import ask
 from hydrastream.messages.io import LinkData
 from hydrastream.messages.state import GetReadyFileCmd, GetSnapshotCmd
 
 
+@hydra_dataclass
 class HydraDaemon:
-    def __init__(self, config: HydraConfig) -> None:
-        self._config = config
-        self._ui = create_monitor(config=self._config)
-        self._ctx = build_context(config, ui=self._ui)
+    config: HydraConfig
+    initial_ui: InitVar[MonitorBackend | None] = None
+
+    _ui: MonitorBackend = field(init=False)
+    _ctx: HydraContext = field(init=False)
+    _counter: itertools.count[int] = field(init=False)
+    _engine_task: asyncio.Task[None] | None = None
+    _is_stopping: bool = False
+
+    def __post_init__(self, initial_ui: MonitorBackend | None) -> None:
+        if self.config.custom_monitor is not None:
+            self._ui = self.config.custom_monitor
+        if initial_ui is None:
+            self._ui = create_monitor(config=self.config.ui_config)
+        else:
+            self._ui = initial_ui
+
+        self._ctx = build_context(self.config, ui=self._ui)
         self._counter = itertools.count()
-        self._engine_task: asyncio.Task[None] | None = None
-        self._is_stopping: bool = False
 
     async def start(self) -> None:
         """Включает завод. Он работает в фоне и ждет задач."""
@@ -59,7 +75,7 @@ class HydraDaemon:
                 "Engine background task was explicitly cancelled.",
                 status=LogStatus.INFO,
             )
-            if self._config.debug:
+            if self.config.debug:
                 raise
             return None
 
@@ -94,7 +110,7 @@ class HydraDaemon:
                     f"Critical failure in TaskGroup: {eg.exceptions}",
                     status=LogStatus.CRITICAL,
                 )
-                if self._config.debug:
+                if self.config.debug:
                     raise
 
         except asyncio.CancelledError:
@@ -102,18 +118,18 @@ class HydraDaemon:
                 "Engine background was explicitly cancelled.",
                 status=LogStatus.INFO,
             )
-            if self._config.debug:
+            if self.config.debug:
                 raise
 
         except GeneratorExit:
-            if self._config.debug:
+            if self.config.debug:
                 raise
 
         except Exception as e:
             await self._ui.log(
                 f"Fatal crash in HydraEngine: {e}", status=LogStatus.CRITICAL
             )
-            if self._config.debug:
+            if self.config.debug:
                 raise
         finally:
             await teardown_engine(self._ctx)
@@ -202,7 +218,7 @@ class HydraDaemon:
             await self._ctx.links_q.send_data(
                 LinkData(id=id, url=url, checksum=checksum), sort_key=(priority, id)
             )
-            return id if self._config.is_stream else None
+            return id if self.config.is_stream else None
         except Exception as e:
             await self._ui.log(
                 f"Failed to push link to queue: {e}", status=LogStatus.ERROR

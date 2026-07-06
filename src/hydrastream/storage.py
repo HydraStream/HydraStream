@@ -9,9 +9,11 @@ import re
 import shutil
 import tempfile
 import time
+from dataclasses import field
 from pathlib import Path
 
 from hydrastream.domain.entities import File, TypeHash
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     FileSizeMismatchError,
     HashMismatchError,
@@ -21,14 +23,21 @@ from hydrastream.exceptions import (
 )
 
 
+@hydra_dataclass
 class LocalStorageManager:
-    def __init__(self, output_dir: Path, debug: bool = False) -> None:
-        self.output_dir = Path(output_dir).expanduser().resolve()
+    output_dir: Path
+    debug: bool = False
+
+    state_dir: Path = field(init=False)
+    _active_fds: set[int] = field(init=False, default_factory=set[int])
+
+    def __post_init__(self) -> None:
+        self.output_dir = Path(self.output_dir).expanduser().resolve()
+
         self.state_dir = self.output_dir / ".states"
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self._active_fds: set[int] = set()
-        self.debug = debug
 
     def allocate_space(self, filename: str, size: int) -> str | None:
         free_space = shutil.disk_usage(self.output_dir).free

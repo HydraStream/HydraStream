@@ -83,7 +83,7 @@ async def bootstrap_engine(  # noqa
         "files_outbox": ctx.files_q,
         "state_outbox": ctx.state_q,
         "is_dry_run": ctx.config.dry_run,
-        "is_verify": ctx.config.verify,
+        "is_verify": ctx.config.is_verify,
         "net": ctx.net,
         "provider": ctx.provider,
     }

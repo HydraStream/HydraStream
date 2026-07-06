@@ -11,7 +11,7 @@ from typing import TypedDict
 from hydrastream.actors.analyzer import CheckpointEvent
 from hydrastream.actors.worker import GoToSleepPill, WakeUpPill
 from hydrastream.adapters.network_curl import CurlNetworkAdapter
-from hydrastream.domain.config import HydraConfig
+from hydrastream.domain.config import HydraConfig, UIConfig
 from hydrastream.domain.entities import Chunk, File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.interfaces import (
@@ -193,22 +193,19 @@ def _create_storage(config: HydraConfig) -> StorageBackend:
     return config.custom_storage
 
 
-def create_monitor(config: HydraConfig) -> MonitorBackend:
-    if config.custom_monitor is None:
-        base_resolver_kwargs: BaseMonitorKwargs = {
-            "is_verify": config.verify,
-            "log_file": config.output_dir,
-            "is_debug": config.debug,
-        }
+def create_monitor(config: UIConfig) -> MonitorBackend:
+    base_resolver_kwargs: BaseMonitorKwargs = {
+        "is_verify": config.is_verify,
+        "log_file": config.log_file_dir,
+        "is_debug": config.is_debug,
+    }
 
-        if config.json_logs:
-            ui = JsonMonitor(**base_resolver_kwargs)
-        elif config.quiet:
-            ui = QuietMonitor(**base_resolver_kwargs)
-        elif config.no_ui:
-            ui = PlainMonitor(**base_resolver_kwargs)
-        else:
-            ui = RichMonitor(**base_resolver_kwargs)
+    if config.json_logs:
+        ui = JsonMonitor(**base_resolver_kwargs)
+    elif config.quiet:
+        ui = QuietMonitor(**base_resolver_kwargs)
+    elif config.no_ui:
+        ui = PlainMonitor(**base_resolver_kwargs)
     else:
-        ui = config.custom_monitor
+        ui = RichMonitor(**base_resolver_kwargs)
     return ui

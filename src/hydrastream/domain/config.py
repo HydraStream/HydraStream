@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import os
+from dataclasses import field
 from pathlib import Path
 from typing import (
     Any,
 )
-from urllib.parse import urlparse
 
 from curl_cffi import (
     BrowserTypeLiteral,
@@ -30,6 +30,39 @@ from hydrastream.interfaces import (
 )
 
 
+class UIConfig(BaseSettings):
+    is_verify: bool = True
+    quiet: bool = False
+    no_ui: bool = False
+    json_logs: bool = False
+    log_file_dir: Path = Field(default=Path("download"))
+    is_debug: bool = False
+
+    @field_validator("log_file_dir")
+    @classmethod
+    def validate_output(cls, v: Path) -> Path:
+        # 1. Превращаем путь в абсолютный
+        try:
+            # resolve() делает путь абсолютным и убирает симлинки
+            # strict=False позволяет работать даже с еще не созданными папками
+            v = v.resolve(strict=False)
+        except Exception as e:
+            raise ValueError(f"Invalid path format: {v}") from e
+
+        # 2. Проверяем, что это не файл
+        if v.exists() and not v.is_dir():
+            raise ValueError(f"Path '{v}' exists but is not a directory")
+
+        # 3. Проверяем права на запись (os.W_OK)
+        # Если папка существует, проверяем её. Если нет — проверяем родительскую папку.
+        target_to_check = v if v.exists() else v.parent
+
+        if not os.access(target_to_check, os.W_OK):
+            raise ValueError(f"No write permissions for path: '{target_to_check}'")
+
+        return v
+
+
 class HydraConfig(BaseSettings):
     # Настройки загрузки из окружения и .env
     model_config = SettingsConfigDict(
@@ -40,25 +73,22 @@ class HydraConfig(BaseSettings):
         arbitrary_types_allowed=True,
     )
     is_stream: bool = False
+    is_verify: bool = True
+    dry_run: bool = False
+    debug: bool = False
 
+    ui_config: UIConfig = field(default_factory=UIConfig)
     # --- Поля с базовой валидацией Pydantic ---
     threads: int = Field(default=128, ge=1, le=128)
-    no_ui: bool = False
-    quiet: bool = False
     output_dir: Path = Field(default=Path("download"))
     speed_limit: float | None = Field(default=None, gt=0.0)
-    dry_run: bool = False
-    json_logs: bool = False
-    verify: bool = True
     impersonate: BrowserTypeLiteral = "chrome120"
-    debug: bool = False
 
     # Входные параметры в МБ (аналог InitVar)
     min_chunk_size_mb: PositiveInt = 1
     max_stream_chunk_size_mb: PositiveInt = 5
     buffer_size_mb: int | None = Field(default=None, ge=50)
 
-    links: list[str] = Field(default_factory=list)
     client_kwargs: dict[str, Any] | None = Field(default=None, exclude=True)
 
     custom_providers: dict[str, HashProvider] | None = Field(
@@ -91,15 +121,6 @@ class HydraConfig(BaseSettings):
         if not os.access(target_to_check, os.W_OK):
             raise ValueError(f"No write permissions for path: '{target_to_check}'")
 
-        return v
-
-    @field_validator("links")
-    @classmethod
-    def validate_links_logic(cls, v: list[str]) -> list[str]:
-        for url in v:
-            result = urlparse(url)
-            if not (result.scheme in ("http", "https") and result.netloc):
-                raise ValueError(f"Only HTTP/HTTPS are supported: {url}")
         return v
 
     @computed_field
