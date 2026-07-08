@@ -27,10 +27,9 @@ from hydrastream.exceptions import (
     OrphanedChunkError,
 )
 from hydrastream.messages.base import ActorPriorityQueue, PoisonPill
-from hydrastream.messages.io import StreamChunk
 
 if TYPE_CHECKING:
-    pass
+    from hydrastream.messages.io import StreamChunk
 
 
 @hydra_dataclass

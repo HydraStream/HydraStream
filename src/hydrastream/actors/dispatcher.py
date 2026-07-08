@@ -5,7 +5,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import assert_never
 
-from hydrastream.domain.base_actor import BaseActor
+from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs
 from hydrastream.domain.entities import Chunk, File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
@@ -15,26 +15,38 @@ from hydrastream.messages.base import (
     ActorPriorityQueue,
     PoisonPill,
 )
+from hydrastream.messages.state import StateKeeperMsg, UpdateStatusDownloading
 from hydrastream.messages.traffic import FileCompleted
+
+
+class BaseDispatcherKwargs(BaseActorKwargs):
+    limit: int
+
+    inbox: ActorPriorityQueue[File | PoisonPill]
+
+    chunks_outbox: ActorPriorityQueue[Chunk | PoisonPill]
+    file_limit_inbox: ActorFifoQueue[FileCompleted]
+    state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
 
 
 @hydra_dataclass
 class BaseFileDispatcher(BaseActor[File], ABC):
     limit: int
-    current_files: int = 0
-    num_workers: int
 
     chunks_outbox: ActorPriorityQueue[Chunk | PoisonPill]
     file_limit_inbox: ActorFifoQueue[FileCompleted]
+    state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+
+    _current_files: int = 0
 
     async def _handle_msg(self, msg: File) -> None:
         match msg:
             case File() as file_obj:
-                if self.current_files >= self.limit:
+                if self._current_files >= self.limit:
                     await self.file_limit_inbox.get()
-                    self.current_files -= 1
+                    self._current_files -= 1
 
-                self.current_files += 1
+                self._current_files += 1
 
                 await self._prepare_file(file_obj)
 
@@ -46,6 +58,9 @@ class BaseFileDispatcher(BaseActor[File], ABC):
                     )
 
                 file_obj.create_chunks()
+                await self.state_outbox.send_data(
+                    UpdateStatusDownloading(file_id=file_obj.meta.id)
+                )
 
                 for c in file_obj.chunks:
                     if c.current_pos <= c.end:

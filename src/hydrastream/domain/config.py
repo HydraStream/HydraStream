@@ -32,7 +32,7 @@ from hydrastream.interfaces import (
 
 class UIConfig(BaseSettings):
     is_verify: bool = True
-    quiet: bool = False
+    quiet: bool = True
     no_ui: bool = False
     json_logs: bool = False
     log_file_dir: Path = Field(default=Path("download"))

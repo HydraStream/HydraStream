@@ -36,22 +36,14 @@ from hydrastream.messages.io import StreamChunk, WriteChunk
 from hydrastream.messages.state import ProgressDeltaCmd, RemoveFileCmd, StateKeeperMsg
 from hydrastream.messages.traffic import (
     FlushCmd,
+    GoToSleepPill,
     NetworkCongestionSignal,
     RegisterStreamCmd,
     RemoveStreamCmd,
     ThrottlerMsg,
+    WakeUpPill,
 )
 from hydrastream.network import stream_chunk
-
-
-@hydra_dataclass(frozen=True)
-class GoToSleepPill:
-    pass
-
-
-@hydra_dataclass(frozen=True)
-class WakeUpPill:
-    pass
 
 
 class BaseWorkerKwargs(BaseActorKwargs):

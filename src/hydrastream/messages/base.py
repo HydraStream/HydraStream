@@ -4,7 +4,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine
 from dataclasses import field
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar, TypeVarTuple
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 
@@ -154,11 +154,13 @@ class ActorPriorityQueue(ActorQueue[T]):
 
 T_Res = TypeVar("T_Res")
 T_Msg = TypeVar("T_Msg")
+Ts = TypeVarTuple("Ts")
 
 
 async def ask(
+    *args: *Ts,
     inbox: ActorQueue[T_Msg],
-    msg_factory: Callable[[asyncio.Future[T_Res]], T_Msg],
+    msg_factory: Callable[[*Ts, asyncio.Future[T_Res]], T_Msg],
     timeout: float = 10.0,
     sort_key: tuple[int, ...] = (0,),
 ) -> T_Res:
@@ -170,7 +172,7 @@ async def ask(
     reply_future: asyncio.Future[T_Res] = loop.create_future()
 
     # Construct the message embedding our future
-    msg = msg_factory(reply_future)
+    msg = msg_factory(*args, reply_future)
     await inbox.send_data(msg, sort_key=sort_key)
 
     try:

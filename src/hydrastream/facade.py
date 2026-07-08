@@ -1,8 +1,9 @@
 import asyncio
 import contextlib
-import itertools
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from dataclasses import InitVar, field
+from itertools import count
+from types import TracebackType
 from urllib.parse import urlparse
 
 from hydrastream.actors.streamer import file_streamer
@@ -15,7 +16,14 @@ from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import MonitorBackend
 from hydrastream.messages.base import ask
 from hydrastream.messages.io import LinkData
-from hydrastream.messages.state import GetReadyFileCmd, GetSnapshotCmd
+from hydrastream.messages.state import (
+    AwaitFileCmd,
+    DownloadResult,
+    GetReadyFileCmd,
+    GetSnapshotCmd,
+    GetStatusCmd,
+    TaskStatus,
+)
 
 
 @hydra_dataclass
@@ -25,7 +33,7 @@ class HydraDaemon:
 
     _ui: MonitorBackend = field(init=False)
     _ctx: HydraContext = field(init=False)
-    _counter: itertools.count[int] = field(init=False)
+    _counter: Iterator[int] = field(init=False, default_factory=count)
     _engine_task: asyncio.Task[None] | None = None
     _is_stopping: bool = False
 
@@ -38,7 +46,18 @@ class HydraDaemon:
             self._ui = initial_ui
 
         self._ctx = build_context(self.config, ui=self._ui)
-        self._counter = itertools.count()
+
+    async def __aenter__(self) -> "HydraDaemon":
+        await self.start()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        await self.stop(timeout=5.0)
 
     async def start(self) -> None:
         """Включает завод. Он работает в фоне и ждет задач."""
@@ -87,6 +106,48 @@ class HydraDaemon:
             reg_events_outbox=self._ctx.state_q,
             file_limit_outbox=self._ctx.file_limit_q,
         )
+
+    async def get_status(self, task_id: int) -> TaskStatus | None:
+        """
+        Мгновенно возвращает текущий статус задачи.
+        Идеально для поллинга (polling) из внешних систем (Web API, Bots).
+        """
+        try:
+            return await ask(
+                task_id,
+                inbox=self._ctx.state_q,
+                msg_factory=GetStatusCmd.create_request,
+                timeout=2.0,
+            )
+        except Exception:
+            return None
+
+    async def wait_for_file(self, id: int) -> DownloadResult | None:
+        """
+        Блокируется, пока файл с указанным ID не будет
+        полностью скачан на диск (или не упадет).
+        """
+        loop = asyncio.get_running_loop()
+        reply_future = loop.create_future()
+
+        await self._ctx.state_q.send_data(
+            AwaitFileCmd(file_id=id, reply_to=reply_future)
+        )
+
+        try:
+            return await reply_future
+        except asyncio.CancelledError:
+            if self.config.debug:
+                raise
+            return None
+
+        except Exception as e:
+            await self._ui.log(
+                f"Failed to get result for task {id}: {e}", status=LogStatus.ERROR
+            )
+            if self.config.debug:
+                raise
+            return None
 
     async def _run_engine_in_background(self) -> None:
         try:
@@ -160,6 +221,9 @@ class HydraDaemon:
 
             with contextlib.suppress(asyncio.CancelledError):
                 await self._engine_task
+
+            if self.config.debug:
+                raise
         finally:
             self._engine_task = None
             self._is_stopping = False
@@ -190,6 +254,8 @@ class HydraDaemon:
             await self._ui.log(
                 f"Rejected: Invalid HTTP/HTTPS URL -> {url}", status=LogStatus.WARNING
             )
+            if self.config.debug:
+                raise
             return None
 
         checksum = None
@@ -200,27 +266,35 @@ class HydraDaemon:
                 await self._ui.log(
                     f"Failed to push hash to queue: {e}", status=LogStatus.ERROR
                 )
+                if self.config.debug:
+                    raise
                 return None
+
         elif type_hash:
             await self._ui.log(
                 f"Skipped checksums for {url}",
                 status=LogStatus.WARNING,
             )
             return None
+
         elif expected_checksums:
             await self._ui.log(
                 f"Skipped type hash for {url}",
                 status=LogStatus.WARNING,
             )
             return None
+
         id = next(self._counter)
         try:
             await self._ctx.links_q.send_data(
                 LinkData(id=id, url=url, checksum=checksum), sort_key=(priority, id)
             )
-            return id if self.config.is_stream else None
+            return id
+
         except Exception as e:
             await self._ui.log(
                 f"Failed to push link to queue: {e}", status=LogStatus.ERROR
             )
+            if self.config.debug:
+                raise
             return None

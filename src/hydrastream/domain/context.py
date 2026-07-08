@@ -9,7 +9,6 @@ from dataclasses import field
 from typing import TypedDict
 
 from hydrastream.actors.analyzer import CheckpointEvent
-from hydrastream.actors.worker import GoToSleepPill, WakeUpPill
 from hydrastream.adapters.network_curl import CurlNetworkAdapter
 from hydrastream.domain.config import HydraConfig, UIConfig
 from hydrastream.domain.entities import Chunk, File
@@ -24,13 +23,15 @@ from hydrastream.messages.base import (
     ActorPriorityQueue,
     PoisonPill,
 )
-from hydrastream.messages.io import LinkData, RawLinkItem, WriteChunk
+from hydrastream.messages.io import LinkData, WriteChunk
 from hydrastream.messages.state import StateKeeperMsg
 from hydrastream.messages.traffic import (
     DiskMsg,
     FileCompleted,
+    GoToSleepPill,
     ThrottlerMsg,
     TrafficSignal,
+    WakeUpPill,
     WriteCompleted,
 )
 from hydrastream.monitor import (
@@ -67,7 +68,6 @@ class HydraContext:
     # =========================================================================
     # 3. ОБЫЧНЫЕ ОЧЕРЕДИ (FIFO Queues)
     # =========================================================================
-    raw_links_q: ActorFifoQueue[RawLinkItem | PoisonPill]
     # Диск и агрегация
     disk_q: ActorFifoQueue[DiskMsg | PoisonPill]
     writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill]
@@ -126,7 +126,6 @@ class AppQueuesSchema(TypedDict):
     chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
     ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
 
-    raw_links_q: ActorFifoQueue[RawLinkItem | PoisonPill]
     disk_q: ActorFifoQueue[DiskMsg | PoisonPill]
     writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill]
     ack_q: ActorFifoQueue[WriteCompleted | PoisonPill]
@@ -156,7 +155,6 @@ def _create_channels() -> AppQueuesSchema:
         channels[k] = ActorPriorityQueue(maxsize=v)
 
     actor_queues = {
-        "raw_links_q": 0,
         "disk_q": 0,
         "writer_q": 0,
         "ack_q": 0,

@@ -3,15 +3,16 @@
 
 from typing import assert_never
 
-from hydrastream.actors.worker import GoToSleepPill, WakeUpPill
 from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.messages.base import ActorFifoQueue
 from hydrastream.messages.traffic import (
+    GoToSleepPill,
     NetworkCongestionSignal,
     ScaleDownSignal,
     ScaleUpSignal,
     TrafficSignal,
+    WakeUpPill,
 )
 
 

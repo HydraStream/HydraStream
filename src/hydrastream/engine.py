@@ -9,7 +9,11 @@ from hydrastream.actors.aggregator import DiskAggregator
 from hydrastream.actors.analyzer import TelemetryAnalyzer
 from hydrastream.actors.autosaver import FileAutosaver
 from hydrastream.actors.controller import TrafficController
-from hydrastream.actors.dispatcher import DiskFileDispatcher, StreamFileDispatcher
+from hydrastream.actors.dispatcher import (
+    BaseDispatcherKwargs,
+    DiskFileDispatcher,
+    StreamFileDispatcher,
+)
 from hydrastream.actors.memory_throttler import MemoryThrottler
 from hydrastream.actors.resolver import (
     BaseResolverKwargs,
@@ -22,11 +26,11 @@ from hydrastream.actors.worker import (
     BaseWorkerKwargs,
     DiskDownloadWorker,
     StreamDownloadWorker,
-    WakeUpPill,
 )
 from hydrastream.actors.writer import DiskWriter
 from hydrastream.domain.base_actor import BaseActorKwargs
 from hydrastream.domain.context import HydraContext
+from hydrastream.messages.traffic import WakeUpPill
 
 
 async def teardown_engine(ctx: HydraContext) -> None:
@@ -121,24 +125,23 @@ async def bootstrap_engine(  # noqa
     throttler = None
     writer = None
 
+    base_dispatcher_kwargs: BaseDispatcherKwargs = {
+        **base_actor_kwargs,
+        "inbox": ctx.files_q,
+        "limit": ctx.config.threads,
+        "chunks_outbox": ctx.chunks_q,
+        "file_limit_inbox": ctx.file_limit_q,
+        "state_outbox": ctx.state_q,
+    }
+
     if not ctx.config.dry_run:
         dispatcher = (
             StreamFileDispatcher(
-                **base_actor_kwargs,
-                limit=ctx.config.threads,
-                inbox=ctx.files_q,
-                chunks_outbox=ctx.chunks_q,
-                file_limit_inbox=ctx.file_limit_q,
-                num_workers=1,
+                **base_dispatcher_kwargs,
             )
             if ctx.config.is_stream
             else DiskFileDispatcher(
-                **base_actor_kwargs,
-                limit=ctx.config.threads,
-                inbox=ctx.files_q,
-                chunks_outbox=ctx.chunks_q,
-                file_limit_inbox=ctx.file_limit_q,
-                num_workers=ctx.workers,
+                **base_dispatcher_kwargs,
                 fs=ctx.fs,
             )
         )

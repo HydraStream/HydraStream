@@ -93,3 +93,13 @@ class AnalyzerCheckpointEvent:
 @hydra_dataclass(frozen=True)
 class ThrottlerCheckpointEvent:
     pass
+
+
+@hydra_dataclass(frozen=True)
+class GoToSleepPill:
+    pass
+
+
+@hydra_dataclass(frozen=True)
+class WakeUpPill:
+    pass

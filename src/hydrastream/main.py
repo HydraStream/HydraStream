@@ -26,7 +26,7 @@ from hydrastream.exceptions import (
     LogStatus,
     ValidationError,
 )
-from hydrastream.facade import HydraClient, HydraDaemon
+from hydrastream.facade import HydraDaemon
 from hydrastream.interfaces import MonitorBackend
 
 if sys.platform != "win32":
@@ -236,7 +236,7 @@ async def async_main(  # noqa: C901, PLR0912
             buffer_size_mb=buffer_size_mb,
             client_kwargs=None,
             impersonate=impersonate,
-            debug=debug,
+            debug=True,
         )
 
         links = await validate(links=links, input_file=input_file, ui=ui)
@@ -254,17 +254,15 @@ async def async_main(  # noqa: C901, PLR0912
                     "multiple URLs are provided."
                 ),
             )
-        daemon = HydraDaemon(config=config, initial_ui=ui)
-        await daemon.start()
-        for i in links:
-            await daemon.add_download(
-                i, expected_checksums=checksum, type_hash=typehash
-            )
-        if stream:
-            for i in range(len(links)):
-            
+        async with HydraDaemon(config=config, initial_ui=ui) as daemon:
+            tasks: list[int] = []
 
-        async with HydraClient(config=config) as loader:
+            for i in links:
+                if task := await daemon.add_download(
+                    i, expected_checksums=checksum, type_hash=typehash
+                ):
+                    tasks.append(task)
+
             if stream and not config.dry_run:
                 assert sys.__stdout__ is not None
                 is_terminal = sys.__stdout__.isatty()
@@ -302,20 +300,16 @@ async def async_main(  # noqa: C901, PLR0912
                                 ),
                             ),
                         )
-
-                async for _, file_gen in await loader.stream(
-                    links, input_file, expected_checksums
-                ):
-                    async for chunk in file_gen:
-                        if not is_terminal:
-                            sys.stdout.buffer.write(chunk)
-                        else:
-                            pass
+                for i in tasks:
+                    if file_stream := await daemon.get_stream(i):
+                        async for chunk in file_stream:
+                            if not is_terminal:
+                                sys.stdout.buffer.write(chunk)
+                            else:
+                                pass
 
                     if not is_terminal:
                         sys.stdout.buffer.flush()
-            else:
-                await loader.run(links, input_file, expected_checksums)
 
     except (KeyboardInterrupt, asyncio.CancelledError):
         if debug:
