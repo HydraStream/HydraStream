@@ -583,7 +583,7 @@ class RichMonitor(BaseMonitor):
         **kwargs: object,
     ) -> None:
         renderable = self._formatting_log(message, status)
-        if kwargs["progress"] or status in [
+        if progress or status in [
             "WARNING",
             "ERROR",
             "CRITICAL",

@@ -2,7 +2,7 @@ import hashlib
 from collections.abc import AsyncGenerator
 
 from hydrastream.actors.dispatcher import FileCompleted
-from hydrastream.actors.stater import RemoveFileCmd, StateKeeperMsg
+from hydrastream.actors.stater import FileFinishedCmd, StateKeeperMsg
 from hydrastream.domain.entities import Checksum, File
 from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
 from hydrastream.interfaces import Hasher, MonitorBackend
@@ -96,7 +96,7 @@ async def file_streamer(  # noqa
     finally:
         buffer.clear()
 
-        await reg_events_outbox.send_data(RemoveFileCmd(file_id=file_obj.meta.id))
+        await reg_events_outbox.send_data(FileFinishedCmd(file_id=file_obj.meta.id))
         await file_limit_outbox.send_data(FileCompleted())
 
 

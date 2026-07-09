@@ -99,8 +99,9 @@ class GetReadyFileCmd:
 
 
 @hydra_dataclass(frozen=True)
-class RemoveFileCmd:
+class FileFinishedCmd:
     file_id: int
+    error: str | None = None
 
 
 @hydra_dataclass(frozen=True)
@@ -151,15 +152,25 @@ class UpdateStatusDownloading:
     file_id: int
 
 
+@hydra_dataclass(frozen=True)
+class AwaitFileCmd:
+    """Запрос от юзера: 'Дай знать, когда этот файл скачается на диск'."""
+
+    file_id: int
+    reply_to: asyncio.Future[TaskStatus]
+
+
 type StateKeeperMsg = (
     LinkAddedCmd
     | RegisterFileCmd
     | GetStatusCmd
     | UpdateStatusDownloading
     | GetReadyFileCmd
-    | RemoveFileCmd
+    | FileFinishedCmd
+    | FileFinishedCmd
     | GetSnapshotCmd
     | ProgressDeltaCmd
     | UpdateBytesToCheckCmd
     | GetUIDeltasCmd
+    | AwaitFileCmd
 )

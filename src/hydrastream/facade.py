@@ -18,7 +18,6 @@ from hydrastream.messages.base import ask
 from hydrastream.messages.io import LinkData
 from hydrastream.messages.state import (
     AwaitFileCmd,
-    DownloadResult,
     GetReadyFileCmd,
     GetSnapshotCmd,
     GetStatusCmd,
@@ -124,7 +123,7 @@ class HydraDaemon:
         except Exception:
             return None
 
-    async def wait_for_file(self, id: int) -> DownloadResult | None:
+    async def wait_for_file(self, id: int) -> TaskStatus | None:
         """
         Блокируется, пока файл с указанным ID не будет
         полностью скачан на диск (или не упадет).
@@ -233,7 +232,7 @@ class HydraDaemon:
     # ==========================================
     # ПУБЛИЧНОЕ API С ЗАЩИТОЙ
     # ==========================================
-    async def add_download(
+    async def add_download(  # noqa
         self,
         url: str,
         priority: int = 0,

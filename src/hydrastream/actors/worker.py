@@ -33,7 +33,11 @@ from hydrastream.messages.base import (
     ask,
 )
 from hydrastream.messages.io import StreamChunk, WriteChunk
-from hydrastream.messages.state import ProgressDeltaCmd, RemoveFileCmd, StateKeeperMsg
+from hydrastream.messages.state import (
+    FileFinishedCmd,
+    ProgressDeltaCmd,
+    StateKeeperMsg,
+)
 from hydrastream.messages.traffic import (
     FlushCmd,
     GoToSleepPill,
@@ -311,7 +315,17 @@ class DiskDownloadWorker(BaseDownloadWorker):
     async def _handle_critical_requests_error(
         self, chunk: Chunk, response: Response
     ) -> None:
+        status = response.status_code
         chunk.file.is_failed = True
+        await self.state_outbox.send_data(
+            FileFinishedCmd(
+                file_id=chunk.file.meta.id,
+                error=(
+                    f"Chunk for {chunk.file.actual_filename} "
+                    f"failed permanently (HTTP {status})."
+                ),
+            )
+        )
         self.fs.delete_file(chunk.file.actual_filename)
 
     @override
@@ -473,5 +487,5 @@ class DiskDownloadWorker(BaseDownloadWorker):
         self.fs.close_file(fd_or_conn=file_obj.fd)
         self.fs.delete_state(filename)
         await self.ui.done(file_obj.meta.id, filename)
-        await self.state_outbox.send_data(RemoveFileCmd(file_id=chunk.file.meta.id))
+        await self.state_outbox.send_data(FileFinishedCmd(file_id=chunk.file.meta.id))
         await self.file_limit_outbox.send_data(FileCompleted())

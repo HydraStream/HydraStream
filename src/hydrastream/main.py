@@ -8,7 +8,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, TextIO, TypeVar
+from typing import Annotated, Any, TextIO
 from urllib.parse import urlparse
 
 import typer
@@ -309,6 +309,9 @@ async def async_main(  # noqa: C901, PLR0912
 
                     if not is_terminal:
                         sys.stdout.buffer.flush()
+            else:
+                for i in tasks:
+                    await daemon.wait_for_file(i)
 
     except (KeyboardInterrupt, asyncio.CancelledError):
         if debug:
@@ -334,9 +337,6 @@ async def async_main(  # noqa: C901, PLR0912
 
     finally:
         await ui.stop()
-
-
-T = TypeVar("T", bound=BaseException)
 
 
 def flatten_exceptions(e: BaseException) -> list[BaseException]:
