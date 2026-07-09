@@ -34,10 +34,6 @@ from hydrastream.messages.traffic import WakeUpPill
 
 
 async def teardown_engine(ctx: HydraContext) -> None:
-    if not ctx.session_killer.is_set():
-        return
-
-    ctx.session_killer.set()
 
     ctx.fs.force_close_all()
 

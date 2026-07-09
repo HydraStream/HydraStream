@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-from dataclasses import field
 from pathlib import Path
 from typing import (
     Any,
@@ -76,8 +75,6 @@ class HydraConfig(BaseSettings):
     is_verify: bool = True
     dry_run: bool = False
     debug: bool = False
-
-    ui_config: UIConfig = field(default_factory=UIConfig)
     # --- Поля с базовой валидацией Pydantic ---
     threads: int = Field(default=128, ge=1, le=128)
     output_dir: Path = Field(default=Path("download"))

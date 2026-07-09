@@ -11,6 +11,7 @@ import tempfile
 import time
 from dataclasses import field
 from pathlib import Path
+from typing import override
 
 from hydrastream.domain.entities import File, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
@@ -21,10 +22,11 @@ from hydrastream.exceptions import (
     InsufficientSpaceError,
     StateSaveError,
 )
+from hydrastream.interfaces import StorageBackend
 
 
 @hydra_dataclass
-class LocalStorageManager:
+class LocalStorageManager(StorageBackend):
     output_dir: Path
     debug: bool = False
 
@@ -39,6 +41,7 @@ class LocalStorageManager:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
+    @override
     def allocate_space(self, filename: str, size: int) -> str | None:
         free_space = shutil.disk_usage(self.output_dir).free
         if free_space < size:
@@ -67,12 +70,14 @@ class LocalStorageManager:
             return filepath.name
         return None
 
+    @override
     def open_file(self, filename: str) -> int:
         filepath = self.output_dir / filename
         fd = os.open(filepath, os.O_RDWR)
         self._active_fds.add(fd)
         return fd
 
+    @override
     def write_chunk_data(
         self, fd_or_conn: int, data_bytes: list[bytes], len_data: int, offset: int
     ) -> None:
@@ -172,6 +177,7 @@ class LocalStorageManager:
         else:
             raise e
 
+    @override
     def close_file(self, fd_or_conn: int) -> None:
         if fd_or_conn in self._active_fds:
             try:
@@ -181,15 +187,18 @@ class LocalStorageManager:
             finally:
                 self._active_fds.discard(fd_or_conn)
 
+    @override
     def force_close_all(self) -> None:
         for fd in list(self._active_fds):
             with contextlib.suppress(OSError):
                 self.close_file(fd)
 
+    @override
     def delete_file(self, filename: str) -> None:
         filepath = self.output_dir / filename
         filepath.unlink(missing_ok=True)
 
+    @override
     def save_state(self, file_obj: File) -> None:
         filename = file_obj.actual_filename
         path = Path(self.get_state_path(filename))
@@ -219,6 +228,7 @@ class LocalStorageManager:
                 filename=filename, target_path=str(path), reason=str(e)
             ) from e
 
+    @override
     def load_state(self, filename: str) -> tuple[File | None, int]:
         p = Path(filename)
         main_name = p.stem  # "GCF_..._genomic.fna"
@@ -262,9 +272,11 @@ class LocalStorageManager:
             return file, len(found_states)
         return None, len(found_states)
 
+    @override
     def delete_state(self, filename: str) -> None:
         self.get_state_path(filename).unlink(missing_ok=True)
 
+    @override
     def verify_size(self, filename: str, expected_size: int) -> bool:
         file_path = self.output_dir / filename
 
@@ -280,6 +292,7 @@ class LocalStorageManager:
 
         return True
 
+    @override
     async def verify_file_hash(
         self, filename: str, expected_checksum: str, algorithm: TypeHash
     ) -> None:
@@ -307,6 +320,7 @@ class LocalStorageManager:
                 actual=calculated,
             )
 
+    @override
     def get_unique_path(self, file_path: Path) -> Path:
         stem = file_path.stem
         suffix = file_path.suffix
@@ -323,5 +337,6 @@ class LocalStorageManager:
 
             counter += 1
 
+    @override
     def get_state_path(self, filename: str) -> Path:
         return self.state_dir / f"{filename}.state.json"

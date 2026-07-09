@@ -1,8 +1,8 @@
 import math
 import time
-from typing import assert_never
+from typing import assert_never, override
 
-from hydrastream.domain.base_actor import BaseActor
+from hydrastream.domain.base_actor import BaseActor, ErrorVerdict
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.messages.base import ActorFifoQueue, PoisonPill
@@ -31,6 +31,7 @@ class TelemetryAnalyzer(BaseActor[CheckpointEvent]):
     _last_checkpoint_time: float = 0.0
     _dynamic_limit: int = 1
 
+    @override
     async def _handle_msg(self, msg: CheckpointEvent) -> None:
         match msg:
             case CheckpointEvent():
@@ -40,16 +41,18 @@ class TelemetryAnalyzer(BaseActor[CheckpointEvent]):
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
+    @override
     async def _on_error(
         self, e: Exception, msg: CheckpointEvent | PoisonPill | None = None
-    ) -> None:
+    ) -> ErrorVerdict:
 
-        if self.is_debug:
-            raise e
         await self.ui.log(
             f"Adaptive controller failed: {e}",
             status=LogStatus.ERROR,
         )
+        if self.is_debug:
+            return ErrorVerdict.ESCALATE
+        return ErrorVerdict.STOP
 
     def _calculate_ema(self, speed_now: float, elapsed: float) -> float:
         if self._smoothed_speed == 0.0:

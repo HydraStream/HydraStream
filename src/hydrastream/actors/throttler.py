@@ -4,9 +4,9 @@
 import asyncio
 import time
 from dataclasses import field
-from typing import assert_never
+from typing import assert_never, override
 
-from hydrastream.domain.base_actor import BaseActor
+from hydrastream.domain.base_actor import BaseActor, ErrorVerdict
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     LogStatus,
@@ -38,9 +38,11 @@ class ThrottleController(BaseActor[ThrottlerMsg]):
         if self.speed_limit:
             self.speed_limit = self.speed_limit * 1024**2
 
+    @override
     async def _on_start(self) -> None:
         self._last_checkpoint_time = time.monotonic()
 
+    @override
     async def _handle_msg(self, msg: ThrottlerMsg) -> None:
         match msg:
             case RegisterStreamCmd(stream=s):
@@ -70,12 +72,15 @@ class ThrottleController(BaseActor[ThrottlerMsg]):
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
+    @override
     async def _on_error(
         self, e: Exception, msg: ThrottlerMsg | PoisonPill | None = None
-    ) -> None:
-        if self.is_debug:
-            raise e
+    ) -> ErrorVerdict:
+
         await self.ui.log(f"Throttle controller failed: {e}", status=LogStatus.ERROR)
+        if self.is_debug:
+            return ErrorVerdict.ESCALATE
+        return ErrorVerdict.STOP
 
     async def _enforce_throttling(self) -> None:
         now = time.monotonic()

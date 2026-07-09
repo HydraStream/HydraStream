@@ -6,7 +6,7 @@ import os
 import random
 import traceback
 from abc import ABC, abstractmethod
-from typing import assert_never
+from typing import assert_never, final, override
 
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
@@ -15,7 +15,7 @@ from hydrastream.actors.controller import (
     TrafficSignal,
 )
 from hydrastream.actors.dispatcher import FileCompleted
-from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs
+from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs, ErrorVerdict
 from hydrastream.domain.entities import Chunk
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
@@ -66,6 +66,8 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
 
     net: NetworkBackend
 
+    @final
+    @override
     async def _handle_msg(self, msg: Chunk) -> None:
 
         match msg:
@@ -106,6 +108,8 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
+    @final
+    @override
     async def _on_terminal_pill(self) -> None:
         await self._finally()
 
@@ -113,34 +117,37 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
     async def _finally(self) -> None:
         pass
 
+    @final
+    @override
     async def _on_error(
         self, e: Exception, msg: Chunk | PoisonPill | None = None
-    ) -> None:
+    ) -> ErrorVerdict:
         if not isinstance(msg, Chunk):
-            return
+            return ErrorVerdict.RESUME
 
         if isinstance(e, RequestsError):
             await self._handle_requests_error(msg, e)
             await self.controller_outbox.send_data(NetworkCongestionSignal())
-            return
+            return ErrorVerdict.RESUME
 
         if isinstance(e, TimeoutError):
             await self._requeue_chunk(msg)
-            return
+            return ErrorVerdict.RESUME
 
         tb_str = traceback.format_exc()
 
         if self.is_debug:
             await self.ui.log(f"CRITICAL CRASH:\n{tb_str}", status=LogStatus.CRITICAL)
+            return ErrorVerdict.ESCALATE
 
-        else:
-            await self.ui.log(
-                f"Worker internal crash: {e!r}",
-                status=LogStatus.CRITICAL,
-                traceback=tb_str,
-            )
-        raise e
+        await self.ui.log(
+            f"Worker internal crash: {e!r}",
+            status=LogStatus.CRITICAL,
+            traceback=tb_str,
+        )
+        return ErrorVerdict.STOP
 
+    @final
     async def _handle_requests_error(self, chunk: Chunk, e: RequestsError) -> None:
         """Разбирает сетевые ошибки и решает: убить файл или переповторить чанк."""
         response = self.net.get_error_response(e)
@@ -193,9 +200,11 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
 
 @hydra_dataclass
 class StreamDownloadWorker(BaseDownloadWorker):
+    @override
     async def _finally(self) -> None:
         pass
 
+    @override
     async def _handle_critical_requests_error(
         self, chunk: Chunk, response: Response
     ) -> None:
@@ -205,6 +214,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
             reason=response.reason,
         )
 
+    @override
     async def _requeue_chunk(
         self,
         chunk: Chunk,
@@ -224,6 +234,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
+    @override
     async def _process_chunk(self, chunk: Chunk) -> None:
         if chunk.file.meta.supports_ranges:
             headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
@@ -272,12 +283,14 @@ class StreamDownloadWorker(BaseDownloadWorker):
                     )
                     chunk.current_pos = chunk.current_pos + current_buffer_size
 
+    @override
     async def _file_done(
         self,
         chunk: Chunk,
     ) -> None:
         pass
 
+    @override
     def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
         # СТРИМ: Сначала ID файла, потом позиция (Качаем файлы по очереди!)
         return (file_id, current_pos)
@@ -290,15 +303,18 @@ class DiskDownloadWorker(BaseDownloadWorker):
 
     fs: StorageBackend
 
+    @override
     async def _finally(self) -> None:
         pass
 
+    @override
     async def _handle_critical_requests_error(
         self, chunk: Chunk, response: Response
     ) -> None:
         chunk.file.is_failed = True
         self.fs.delete_file(chunk.file.actual_filename)
 
+    @override
     async def _requeue_chunk(
         self,
         chunk: Chunk,
@@ -342,6 +358,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
+    @override
     async def _process_chunk(self, chunk: Chunk) -> None:
         if chunk.file.meta.supports_ranges:
             headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
@@ -413,10 +430,12 @@ class DiskDownloadWorker(BaseDownloadWorker):
                     )
                     chunk.current_pos += current_buffer_size
 
+    @override
     def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
         # ДИСК: Сначала позиция, потом ID файла (Round-Robin параллельность!)
         return (current_pos, file_id)
 
+    @override
     async def _file_done(
         self,
         chunk: Chunk,

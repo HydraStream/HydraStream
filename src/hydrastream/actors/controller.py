@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
-from typing import assert_never
+from typing import assert_never, override
 
 from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
@@ -24,10 +24,12 @@ class TrafficController(BaseActor[TrafficSignal]):
     dynamic_limit: int
     prev_dynamic_limit: int
 
+    @override
     async def _on_start(self) -> None:
         for _ in range(self.workers - self.dynamic_limit):
             await self.sleep_signals_outdox.send_data(GoToSleepPill())
 
+    @override
     async def _handle_msg(self, msg: TrafficSignal) -> None:
         match msg:
             case NetworkCongestionSignal() | ScaleDownSignal():
@@ -51,6 +53,7 @@ class TrafficController(BaseActor[TrafficSignal]):
             for _ in range(self.prev_dynamic_limit - self.dynamic_limit):
                 await self.sleep_signals_outdox.send_data(GoToSleepPill())
 
+    @override
     async def _on_terminal_pill(self) -> None:
         self.prev_dynamic_limit = self.dynamic_limit
         self.dynamic_limit = self.workers

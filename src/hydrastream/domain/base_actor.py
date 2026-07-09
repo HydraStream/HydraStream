@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Generic, TypedDict, TypeVar, final
+from enum import StrEnum
+from typing import TypedDict, TypeVar, final
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
@@ -9,13 +10,19 @@ from hydrastream.messages.base import ActorQueue, PoisonPill, StandardPill, Term
 T_Payload = TypeVar("T_Payload")
 
 
+class ErrorVerdict(StrEnum):
+    RESUME = "RESUME"
+    STOP = "STOP"
+    ESCALATE = "ESCALATE"
+
+
 class BaseActorKwargs(TypedDict):
     ui: MonitorBackend
     is_debug: bool
 
 
 @hydra_dataclass
-class BaseActor(ABC, Generic[T_Payload]):
+class BaseActor[T_Payload](ABC):
     """Универсальный каркас для любого актора в системе."""
 
     is_debug: bool
@@ -27,8 +34,8 @@ class BaseActor(ABC, Generic[T_Payload]):
         """Шаблонный метод. Ни один наследник НЕ ДОЛЖЕН его переопределять!"""
         await self._on_start()
         msg = None
-        try:
-            while True:
+        while True:
+            try:
                 msg = await self.inbox.get()
 
                 if isinstance(msg, TerminalPill):
@@ -41,14 +48,18 @@ class BaseActor(ABC, Generic[T_Payload]):
 
                 await self._handle_msg(msg)
 
-        except Exception as e:
-            await self._on_error(e, msg)
+            except Exception as e:
+                verdict = await self._on_error(e, msg)
+                if verdict is ErrorVerdict.STOP:
+                    break
+                if verdict is ErrorVerdict.ESCALATE:
+                    raise e
 
-        finally:
-            await self._on_stop()
+            finally:
+                await self._on_stop()
 
     async def _on_start(self) -> None:
-        pass  # Выполняется до начала цикла
+        return  # Выполняется до начала цикла
 
     @abstractmethod
     async def _handle_msg(self, msg: T_Payload) -> None:
@@ -69,16 +80,16 @@ class BaseActor(ABC, Generic[T_Payload]):
             await self.ui.log(error_text, status=LogStatus.ERROR)
 
     async def _on_standard_pill(self) -> None:
-        pass  # Что делать при обычной остановке?
+        return  # Что делать при обычной остановке?
 
     async def _on_terminal_pill(self) -> None:
-        pass  # Что делать, если ты Последний Выживший?
+        return  # Что делать, если ты Последний Выживший?
 
     async def _on_error(
         self, e: Exception, msg: T_Payload | PoisonPill | None = None
-    ) -> None:
+    ) -> ErrorVerdict:
         """Дефолтная обработка ошибок (можно переопределить для логов)"""
-        raise e
+        return ErrorVerdict.ESCALATE
 
     async def _on_stop(self) -> None:
-        pass  # Выполняется в finally
+        return  # Выполняется в finally

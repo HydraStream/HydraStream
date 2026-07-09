@@ -1,7 +1,7 @@
 import asyncio
 from collections import defaultdict
 from dataclasses import field
-from typing import assert_never
+from typing import assert_never, override
 
 from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.entities import File
@@ -48,7 +48,8 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
     _global_bytes: int = 0
     _prev_global_bytes: int = 0
 
-    async def _handle_msg(self, msg: StateKeeperMsg) -> None:
+    @override
+    async def _handle_msg(self, msg: StateKeeperMsg) -> None:  # noqa
         match msg:
             case LinkAddedCmd(link_data=data):
                 trace = JobTrace(file_obj=data)
@@ -121,6 +122,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
+    @override
     async def _on_stop(self) -> None:
         if not self.is_stream:
             for trace in self._traces.values():

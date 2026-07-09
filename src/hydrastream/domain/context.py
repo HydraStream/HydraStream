@@ -47,8 +47,6 @@ from hydrastream.storage import LocalStorageManager
 
 @hydra_dataclass
 class HydraContext:
-    is_running: bool = True
-    is_stopping: bool = False
     # =========================================================================
     # 1. ГЛОБАЛЬНЫЕ ЗАВИСИМОСТИ (Передаются снаружи при создании)
     # =========================================================================

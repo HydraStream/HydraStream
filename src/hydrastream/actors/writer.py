@@ -1,9 +1,9 @@
 import asyncio
 import errno
 import os
-from typing import assert_never
+from typing import assert_never, override
 
-from hydrastream.domain.base_actor import BaseActor
+from hydrastream.domain.base_actor import BaseActor, ErrorVerdict
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import StorageBackend
@@ -21,6 +21,7 @@ class DiskWriter(BaseActor[list[WriteChunk]]):
 
     fs: StorageBackend
 
+    @override
     async def _handle_msg(self, msg: list[WriteChunk]) -> None:
         match msg:
             case list() as batch:
@@ -31,9 +32,10 @@ class DiskWriter(BaseActor[list[WriteChunk]]):
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
+    @override
     async def _on_error(
         self, e: Exception, msg: list[WriteChunk] | PoisonPill | None = None
-    ) -> None:
+    ) -> ErrorVerdict:
         _msg = self._handle_disk_error(e)
         await self.ui.log(
             f"Disk Write Failure: {_msg}",

@@ -3,7 +3,7 @@
 
 import asyncio
 from dataclasses import field
-from typing import assert_never
+from typing import assert_never, override
 
 from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.entities import File
@@ -24,13 +24,7 @@ class FileAutosaver(BaseActor[None]):
     fs: StorageBackend
     _ticker_task: asyncio.Task[None] = field(init=False)
 
-    def save_all_states(self, files: dict[int, File]) -> None:
-        for file in list(files.values()):
-            if file.chunks and not all(
-                c.current_pos > c.end for c in (file.chunks or [])
-            ):
-                self.fs.save_state(file)
-
+    @override
     async def _on_start(self) -> None:
         await self.ui.log("File autosaver worker initiated.", status=LogStatus.INFO)
         self._ticker_task = asyncio.create_task(self._run_autosave_cron())
@@ -63,7 +57,7 @@ class FileAutosaver(BaseActor[None]):
                 # 3. Offload the heavy blocking file I/O to a thread pool
                 # Note: self._flush_event.wait() is GONE because `ask(FlushCmd)`
                 # already guarantees the disk is completely done!
-                await loop.run_in_executor(None, self.save_all_states, files)
+                await loop.run_in_executor(None, self._save_all_states, files)
 
             except asyncio.CancelledError:
                 # Loop was cleanly shut down by on_stop
@@ -76,6 +70,7 @@ class FileAutosaver(BaseActor[None]):
                     status=LogStatus.ERROR,
                 )
 
+    @override
     async def _handle_msg(self, msg: None) -> None:
 
         match msg:
@@ -85,7 +80,15 @@ class FileAutosaver(BaseActor[None]):
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
-    async def on_stop(self) -> None:
+    def _save_all_states(self, files: dict[int, File]) -> None:
+        for file in list(files.values()):
+            if file.chunks and not all(
+                c.current_pos > c.end for c in (file.chunks or [])
+            ):
+                self.fs.save_state(file)
+
+    @override
+    async def _on_stop(self) -> None:
         # Cleanly stop the background cron task when the actor dies
         self._ticker_task.cancel()
         await asyncio.gather(self._ticker_task, return_exceptions=True)

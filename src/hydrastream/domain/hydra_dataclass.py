@@ -5,9 +5,10 @@ from typing import Any, TypeVar, dataclass_transform, overload
 _T = TypeVar("_T")
 
 
+# 2. Возвращаем декоратор-функцию, чтобы @dataclass_transform снова заработал в IDE!
 @dataclass_transform(kw_only_default=True, order_default=False)
 @overload
-def hydra_dataclass(cls: type[_T], /) -> type[_T]: ...
+def hydra_dataclass(cls: type[_T], /) -> type[_T]: ...  # noqa: UP047
 
 
 @dataclass_transform(kw_only_default=True, order_default=False)
@@ -27,11 +28,12 @@ def hydra_dataclass(
 ) -> Callable[[type[_T]], type[_T]]: ...
 
 
+# Реализация функции (внутри нее мы можем использовать чистый 3.12 синтаксис)
 def hydra_dataclass(cls: Any = None, /, **kwargs: Any) -> Any:
     params = {"kw_only": True, "slots": True}
     params.update(kwargs)
 
-    def wrap(obj: type[_T]) -> type[_T]:
+    def wrap[ObjType](obj: type[ObjType]) -> type[ObjType]:
         return dataclass(**params)(obj)
 
     if cls is None:

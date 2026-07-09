@@ -1,4 +1,4 @@
-from typing import assert_never
+from typing import assert_never, override
 
 from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.entities import Chunk
@@ -18,14 +18,14 @@ class MemoryThrottler(BaseActor[Chunk]):
     num_workers: int
     budget: int
 
+    @override
     async def _handle_msg(self, msg: Chunk) -> None:
         match msg:
             case Chunk() as pending_chunk:
-                if pending_chunk.size > self.budget:
+                while pending_chunk.size > self.budget:
                     credit = await self.credit_inbox.get()
                     if isinstance(credit, int):
                         self.budget += credit
-                    return
 
                 self.budget -= pending_chunk.size
                 await self.chunk_outbox.send_data(

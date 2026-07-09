@@ -236,7 +236,7 @@ class InvalidParameterError(HydraError):
     value: str | None = None
     reason: str
     exit_code: ExitCode = ExitCode.USAGE_ERROR
-    log_status: LogStatus = LogStatus.WARNING  # Для ссылок можно WARNING,
+    log_status: LogStatus = LogStatus.WARNING
 
 
 @hydra_dataclass

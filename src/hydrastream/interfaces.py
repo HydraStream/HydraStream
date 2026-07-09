@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Buffer
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from typing_extensions import Buffer, runtime_checkable
+from typing_extensions import runtime_checkable
 
 from hydrastream.exceptions import HydraError, LogStatus
 from hydrastream.messages.base import ActorFifoQueue, PoisonPill
@@ -80,8 +80,6 @@ class MonitorBackend(Protocol):
     async def done(self, file_id: int, filename: str) -> None:
         """Отметить файл как завершенный"""
         ...
-
-    def get_dup_fd(self) -> int | None: ...
 
     async def start(self) -> None: ...
 

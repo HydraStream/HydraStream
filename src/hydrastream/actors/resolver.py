@@ -4,12 +4,12 @@
 import asyncio
 import random
 from abc import ABC, abstractmethod
-from typing import assert_never
+from typing import assert_never, final, override
 
 from curl_cffi import Headers, Response
 from curl_cffi.requests import RequestsError
 
-from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs
+from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs, ErrorVerdict
 from hydrastream.domain.entities import Checksum, File, FileMeta, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
@@ -59,6 +59,8 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
     net: NetworkBackend
     provider: ProviderRouter
 
+    @final
+    @override
     async def _handle_msg(self, msg: LinkData) -> None:
         checksum = None
         match msg:
@@ -85,14 +87,16 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
 
+    @final
+    @override
     async def _on_error(
         self, e: Exception, msg: LinkData | PoisonPill | None = None
-    ) -> None:
+    ) -> ErrorVerdict:
         if not isinstance(msg, LinkData):
-            return
+            return ErrorVerdict.RESUME
 
         if isinstance(e, RequestsError):
-            response = self.net.get_error_response
+            response = self.net.get_error_response(e)
 
             if isinstance(response, Response):
                 status = response.status_code
@@ -106,26 +110,27 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
 
                 # Временные ошибки сервера (5xx, 429) — в очередь
                 await self._requeue_chunk(msg, delay_range=(0.5, 2.0))
-            else:
-                # Сетевая ошибка без ответа
-                await self._requeue_chunk(msg)
+                return ErrorVerdict.RESUME
+            # Сетевая ошибка без ответа
+            await self._requeue_chunk(msg)
+            return ErrorVerdict.RESUME
 
         if isinstance(e, TimeoutError):
             await self._requeue_chunk(msg)
+            return ErrorVerdict.RESUME
 
         # Если мы здесь, значит ошибка критическая (Exception)
         await self.ui.log(
             f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL
         )
-        raise e
+        return ErrorVerdict.ESCALATE
 
+    @final
     async def _register_file(self, file_obj: File) -> None:
         """Общая логика регистрации, внутри которой есть ХУК для наследников."""
         filename = file_obj.meta.original_filename
 
-        await self.state_outbox.send_data(
-            data=RegisterFileCmd(file_id=file_obj.meta.id, file_obj=file_obj)
-        )
+        await self.state_outbox.send_data(data=RegisterFileCmd(file_obj=file_obj))
         self.ui.add_file(file_obj.meta.id, filename, file_obj.meta.content_length)
 
         # ВЫЗЫВАЕМ ХУК (Стрим проигнорирует, Диск - обновит UI)
@@ -174,6 +179,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
 
         return self._parse_headers(url, response.headers)
 
+    @final
     def _parse_headers(self, url: str, headers: Headers) -> tuple[str, int, bool]:
         total_size = int(headers.get("content-length", 0))
 
@@ -182,6 +188,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
         filename = extract_filename(url, headers)
         return filename, total_size, supports_ranges
 
+    @final
     async def _resolve_hash(
         self,
         id: int,
@@ -211,6 +218,7 @@ class StreamMetadataResolver(BaseMetadataResolver):
     # Специфичная зависимость только для стрима!
     STREAM_CHUNK_SIZE: int
 
+    @override
     async def _prepare_file_object(
         self,
         data: LinkData,
@@ -236,6 +244,7 @@ class StreamMetadataResolver(BaseMetadataResolver):
             chunk_size=chunk_size,
         )
 
+    @override
     async def _on_file_registered(self, file_obj: File) -> None:
         # В режиме стрима нам не нужно пересчитывать скачанные байты для UI!
         pass
@@ -245,6 +254,7 @@ class StreamMetadataResolver(BaseMetadataResolver):
 class DiskMetadataResolver(BaseMetadataResolver):
     fs: StorageBackend
 
+    @override
     async def _prepare_file_object(
         self,
         data: LinkData,
@@ -281,6 +291,7 @@ class DiskMetadataResolver(BaseMetadataResolver):
             chunk_size=chunk_size,
         )
 
+    @override
     async def _on_file_registered(self, file_obj: File) -> None:
         chunks = file_obj.chunks or []
 

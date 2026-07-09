@@ -225,7 +225,6 @@ async def async_main(  # noqa: C901, PLR0912
 
     try:
         config = HydraConfig(
-            ui_config=ui_config,
             is_stream=stream,
             threads=threads,
             dry_run=dry_run,

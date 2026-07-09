@@ -1,5 +1,4 @@
 import asyncio
-from typing import TypeAlias
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.interfaces import NetworkStream
@@ -26,7 +25,7 @@ class NetworkCongestionSignal:
     pass
 
 
-TrafficSignal: TypeAlias = ScaleDownSignal | ScaleUpSignal | NetworkCongestionSignal
+type TrafficSignal = ScaleDownSignal | ScaleUpSignal | NetworkCongestionSignal
 
 
 @hydra_dataclass(frozen=True)
@@ -54,7 +53,7 @@ class DiskBufferClearedSignal:
     pass
 
 
-ThrottlerMsg: TypeAlias = (
+type ThrottlerMsg = (
     CheckpointReachedCmd
     | RegisterStreamCmd
     | RemoveStreamCmd
@@ -72,7 +71,7 @@ class FlushCmd:
         return cls(reply_to=future)
 
 
-DiskMsg: TypeAlias = WriteChunk | FlushCmd
+type DiskMsg = WriteChunk | FlushCmd
 
 
 @hydra_dataclass(frozen=True)

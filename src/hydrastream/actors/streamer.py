@@ -77,7 +77,7 @@ async def file_streamer(  # noqa
         else:
             if hasher and checksum:
                 try:
-                    verify_stream(
+                    _verify_stream(
                         hasher,
                         file_obj.actual_filename,
                         checksum,
@@ -100,7 +100,7 @@ async def file_streamer(  # noqa
         await file_limit_outbox.send_data(FileCompleted())
 
 
-def verify_stream(
+def _verify_stream(
     hasher: Hasher,
     filename: str,
     expected_checksum: Checksum,

@@ -3,6 +3,7 @@
 
 import base64
 import binascii
+from typing import override
 
 from hydrastream.domain.entities import Checksum
 from hydrastream.interfaces import HashProvider, MonitorBackend, NetworkBackend
@@ -10,7 +11,8 @@ from hydrastream.network import safe_request
 
 
 # 2. КОНКРЕТНЫЙ ПРОВАЙДЕР ДЛЯ NCBI
-class NCBIProvider:
+class NCBIProvider(HashProvider):
+    @override
     async def resolve(
         self, net: NetworkBackend, ui: MonitorBackend, url: str, filename: str
     ) -> Checksum | None:
@@ -29,7 +31,8 @@ class NCBIProvider:
 
 
 # 3. КОНКРЕТНЫЙ ПРОВАЙДЕР ДЛЯ ОБЛАКОВ (S3, GCS)
-class CloudProvider:
+class CloudProvider(HashProvider):
+    @override
     async def resolve(
         self, net: NetworkBackend, ui: MonitorBackend, url: str, filename: str
     ) -> Checksum | None:

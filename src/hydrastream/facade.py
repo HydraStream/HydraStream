@@ -7,7 +7,7 @@ from types import TracebackType
 from urllib.parse import urlparse
 
 from hydrastream.actors.streamer import file_streamer
-from hydrastream.domain.config import HydraConfig
+from hydrastream.domain.config import HydraConfig, UIConfig
 from hydrastream.domain.context import HydraContext, build_context, create_monitor
 from hydrastream.domain.entities import Checksum, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
@@ -22,6 +22,7 @@ from hydrastream.messages.state import (
     GetReadyFileCmd,
     GetSnapshotCmd,
     GetStatusCmd,
+    LinkAddedCmd,
     TaskStatus,
 )
 
@@ -29,6 +30,7 @@ from hydrastream.messages.state import (
 @hydra_dataclass
 class HydraDaemon:
     config: HydraConfig
+    ui_config: UIConfig = field(default_factory=UIConfig)
     initial_ui: InitVar[MonitorBackend | None] = None
 
     _ui: MonitorBackend = field(init=False)
@@ -41,7 +43,7 @@ class HydraDaemon:
         if self.config.custom_monitor is not None:
             self._ui = self.config.custom_monitor
         if initial_ui is None:
-            self._ui = create_monitor(config=self.config.ui_config)
+            self._ui = create_monitor(config=self.ui_config)
         else:
             self._ui = initial_ui
 
@@ -286,9 +288,9 @@ class HydraDaemon:
 
         id = next(self._counter)
         try:
-            await self._ctx.links_q.send_data(
-                LinkData(id=id, url=url, checksum=checksum), sort_key=(priority, id)
-            )
+            link_data = LinkData(id=id, url=url, checksum=checksum)
+            await self._ctx.links_q.send_data(link_data, sort_key=(priority, id))
+            await self._ctx.state_q.send_data(LinkAddedCmd(link_data=link_data))
             return id
 
         except Exception as e:

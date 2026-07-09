@@ -2,7 +2,6 @@
 # Licensed under the MIT License.
 
 import asyncio
-import os
 import shutil
 import sys
 import time
@@ -12,7 +11,7 @@ from collections import defaultdict
 from dataclasses import asdict, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, final, override
 
 import orjson
 from rich.console import Console, Group
@@ -84,6 +83,8 @@ class BaseMonitor(MonitorBackend, ABC):
     def __post_init__(self) -> None:
         self.log_file = self.log_file / "hydra.log"
 
+    @final
+    @override
     async def log(
         self,
         message: str | Rule | Table,
@@ -103,16 +104,17 @@ class BaseMonitor(MonitorBackend, ABC):
                 return
             self._log_throttle[throttle_key] = now
 
-        timestamp = datetime.now().strftime("[%H:%M:%S]")
-        final_msg = f"{timestamp} {message}"
-
         if self.log_file:
+            timestamp = datetime.now().strftime("[%H:%M:%S]")
+            final_msg = f"{timestamp} {message}"
             clean_msg = Text.from_markup(str(final_msg)).plain
             self._log_queue.put_nowait(clean_msg)
 
-        await self._display_log(message, status, **kwargs)
+        await self._display_log(message, status, progress, **kwargs)
 
-    async def report(self, error: HydraError, **log_extra: Any) -> None:  # noqa: ANN401
+    @final
+    @override
+    async def report(self, error: HydraError, **log_extra: Any) -> None:
         """
         Передаем данные ошибки в логгер.
         asdict() превратит поля датакласса в ключи для JSON-лога.
@@ -133,11 +135,7 @@ class BaseMonitor(MonitorBackend, ABC):
         current_date = datetime.now().strftime("%Y-%m-%d")
         await self.log(f"--- {current_date} ---")
 
-    def get_dup_fd(self) -> int | None:
-        if self._log_fd is not None:
-            return os.dup(self._log_fd.fileno())
-        return None
-
+    @final
     async def _log_worker(self) -> None:
         """
         Фоновый воркер. Живет всё время работы программы.
@@ -166,6 +164,7 @@ class BaseMonitor(MonitorBackend, ABC):
                 self._log_fd = None
                 break
 
+    @override
     def add_file(
         self, file_id: int, filename: str, total_size: int | None = None
     ) -> None:
@@ -173,18 +172,22 @@ class BaseMonitor(MonitorBackend, ABC):
             self._total_bytes += total_size
             self._total_files += 1
 
+    @override
     def update_progress(self, file_id: int, advance_bytes: int) -> None:
         pass
 
+    @override
     def update_filename(self, file_id: int, new_filename: str) -> None:
         pass
 
+    @override
     async def done(self, file_id: int, filename: str) -> None:
 
         if self._buffer.get(file_id, 0):
             self._files_completed += 1
             await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
+    @final
     def _safe_init(self) -> None:
         """Пытается создать папку для лога. Если не выходит - падает на дефолт."""
         try:
@@ -198,6 +201,8 @@ class BaseMonitor(MonitorBackend, ABC):
             fallback = Path.cwd() / "hydra.log"
             self.log_file = fallback
 
+    @final
+    @override
     async def start(self) -> None:
         """Запускает фонового воркера (вызывать внутри async_main)"""
         if self._is_running:
@@ -264,6 +269,8 @@ class BaseMonitor(MonitorBackend, ABC):
             **report_dict,
         )
 
+    @final
+    @override
     async def stop(self) -> None:
         await self._handle_exit()
         await self.log("--- Session Finished ---")
@@ -276,6 +283,7 @@ class BaseMonitor(MonitorBackend, ABC):
             self._log_fd.close()
             self._log_fd = None
 
+    @override
     async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
         """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
 
@@ -317,6 +325,7 @@ class BaseMonitor(MonitorBackend, ABC):
         if not self.is_stream:
             await self._check_storage_capacity(output_path=output_dir)
 
+    @final
     async def _check_storage_capacity(self, output_path: str | Path) -> None:
         """Проверяет наличие свободного места на диске перед началом загрузки."""
 
@@ -353,7 +362,11 @@ class BaseMonitor(MonitorBackend, ABC):
     ) -> None: ...
     @abstractmethod
     async def _display_log(
-        self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
+        self,
+        message: str | Rule | Table,
+        status: LogStatus | str,
+        progress: bool = False,
+        **kwargs: object,
     ) -> None:
         pass
 
@@ -364,19 +377,21 @@ class BaseMonitor(MonitorBackend, ABC):
 
 @hydra_dataclass
 class QuietMonitor(BaseMonitor):
+    @override
     async def _display_log(
-        self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
+        self,
+        message: str | Rule | Table,
+        status: LogStatus | str,
+        progress: bool = False,
+        **kwargs: object,
     ) -> None:
         pass
 
-    async def _display_dry_run(
-        self, data: dict[str, Any], output_dir: str | Path
-    ) -> None:
-        pass
-
+    @override
     async def _ui_start(self) -> None:
         pass
 
+    @override
     def bind_to_state_keeper(
         self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     ) -> None:
@@ -385,8 +400,13 @@ class QuietMonitor(BaseMonitor):
 
 @hydra_dataclass
 class JsonMonitor(BaseMonitor):
+    @override
     async def _display_log(
-        self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
+        self,
+        message: str | Rule | Table,
+        status: LogStatus | str,
+        progress: bool = False,
+        **kwargs: object,
     ) -> None:
         log_record = {
             "timestamp": datetime.now(UTC),
@@ -397,6 +417,7 @@ class JsonMonitor(BaseMonitor):
         # Сериализуем в байты, потом в строку
         sys.stdout.buffer.write(orjson.dumps(log_record) + b"\n")
 
+    @override
     async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
         report_data = {
             "total_files": self._total_files,
@@ -429,9 +450,11 @@ class JsonMonitor(BaseMonitor):
         if self.is_stream:
             await self._check_storage_capacity(output_dir)
 
+    @override
     async def _ui_start(self) -> None:
         pass
 
+    @override
     def bind_to_state_keeper(
         self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     ) -> None:
@@ -442,21 +465,23 @@ class JsonMonitor(BaseMonitor):
 class PlainMonitor(BaseMonitor):
     console: Console = field(default_factory=lambda: Console(stderr=True))
 
+    @override
     async def _display_log(
-        self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
+        self,
+        message: str | Rule | Table,
+        status: LogStatus | str,
+        progress: bool = False,
+        **kwargs: object,
     ) -> None:
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         final_msg = f"{timestamp} {message}"
         self.console.print(Text.from_markup(str(final_msg)).plain)
 
-    async def _display_dry_run(
-        self, data: dict[str, Any], output_dir: str | Path
-    ) -> None:
-        pass
-
+    @override
     async def _ui_start(self) -> None:
         pass
 
+    @override
     def bind_to_state_keeper(
         self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     ) -> None:
@@ -549,15 +574,22 @@ class RichMonitor(BaseMonitor):
             transient=False,
         )
 
+    @override
     async def _display_log(
-        self, message: str | Rule | Table, status: LogStatus | str, **kwargs: object
+        self,
+        message: str | Rule | Table,
+        status: LogStatus | str,
+        progress: bool = False,
+        **kwargs: object,
     ) -> None:
-        pass
-
-    async def _display_dry_run(
-        self, data: dict[str, Any], output_dir: str | Path
-    ) -> None:
-        pass
+        renderable = self._formatting_log(message, status)
+        if kwargs["progress"] or status in [
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+            "INTERRUPT",
+        ]:
+            self.rich.console.print(renderable)
 
     def _truncate_filename(self, name: str, w: int = 30) -> str:
         return (
@@ -577,6 +609,9 @@ class RichMonitor(BaseMonitor):
         formatted_msg: str,
         status: str | LogStatus = LogStatus.INFO,
     ) -> Panel | str | Rule | Table:
+        timestamp = datetime.now().strftime("[%H:%M:%S]")
+        formatted_msg = f"{timestamp} {message}"
+
         match status.upper():
             case "CRITICAL" | "INTERRUPT":
                 renderable = Panel(
@@ -603,35 +638,7 @@ class RichMonitor(BaseMonitor):
                 renderable = message
         return renderable
 
-    async def log(
-        self,
-        message: str | Rule | Table,
-        *,
-        status: str | LogStatus = LogStatus.INFO,
-        progress: bool = False,
-        throttle_key: str | None = None,
-        throttle_sec: float = 10.0,
-        **kwargs: object,
-    ) -> None:
-        if status == LogStatus.INTERRUPT:
-            self._is_cancelled = True
-        if throttle_key:
-            now = time.monotonic()
-            last_time = self._log_throttle.get(throttle_key, 0.0)
-            if now - last_time < throttle_sec:
-                return
-            self._log_throttle[throttle_key] = now
-
-        timestamp = datetime.now().strftime("[%H:%M:%S]")
-        final_msg = f"{timestamp} {message}"
-
-        if self.log_file:
-            clean_msg = Text.from_markup(str(final_msg)).plain
-            self._log_queue.put_nowait(clean_msg)
-        renderable = self._formatting_log(message, final_msg, status)
-        if progress or status in ["WARNING", "ERROR", "CRITICAL", "INTERRUPT"]:
-            self.rich.console.print(renderable)
-
+    @override
     def add_file(
         self, file_id: int, filename: str, total_size: int | None = None
     ) -> None:
@@ -654,6 +661,7 @@ class RichMonitor(BaseMonitor):
         self.tasks[file_id] = task_id
         self._update_panel_title()
 
+    @override
     def update_filename(self, file_id: int, new_filename: str) -> None:
         self.rich.update(self.tasks[file_id], description=new_filename)
 
@@ -702,6 +710,7 @@ class RichMonitor(BaseMonitor):
             + f"[blue]{self._total_files}[/] Files | [yellow]{active} Active[/]"
         )
 
+    @override
     async def done(self, file_id: int, filename: str) -> None:
         task_id = self.tasks[file_id]
         self.rich.update(
@@ -855,10 +864,12 @@ class RichMonitor(BaseMonitor):
             **report_dict,
         )
 
+    @override
     async def _ui_start(self) -> None:
 
         self.live.start()
 
+    @override
     def bind_to_state_keeper(
         self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     ) -> None:

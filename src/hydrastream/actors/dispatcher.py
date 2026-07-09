@@ -3,7 +3,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import assert_never
+from typing import assert_never, final, override
 
 from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs
 from hydrastream.domain.entities import Chunk, File
@@ -39,6 +39,8 @@ class BaseFileDispatcher(BaseActor[File], ABC):
 
     _current_files: int = 0
 
+    @final
+    @override
     async def _handle_msg(self, msg: File) -> None:
         match msg:
             case File() as file_obj:
@@ -87,9 +89,11 @@ class BaseFileDispatcher(BaseActor[File], ABC):
 
 @hydra_dataclass
 class StreamFileDispatcher(BaseFileDispatcher):
+    @override
     async def _prepare_file(self, file_obj: File) -> None:
         pass
 
+    @override
     def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
         # СТРИМ: Сначала ID файла, потом позиция (Качаем файлы по очереди!)
         return (file_id, current_pos)
@@ -99,6 +103,7 @@ class StreamFileDispatcher(BaseFileDispatcher):
 class DiskFileDispatcher(BaseFileDispatcher):
     fs: StorageBackend
 
+    @override
     async def _prepare_file(self, file_obj: File) -> None:
 
         loop = asyncio.get_running_loop()
@@ -116,6 +121,7 @@ class DiskFileDispatcher(BaseFileDispatcher):
 
         file_obj.fd = self.fs.open_file(filename=file_obj.actual_filename)
 
+    @override
     def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
         # ДИСК: Сначала позиция, потом ID файла (Round-Robin параллельность!)
         return (current_pos, file_id)
