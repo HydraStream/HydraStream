@@ -153,8 +153,8 @@ def _create_channels() -> AppQueuesSchema:
         channels[k] = ActorPriorityQueue(maxsize=v)
 
     actor_queues = {
-        "disk_q": 0,
-        "writer_q": 0,
+        "disk_q": 10,
+        "writer_q": 10,
         "ack_q": 0,
         "throttler_q": 0,
         "analyzer_q": 0,
