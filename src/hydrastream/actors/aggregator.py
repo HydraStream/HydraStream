@@ -101,7 +101,8 @@ class DiskAggregator(BaseActor[WriteChunk | FlushCmd]):
             self._current_buffer.clear()
             self._current_size = 0
 
-    async def _coalesce(self, batch_bytes: list[WriteChunk]) -> list[WriteChunk]:
+    @staticmethod
+    async def _coalesce(batch_bytes: list[WriteChunk]) -> list[WriteChunk]:
 
         batch_bytes.sort()
 

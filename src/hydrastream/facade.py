@@ -49,7 +49,7 @@ class HydraDaemon:
         self._ctx = build_context(self.config, ui=self._ui)
 
     async def __aenter__(self) -> "HydraDaemon":
-        await self.start()
+        self.start()
         return self
 
     async def __aexit__(
@@ -58,12 +58,13 @@ class HydraDaemon:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+
         await self.stop(timeout=5.0)
 
-    async def start(self) -> None:
+    def start(self) -> None:
         """Включает завод. Он работает в фоне и ждет задач."""
         if self._engine_task is not None:
-            await self._ui.log("Daemon is already running.", status=LogStatus.WARNING)
+            self._ui.log("Daemon is already running.", status=LogStatus.WARNING)
             return
 
         self._is_stopping = False
@@ -71,7 +72,7 @@ class HydraDaemon:
         self._engine_task = asyncio.create_task(
             self._run_engine_in_background(), name="hydra:engine_main"
         )
-        await self._ui.log(
+        self._ui.log(
             "HydraEngine successfully started in background.", status=LogStatus.INFO
         )
 
@@ -91,7 +92,7 @@ class HydraDaemon:
             msg = await reply_future
 
         except asyncio.CancelledError:
-            await self._ui.log(
+            self._ui.log(
                 "Engine background task was explicitly cancelled.",
                 status=LogStatus.INFO,
             )
@@ -143,7 +144,7 @@ class HydraDaemon:
             return None
 
         except Exception as e:
-            await self._ui.log(
+            self._ui.log(
                 f"Failed to get result for task {id}: {e}", status=LogStatus.ERROR
             )
             if self.config.debug:
@@ -152,11 +153,11 @@ class HydraDaemon:
 
     async def _run_engine_in_background(self) -> None:
         try:
-            await prepare_runtime(self._ctx)
+            prepare_runtime(self._ctx)
 
             try:
                 async with asyncio.TaskGroup() as tg:
-                    await bootstrap_engine(self._ctx, tg)
+                    bootstrap_engine(self._ctx, tg)
 
                 if self._ctx.config.dry_run:
                     files = await ask(
@@ -165,18 +166,18 @@ class HydraDaemon:
                         timeout=5.0,
                         sort_key=(-1,),
                     )
-                    await self._ctx.ui.dry_run(files, self._ctx.config.output_dir)
+                    self._ctx.ui.dry_run(files, self._ctx.config.output_dir)
 
             except* Exception as eg:
-                await self._ctx.ui.log(
+                self._ctx.ui.log(
                     f"Critical failure in TaskGroup: {eg.exceptions}",
                     status=LogStatus.CRITICAL,
-                )
+                )  # type: ignore
                 if self.config.debug:
                     raise
 
         except asyncio.CancelledError:
-            await self._ui.log(
+            self._ui.log(
                 "Engine background was explicitly cancelled.",
                 status=LogStatus.INFO,
             )
@@ -188,9 +189,7 @@ class HydraDaemon:
                 raise
 
         except Exception as e:
-            await self._ui.log(
-                f"Fatal crash in HydraEngine: {e}", status=LogStatus.CRITICAL
-            )
+            self._ui.log(f"Fatal crash in HydraEngine: {e}", status=LogStatus.CRITICAL)
             if self.config.debug:
                 raise
         finally:
@@ -202,18 +201,19 @@ class HydraDaemon:
             return
 
         self._is_stopping = True
-        await self._ui.log("Initiating graceful shutdown...", status=LogStatus.INFO)
+        self._ui.log("Initiating graceful shutdown...", status=LogStatus.INFO)
 
         try:
-            # 1. Запускаем каскад смерти через пилюлю фидеру
-            self._ctx.links_q.send_poison_pills_nowait(count=self._ctx.resolvers)
+            async with asyncio.timeout(timeout):
+                # 1. Запускаем каскад смерти через пилюлю фидеру
+                self._ctx.links_q.send_poison_pills_nowait(count=self._ctx.resolvers)
 
-            # 2. Ждем штатного закрытия, но не вечно (защита от зависания)
-            await asyncio.wait_for(asyncio.shield(self._engine_task), timeout=timeout)
-            await self._ui.log("Daemon stopped gracefully.", status=LogStatus.INFO)
+                # 2. Ждем штатного закрытия, но не вечно (защита от зависания)
+                await asyncio.shield(self._engine_task)
+            self._ui.log("Daemon stopped gracefully.", status=LogStatus.INFO)
 
         except TimeoutError:
-            await self._ui.log(
+            self._ui.log(
                 f"Graceful shutdown timed out after {timeout}s! Forcing cancel...",
                 status=LogStatus.ERROR,
             )
@@ -241,18 +241,18 @@ class HydraDaemon:
     ) -> int | None:
 
         if self._engine_task is None or self._is_stopping:
-            await self._ui.log(
+            self._ui.log(
                 f"Rejected download for {url}: Daemon is stopped or stopping.",
                 status=LogStatus.WARNING,
             )
             return None
         try:
             result = urlparse(url)
-            if not (result.scheme in ("http", "https") and result.netloc):
+            if not (result.scheme in {"http", "https"} and result.netloc):
                 raise ValueError()
 
         except ValueError:
-            await self._ui.log(
+            self._ui.log(
                 f"Rejected: Invalid HTTP/HTTPS URL -> {url}", status=LogStatus.WARNING
             )
             if self.config.debug:
@@ -264,7 +264,7 @@ class HydraDaemon:
             try:
                 checksum = Checksum(algorithm=type_hash, value=expected_checksums)
             except Exception as e:
-                await self._ui.log(
+                self._ui.log(
                     f"Failed to push hash to queue: {e}", status=LogStatus.ERROR
                 )
                 if self.config.debug:
@@ -272,14 +272,14 @@ class HydraDaemon:
                 return None
 
         elif type_hash:
-            await self._ui.log(
+            self._ui.log(
                 f"Skipped checksums for {url}",
                 status=LogStatus.WARNING,
             )
             return None
 
         elif expected_checksums:
-            await self._ui.log(
+            self._ui.log(
                 f"Skipped type hash for {url}",
                 status=LogStatus.WARNING,
             )
@@ -290,12 +290,11 @@ class HydraDaemon:
             link_data = LinkData(id=id, url=url, checksum=checksum)
             await self._ctx.links_q.send_data(link_data, sort_key=(priority, id))
             await self._ctx.state_q.send_data(LinkAddedCmd(link_data=link_data))
+
             return id
 
         except Exception as e:
-            await self._ui.log(
-                f"Failed to push link to queue: {e}", status=LogStatus.ERROR
-            )
+            self._ui.log(f"Failed to push link to queue: {e}", status=LogStatus.ERROR)
             if self.config.debug:
                 raise
             return None

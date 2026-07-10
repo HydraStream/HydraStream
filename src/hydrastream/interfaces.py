@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from typing_extensions import runtime_checkable
 
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import HydraError, LogStatus
 from hydrastream.messages.base import ActorFifoQueue, PoisonPill
 from hydrastream.messages.state import StateKeeperMsg
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
 
 
 @runtime_checkable
+@hydra_dataclass
 class StorageBackend(Protocol):
     def allocate_space(self, filename: str, size: int) -> str | None: ...
 
@@ -49,12 +51,13 @@ class StorageBackend(Protocol):
 
 
 @runtime_checkable
+@hydra_dataclass
 class MonitorBackend(Protocol):
-    async def log(
+    def log(
         self,
         message: str,
         *,
-        status: LogStatus | str,
+        status: LogStatus | str = "",
         progress: bool = False,
         throttle_key: str | None = None,
         throttle_sec: float = 10.0,
@@ -75,13 +78,13 @@ class MonitorBackend(Protocol):
 
     def update_filename(self, file_id: int, new_filename: str) -> None: ...
 
-    async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None: ...
+    def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None: ...
 
-    async def done(self, file_id: int, filename: str) -> None:
+    def done(self, file_id: int, filename: str) -> None:
         """Отметить файл как завершенный"""
         ...
 
-    async def start(self) -> None: ...
+    def start(self) -> None: ...
 
     def bind_to_state_keeper(
         self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
@@ -93,10 +96,11 @@ class MonitorBackend(Protocol):
         """Остановить отрисовку и закрыть ресурсы"""
         ...
 
-    async def report(self, error: HydraError, **log_extra: Any) -> None: ...
+    def report(self, error: HydraError, **log_extra: Any) -> None: ...
 
 
 @runtime_checkable
+@hydra_dataclass(frozen=True)
 class NetworkStream(Protocol):
     """Абстракция над потоком (response от curl_cffi или httpx)"""
 
@@ -123,7 +127,8 @@ class NetworkBackend(Protocol):
         """Открыть стрим для скачивания чанка"""
         ...
 
-    def get_error_response(self, e: Any) -> Any | None:
+    @staticmethod
+    def get_error_response(e: Any) -> Any | None:
         return e.response  # type: ignore
 
     async def close(self) -> None:

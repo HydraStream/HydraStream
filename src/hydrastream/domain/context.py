@@ -67,7 +67,7 @@ class HydraContext:
     # 3. ОБЫЧНЫЕ ОЧЕРЕДИ (FIFO Queues)
     # =========================================================================
     # Диск и агрегация
-    disk_q: ActorFifoQueue[DiskMsg | PoisonPill]
+    aggregator_q: ActorFifoQueue[DiskMsg | PoisonPill]
     writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill]
     ack_q: ActorFifoQueue[WriteCompleted | PoisonPill]
     # Управление и телеметрия
@@ -80,7 +80,7 @@ class HydraContext:
     wait_in_sleep: ActorFifoQueue[WakeUpPill]
     # Жизненный цикл файлов
     file_limit_q: ActorFifoQueue[FileCompleted]
-    autosaver_q: ActorFifoQueue[None | PoisonPill]
+    autosaver_q: ActorFifoQueue[PoisonPill | None]
 
     session_killer: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -124,7 +124,7 @@ class AppQueuesSchema(TypedDict):
     chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
     ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
 
-    disk_q: ActorFifoQueue[DiskMsg | PoisonPill]
+    aggregator_q: ActorFifoQueue[DiskMsg | PoisonPill]
     writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill]
     ack_q: ActorFifoQueue[WriteCompleted | PoisonPill]
     analyzer_q: ActorFifoQueue[CheckpointEvent | PoisonPill]
@@ -135,7 +135,7 @@ class AppQueuesSchema(TypedDict):
     sleep_signals: ActorFifoQueue[GoToSleepPill]
     wait_in_sleep: ActorFifoQueue[WakeUpPill]
     file_limit_q: ActorFifoQueue[FileCompleted]
-    autosaver_q: ActorFifoQueue[None | PoisonPill]
+    autosaver_q: ActorFifoQueue[PoisonPill | None]
 
 
 def _create_channels() -> AppQueuesSchema:
@@ -153,7 +153,7 @@ def _create_channels() -> AppQueuesSchema:
         channels[k] = ActorPriorityQueue(maxsize=v)
 
     actor_queues = {
-        "disk_q": 10,
+        "aggregator_q": 10,
         "writer_q": 10,
         "ack_q": 0,
         "throttler_q": 0,

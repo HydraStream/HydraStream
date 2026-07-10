@@ -26,7 +26,7 @@ class FileAutosaver(BaseActor[None]):
 
     @override
     async def _on_start(self) -> None:
-        await self.ui.log("File autosaver worker initiated.", status=LogStatus.INFO)
+        self.ui.log("File autosaver worker initiated.", status=LogStatus.INFO)
         self._ticker_task = asyncio.create_task(self._run_autosave_cron())
 
     async def _run_autosave_cron(self) -> None:
@@ -65,7 +65,7 @@ class FileAutosaver(BaseActor[None]):
             except Exception as e:
                 if self.is_debug:
                     raise
-                await self.ui.log(
+                self.ui.log(
                     f"Auto-save operation failed: {e}",
                     status=LogStatus.ERROR,
                 )
@@ -92,6 +92,4 @@ class FileAutosaver(BaseActor[None]):
         # Cleanly stop the background cron task when the actor dies
         self._ticker_task.cancel()
         await asyncio.gather(self._ticker_task, return_exceptions=True)
-        await self.ui.log(
-            "File autosaver worker stopped safely.", status=LogStatus.INFO
-        )
+        self.ui.log("File autosaver worker stopped safely.", status=LogStatus.INFO)

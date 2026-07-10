@@ -17,9 +17,3 @@ class WriteChunk:
     offset: int
     length: int = field(compare=False)
     data: list[bytes] = field(compare=False)
-
-
-@hydra_dataclass(order=True, frozen=True)
-class StreamChunk:
-    start: int
-    data: list[bytes] = field(compare=False)

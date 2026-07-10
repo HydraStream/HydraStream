@@ -154,8 +154,9 @@ class LocalStorageManager(StorageBackend):
                 self._handle_io_retry(e, retries)
                 retries += 1
 
+    @staticmethod
     def _rebuild_memoryviews(
-        self, views: list[memoryview], bytes_skipped: int
+        views: list[memoryview], bytes_skipped: int
     ) -> list[memoryview]:
         """Утилита для обрезки записанных кусков из массива векторов."""
         new_views: list[memoryview] = []
@@ -168,9 +169,10 @@ class LocalStorageManager(StorageBackend):
                 skip = 0
         return new_views
 
-    def _handle_io_retry(self, e: OSError, retries: int) -> None:
+    @staticmethod
+    def _handle_io_retry(e: OSError, retries: int) -> None:
         """Обрабатывает системные прерывания (EAGAIN, EINTR)."""
-        if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+        if e.errno in {errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR}:
             if retries > 5:
                 raise RuntimeError(f"Too many retries on EAGAIN/EINTR: {e}") from e
             time.sleep(0.01 * (2**retries))  # Exponential backoff

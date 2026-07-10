@@ -18,7 +18,7 @@ from hydrastream.interfaces import MonitorBackend, NetworkBackend, NetworkStream
 from hydrastream.utils import redact_url
 
 
-async def _evaluate_failure(
+def _evaluate_failure(
     ui: MonitorBackend,
     url: str,
     attempt: int,
@@ -32,7 +32,7 @@ async def _evaluate_failure(
         if response.status_code == 503:
             return None
         if response.status_code not in retry_codes:
-            await ui.log(
+            ui.log(
                 f"Fatal HTTP error {response.status_code} for {safe_url}",
                 status=LogStatus.ERROR,
             )
@@ -43,7 +43,7 @@ async def _evaluate_failure(
         delay = (
             server_delay if server_delay is not None else random.uniform(0, 2**attempt)
         )
-        await ui.log(
+        ui.log(
             f"Attempt {attempt} failed ({response.status_code}) for {safe_url}. "
             f"Retrying in {delay:.2f}s...",
             status=LogStatus.WARNING,
@@ -60,7 +60,7 @@ async def _evaluate_failure(
                 err_name = f"CurlError({exc.code})"
 
             delay = random.uniform(0, 2**attempt)
-            await ui.log(
+            ui.log(
                 f"Network issue ({err_name}) on {safe_url}. "
                 f"Retrying in {delay:.2f}s...",
                 status=LogStatus.WARNING,
@@ -68,7 +68,7 @@ async def _evaluate_failure(
             )
             return delay
 
-        await ui.log(
+        ui.log(
             f"Unrecoverable request error for {safe_url}: {exc}",
             status=LogStatus.ERROR,
         )
@@ -92,9 +92,9 @@ async def safe_request(
             if resp.status_code < 400:
                 return resp
 
-            delay = await _evaluate_failure(ui, url, attempt, response=resp, exc=None)
+            delay = _evaluate_failure(ui, url, attempt, response=resp, exc=None)
         except Exception as exc:
-            delay = await _evaluate_failure(ui, url, attempt, response=None, exc=exc)
+            delay = _evaluate_failure(ui, url, attempt, response=None, exc=exc)
 
         if delay is None:
             if response is not None:
@@ -145,15 +145,13 @@ async def stream_chunk(
                     yield connect
                     return
 
-            delay = await _evaluate_failure(
-                ui, url, attempt, response=response, exc=None
-            )
+            delay = _evaluate_failure(ui, url, attempt, response=response, exc=None)
 
         except Exception as exc:
             if yielded:
                 raise
 
-            delay = await _evaluate_failure(ui, url, attempt, response=None, exc=exc)
+            delay = _evaluate_failure(ui, url, attempt, response=None, exc=exc)
 
         if delay is None:
             if response is not None:

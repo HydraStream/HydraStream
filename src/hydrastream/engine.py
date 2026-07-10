@@ -3,6 +3,7 @@
 
 import asyncio
 import signal
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 from hydrastream.actors.aggregator import DiskAggregator
@@ -47,7 +48,7 @@ async def teardown_engine(ctx: HydraContext) -> None:
     await loop.shutdown_default_executor()
 
 
-async def prepare_runtime(ctx: HydraContext) -> None:
+def prepare_runtime(ctx: HydraContext) -> None:
     optimal_threads = max(20, ctx.config.threads + 10)
     max_safe_threads = min(optimal_threads, 64)
     custom_pool = ThreadPoolExecutor(
@@ -56,17 +57,27 @@ async def prepare_runtime(ctx: HydraContext) -> None:
     loop = asyncio.get_running_loop()
     loop.set_default_executor(custom_pool)
 
+    loop = asyncio.get_running_loop()
     main_task = asyncio.current_task()
 
     def handle_signal() -> None:
+        ctx.ui.log(
+            "\n[Сигнал] Получена команда на остановку. Отменяем главную задачу...",
+        )
         if main_task and not main_task.done():
             main_task.cancel()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, handle_signal)
+    # 1. ЗАЩИТА: Отключаем дефолтный KeyboardInterrupt в Python.
+    # Теперь сигналом SIGINT будет управлять исключительно цикл событий asyncio.
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, handle_signal)
+    else:
+        # Костыль для Windows, так как там add_signal_handler не поддерживается
+        signal.signal(signal.SIGINT, lambda sig, frame: handle_signal())
 
 
-async def bootstrap_engine(  # noqa
+def bootstrap_engine(  # noqa
     ctx: HydraContext,
     tg: asyncio.TaskGroup,
 ) -> None:
@@ -173,7 +184,7 @@ async def bootstrap_engine(  # noqa
                 else DiskDownloadWorker(
                     **base_worker_kwargs,
                     inbox=ctx.chunks_q,
-                    disk_outbox=ctx.disk_q,
+                    disk_outbox=ctx.aggregator_q,
                     file_limit_outbox=ctx.file_limit_q,
                     fs=ctx.fs,
                 )
@@ -188,7 +199,7 @@ async def bootstrap_engine(  # noqa
 
         aggregator = DiskAggregator(
             **base_actor_kwargs,
-            inbox=ctx.disk_q,
+            inbox=ctx.aggregator_q,
             throttler_outbox=ctx.throttler_q,
             ack_inbox=ctx.ack_q,
             writer_outbox=ctx.writer_q,
@@ -210,7 +221,7 @@ async def bootstrap_engine(  # noqa
             **base_actor_kwargs,
             inbox=ctx.autosaver_q,
             interval=60,
-            disk_q=ctx.disk_q,
+            disk_q=ctx.aggregator_q,
             reg_events_q=ctx.state_q,
             fs=ctx.fs,
         )
@@ -263,7 +274,7 @@ async def bootstrap_engine(  # noqa
     tg.create_task(stage_1_resolving(), name="stage:resolvers")
 
     if (
-        not ctx.config.dry_run
+        not ctx.config.dry_run  # ruff:ignore[too-many-boolean-expressions]
         and dispatcher is not None
         and workers is not None
         and aggregator is not None
@@ -305,11 +316,12 @@ async def bootstrap_engine(  # noqa
                         stage_tg.create_task(worker.run(), name=f"worker_{i}")
             finally:
                 if not ctx.config.is_stream:
-                    ctx.disk_q.send_poison_pills_nowait(count=1)
+                    ctx.aggregator_q.send_poison_pills_nowait(count=1)
 
                 ctx.analyzer_q.send_poison_pills_nowait(count=1)
                 ctx.controller_q.send_poison_pills_nowait(count=1)
                 ctx.autosaver_q.send_poison_pills_nowait(count=1)
+                ctx.throttler_q.send_poison_pills_nowait(count=1)
 
         tg.create_task(stage_4_working(), name="stage:feeder")
 

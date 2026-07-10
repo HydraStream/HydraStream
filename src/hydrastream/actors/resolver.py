@@ -102,7 +102,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
                 status = response.status_code
                 # Постоянные ошибки: логируем и забываем
                 if status in {400, 401, 403, 404, 410, 416}:
-                    await self.ui.log(
+                    self.ui.log(
                         f"Link {redact_url(msg.url)} failed permanently "
                         f"(HTTP {status}).",
                         status=LogStatus.ERROR,
@@ -120,9 +120,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
             return ErrorVerdict.RESUME
 
         # Если мы здесь, значит ошибка критическая (Exception)
-        await self.ui.log(
-            f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL
-        )
+        self.ui.log(f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL)
         return ErrorVerdict.ESCALATE
 
     @final
@@ -180,7 +178,8 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
         return self._parse_headers(url, response.headers)
 
     @final
-    def _parse_headers(self, url: str, headers: Headers) -> tuple[str, int, bool]:
+    @staticmethod
+    def _parse_headers(url: str, headers: Headers) -> tuple[str, int, bool]:
         total_size = int(headers.get("content-length", 0))
 
         accept_ranges = headers.get("accept-ranges", "").lower()
@@ -202,10 +201,10 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
         self.ui.add_file(id, filename)
 
         checksum = await self.provider.resolve_hash(self.net, self.ui, url, filename)
-        await self.ui.done(id, filename)
+        self.ui.done(id, filename)
 
         if checksum is None:
-            await self.ui.log(
+            self.ui.log(
                 f"Missing MD5 hash for file: {filename}",
                 status=LogStatus.WARNING,
             )
@@ -271,7 +270,7 @@ class DiskMetadataResolver(BaseMetadataResolver):
         if supports_ranges:
             file_obj, num_states = self.fs.load_state(filename=filename)
             if num_states > 1:
-                await self.ui.log(
+                self.ui.log(
                     f"Multiple state files found for {filename}!",
                     status=LogStatus.WARNING,
                 )

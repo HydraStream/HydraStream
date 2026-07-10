@@ -58,7 +58,7 @@ class BaseActor[T_Payload](ABC):
             finally:
                 await self._on_stop()
 
-    async def _on_start(self) -> None:
+    async def _on_start(self) -> None:  # ruff:ignore[no-self-use]
         return  # Выполняется до начала цикла
 
     @abstractmethod
@@ -77,19 +77,19 @@ class BaseActor[T_Payload](ABC):
             raise RuntimeError(error_text)
 
         if self.ui:
-            await self.ui.log(error_text, status=LogStatus.ERROR)
+            self.ui.log(error_text, status=LogStatus.ERROR)
 
-    async def _on_standard_pill(self) -> None:
+    async def _on_standard_pill(self) -> None:  # ruff:ignore[no-self-use]
         return  # Что делать при обычной остановке?
 
-    async def _on_terminal_pill(self) -> None:
+    async def _on_terminal_pill(self) -> None:  # ruff:ignore[no-self-use]
         return  # Что делать, если ты Последний Выживший?
 
-    async def _on_error(
+    async def _on_error(  # ruff:ignore[no-self-use]
         self, e: Exception, msg: T_Payload | PoisonPill | None = None
     ) -> ErrorVerdict:
         """Дефолтная обработка ошибок (можно переопределить для логов)"""
         return ErrorVerdict.ESCALATE
 
-    async def _on_stop(self) -> None:
+    async def _on_stop(self) -> None:  # ruff:ignore[no-self-use]
         return  # Выполняется в finally

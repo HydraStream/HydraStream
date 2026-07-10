@@ -12,7 +12,6 @@ from hydrastream.messages.base import (
     StandardPill,
     TerminalPill,
 )
-from hydrastream.messages.io import StreamChunk
 
 
 async def file_streamer(  # noqa
@@ -31,48 +30,46 @@ async def file_streamer(  # noqa
     buffer: dict[int, list[bytes]] = {}
     expected_offset = 0
 
-    await ui.log(f"Streaming: {file_obj.actual_filename}", status=LogStatus.INFO)
+    ui.log(f"Streaming: {file_obj.actual_filename}", status=LogStatus.INFO)
+
+    async def process_and_yield_chunk(
+        chunk_data: list[bytes],
+    ) -> AsyncGenerator[bytes, None]:
+
+        nonlocal expected_offset
+
+        for data in chunk_data:
+            if hasher:
+                hasher.update(data)
+
+            yield data
+            expected_offset += len(data)
+            await credit_outbox.send_data(len(data))
 
     try:
         while expected_offset < total_size:
             msg = await file_obj.stream_q.get()
 
-            match msg:
-                case StreamChunk(start=offset, data=chunk_data):
-                    if offset == expected_offset:
-                        for data in chunk_data:
-                            if hasher:
-                                hasher.update(data)
+            # 1. Избавляемся от глубокого match/case с помощью Guard Clauses
+            if isinstance(msg, (StandardPill, TerminalPill)):
+                break
 
-                            yield data
-                            expected_offset += len(data)
-                            await credit_outbox.send_data(len(data))
+            # 2. Обрабатываем целевой StreamChunk (код стал плоским!)
+            offset, chunk_data = msg.start, msg.data
 
-                            while expected_offset in buffer:
-                                next_data = buffer.pop(expected_offset)
+            if offset != expected_offset:
+                buffer[offset] = chunk_data
+                continue
 
-                                for n_data in next_data:
-                                    if hasher:
-                                        hasher.update(n_data)
+            # Обрабатываем текущий чанк, который пришел вовремя
+            async for data in process_and_yield_chunk(chunk_data):
+                yield data
 
-                                    yield n_data
-                                    expected_offset += len(n_data)
-                                    await credit_outbox.send_data(len(n_data))
-                    else:
-                        buffer[offset] = chunk_data
-
-                case StandardPill() | TerminalPill():
-                    break
-
-                case _:
-                    if is_debug:
-                        raise RuntimeError(
-                            f"Unknown message type in stream_chunk_inbox: {type(msg)}"
-                        )
-                    await ui.log(
-                        f"Received unknown message: {msg}",
-                        status=LogStatus.ERROR,
-                    )
+            # Разбираем накопившийся буфер (код больше не дублируется)
+            while expected_offset in buffer:
+                next_data = buffer.pop(expected_offset)
+                async for data in process_and_yield_chunk(next_data):
+                    yield data
 
         else:
             if hasher and checksum:
@@ -84,14 +81,12 @@ async def file_streamer(  # noqa
                         expected_offset,
                         total_size,
                     )
-                    await ui.log(
-                        "Hash Verified", status=LogStatus.SUCCESS, progress=True
-                    )
+                    ui.log("Hash Verified", status=LogStatus.SUCCESS, progress=True)
                 except Exception as e:
-                    await ui.log(str(e), status=LogStatus.ERROR)
+                    ui.log(str(e), status=LogStatus.ERROR)
                     raise
 
-            await ui.done(file_obj.meta.id, file_obj.actual_filename)
+            ui.done(file_obj.meta.id, file_obj.actual_filename)
 
     finally:
         buffer.clear()

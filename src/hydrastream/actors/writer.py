@@ -36,18 +36,19 @@ class DiskWriter(BaseActor[list[WriteChunk]]):
     async def _on_error(
         self, e: Exception, msg: list[WriteChunk] | PoisonPill | None = None
     ) -> ErrorVerdict:
-        _msg = self._handle_disk_error(e)
-        await self.ui.log(
-            f"Disk Write Failure: {_msg}",
+        msg_ = self._handle_disk_error(e)
+        self.ui.log(
+            f"Disk Write Failure: {msg_}",
             status=LogStatus.CRITICAL,
         )
-        raise RuntimeError(_msg) from e
+        raise RuntimeError(msg_) from e
 
     def _write_all_sync(self, coalesced: list[WriteChunk]) -> None:
         for chunk in coalesced:
             self.fs.write_chunk_data(chunk.fd, chunk.data, chunk.length, chunk.offset)
 
-    def _handle_disk_error(self, e: Exception) -> str:
+    @staticmethod
+    def _handle_disk_error(e: Exception) -> str:
         reason = "Unknown"
         if isinstance(e, OSError):
             sys_msg = os.strerror(e.errno) if e.errno else "Unknown"

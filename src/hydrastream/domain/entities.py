@@ -6,7 +6,6 @@ from __future__ import annotations
 import sys
 from dataclasses import field, replace
 from typing import (
-    TYPE_CHECKING,
     Annotated,
     Any,
     Literal,
@@ -28,8 +27,11 @@ from hydrastream.exceptions import (
 )
 from hydrastream.messages.base import ActorPriorityQueue, PoisonPill
 
-if TYPE_CHECKING:
-    from hydrastream.messages.io import StreamChunk
+
+@hydra_dataclass(order=True, frozen=True)
+class StreamChunk:
+    start: int
+    data: list[bytes] = field(compare=False)
 
 
 @hydra_dataclass
@@ -213,13 +215,13 @@ class File:
         return self._stream_queue
 
     @classmethod
-    def from_json(cls, content: bytes) -> Self:
+    def from_json(cls, content: bytes) -> File:
         # 1. Сначала превращаем JSON в один большой словарь (через fast orjson)
         raw_data = orjson.loads(content)
 
         # 2. Используем TypeAdapter для автоматической сборки всей вложенности.
         # Он сам создаст FileMeta, внутри него Checksum, и список Chunk.
-        file_obj = TypeAdapter(cls).validate_python(raw_data)
+        file_obj = file_type_adapter.validate_python(raw_data)
 
         # 3. Единственное, что Pydantic не сделает сам —
         # не проставит обратную ссылку _file в каждый чанк (т.к. это цикл)
@@ -241,3 +243,9 @@ def pydantic_default(obj: object) -> dict[Any, Any]:
     if isinstance(obj, BaseModel):
         return obj.model_dump()
     raise TypeError(f"Type {type(obj)} not serializable by orjson")
+
+
+file_type_adapter = TypeAdapter(File)
+
+# Принудительно заставляем Pydantic разрешить все циклические ссылки (File <-> Chunk)
+file_type_adapter.rebuild()

@@ -53,7 +53,7 @@ class BaseFileDispatcher(BaseActor[File], ABC):
                 await self._prepare_file(file_obj)
 
                 if file_obj.meta.original_filename != file_obj.actual_filename:
-                    await self.ui.log(
+                    self.ui.log(
                         f"{file_obj.meta.original_filename} already exists. "
                         f"Saving as {file_obj.actual_filename}.",
                         status=LogStatus.WARNING,

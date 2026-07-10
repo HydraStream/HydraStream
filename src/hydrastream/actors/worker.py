@@ -16,7 +16,7 @@ from hydrastream.actors.controller import (
 )
 from hydrastream.actors.dispatcher import FileCompleted
 from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs, ErrorVerdict
-from hydrastream.domain.entities import Chunk
+from hydrastream.domain.entities import Chunk, StreamChunk
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     DownloadFailedError,
@@ -32,7 +32,7 @@ from hydrastream.messages.base import (
     PoisonPill,
     ask,
 )
-from hydrastream.messages.io import StreamChunk, WriteChunk
+from hydrastream.messages.io import WriteChunk
 from hydrastream.messages.state import (
     FileFinishedCmd,
     ProgressDeltaCmd,
@@ -96,7 +96,7 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
                 await self._process_chunk(chunk)
 
                 if not chunk.is_finished:
-                    await self.ui.log(
+                    self.ui.log(
                         f"Truncated read for {chunk.file.actual_filename}. "
                         f"Requeuing remaining {chunk.remaining} bytes.",
                         status=LogStatus.WARNING,
@@ -141,10 +141,10 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
         tb_str = traceback.format_exc()
 
         if self.is_debug:
-            await self.ui.log(f"CRITICAL CRASH:\n{tb_str}", status=LogStatus.CRITICAL)
+            self.ui.log(f"CRITICAL CRASH:\n{tb_str}", status=LogStatus.CRITICAL)
             return ErrorVerdict.ESCALATE
 
-        await self.ui.log(
+        self.ui.log(
             f"Worker internal crash: {e!r}",
             status=LogStatus.CRITICAL,
             traceback=tb_str,
@@ -162,7 +162,7 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
         status = response.status_code
 
         if status in {400, 401, 403, 404, 410, 416}:
-            await self.ui.log(
+            self.ui.log(
                 f"Chunk for {chunk.file.actual_filename} "
                 f"failed permanently (HTTP {status}).",
                 status=LogStatus.ERROR,
@@ -285,7 +285,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
                         sort_key=(chunk.current_pos,),
                         data=StreamChunk(start=chunk.current_pos, data=buffer_list),
                     )
-                    chunk.current_pos = chunk.current_pos + current_buffer_size
+                    chunk.current_pos += current_buffer_size
 
     @override
     async def _file_done(
@@ -338,7 +338,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
         supports_ranges = file_obj.meta.supports_ranges
 
         if not supports_ranges:
-            await self.ui.log(
+            self.ui.log(
                 f"Connection dropped for {chunk.file.actual_filename}. "
                 f"Server does not support resume. Restarting download from 0 bytes.",
                 status=LogStatus.WARNING,
@@ -471,7 +471,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
 
         self.fs.verify_size(filename, file_obj.meta.content_length)
         if file_obj.meta.expected_checksum:
-            await self.ui.log(
+            self.ui.log(
                 f"Verifying Hash checksum for {chunk.file.actual_filename}...",
                 status=LogStatus.INFO,
             )
@@ -480,12 +480,12 @@ class DiskDownloadWorker(BaseDownloadWorker):
                 file_obj.meta.expected_checksum.value,
                 file_obj.meta.expected_checksum.algorithm,
             )
-            await self.ui.log(
+            self.ui.log(
                 f"Integrity confirmed: {chunk.file.actual_filename}",
                 status=LogStatus.SUCCESS,
             )
         self.fs.close_file(fd_or_conn=file_obj.fd)
         self.fs.delete_state(filename)
-        await self.ui.done(file_obj.meta.id, filename)
+        self.ui.done(file_obj.meta.id, filename)
         await self.state_outbox.send_data(FileFinishedCmd(file_id=chunk.file.meta.id))
         await self.file_limit_outbox.send_data(FileCompleted())

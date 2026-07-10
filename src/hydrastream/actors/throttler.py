@@ -36,7 +36,7 @@ class ThrottleController(BaseActor[ThrottlerMsg]):
 
     def __post_init__(self) -> None:
         if self.speed_limit:
-            self.speed_limit = self.speed_limit * 1024**2
+            self.speed_limit *= 1024**2
 
     @override
     async def _on_start(self) -> None:
@@ -77,7 +77,7 @@ class ThrottleController(BaseActor[ThrottlerMsg]):
         self, e: Exception, msg: ThrottlerMsg | PoisonPill | None = None
     ) -> ErrorVerdict:
 
-        await self.ui.log(f"Throttle controller failed: {e}", status=LogStatus.ERROR)
+        self.ui.log(f"Throttle controller failed: {e}", status=LogStatus.ERROR)
         if self.is_debug:
             return ErrorVerdict.ESCALATE
         return ErrorVerdict.STOP

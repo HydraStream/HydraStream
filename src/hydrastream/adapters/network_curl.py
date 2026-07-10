@@ -6,12 +6,13 @@ from typing import Any, override
 from curl_cffi import AsyncSession, BrowserTypeLiteral, CurlOpt, Headers, Response
 from curl_cffi.requests import RequestsError
 
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.interfaces import NetworkBackend, NetworkStream
 
 
+@hydra_dataclass(frozen=True)
 class CurlStreamAdapter(NetworkStream):
-    def __init__(self, response: Response) -> None:
-        self._response = response
+    _response: Response
 
     @property
     @override
@@ -68,10 +69,11 @@ class CurlNetworkAdapter(NetworkBackend):
         self, url: str, headers: dict[str, str] | None = None
     ) -> AsyncIterator[NetworkStream]:
         async with self.client.stream("GET", url, headers=headers) as r:
-            yield CurlStreamAdapter(r)
+            yield CurlStreamAdapter(_response=r)
 
     @override
-    def get_error_response(self, e: RequestsError) -> Response | None:
+    @staticmethod
+    def get_error_response(e: RequestsError) -> Response | None:
         return e.response  # type: ignore
 
     @override

@@ -140,7 +140,7 @@ async def parse_urls(
             if is_valid_url(url):
                 all_links.append(url)
             else:
-                await ui.report(
+                ui.report(
                     InvalidParameterError(
                         param="url", value=url, reason="Invalid HTTP/HTTPS format"
                     ),
@@ -157,7 +157,7 @@ async def parse_urls(
                 if is_valid_url(url):
                     all_links.append(url)
                 else:
-                    await ui.report(
+                    ui.report(
                         InvalidParameterError(
                             param="file_link",
                             value=url,
@@ -168,7 +168,7 @@ async def parse_urls(
     return list(dict.fromkeys(all_links))
 
 
-async def async_main(  # noqa: C901, PLR0912
+async def async_main(  # noqa
     links: list[str] | None,
     input_file: str | None,
     stream: bool,
@@ -221,7 +221,7 @@ async def async_main(  # noqa: C901, PLR0912
     )
 
     ui = create_monitor(ui_config)
-    await ui.start()
+    ui.start()
 
     try:
         config = HydraConfig(
@@ -257,9 +257,12 @@ async def async_main(  # noqa: C901, PLR0912
             tasks: list[int] = []
 
             for i in links:
-                if task := await daemon.add_download(
-                    i, expected_checksums=checksum, type_hash=typehash
-                ):
+                task = await daemon.add_download(
+                    i,
+                    expected_checksums=checksum,
+                    type_hash=typehash if checksum else None,
+                )
+                if task is not None:
                     tasks.append(task)
 
             if stream and not config.dry_run:
@@ -267,7 +270,7 @@ async def async_main(  # noqa: C901, PLR0912
                 is_terminal = sys.__stdout__.isatty()
 
                 if is_terminal:
-                    await ui.report(
+                    ui.report(
                         InvalidParameterError(
                             param="stream",
                             reason=(
@@ -279,7 +282,7 @@ async def async_main(  # noqa: C901, PLR0912
                     )
 
                     if not expected_checksums:
-                        await ui.report(
+                        ui.report(
                             ValidationError(
                                 param="stream",
                                 reason=(
@@ -290,7 +293,7 @@ async def async_main(  # noqa: C901, PLR0912
                             ),
                         )
 
-                        await ui.report(
+                        ui.report(
                             InvalidParameterError(
                                 param="stream",
                                 reason=(
@@ -304,8 +307,6 @@ async def async_main(  # noqa: C901, PLR0912
                         async for chunk in file_stream:
                             if not is_terminal:
                                 sys.stdout.buffer.write(chunk)
-                            else:
-                                pass
 
                     if not is_terminal:
                         sys.stdout.buffer.flush()
@@ -314,6 +315,7 @@ async def async_main(  # noqa: C901, PLR0912
                     await daemon.wait_for_file(i)
 
     except (KeyboardInterrupt, asyncio.CancelledError):
+        print(1111)
         if debug:
             raise
         sys.exit(ExitCode.INTERRUPTED)
@@ -327,8 +329,8 @@ async def async_main(  # noqa: C901, PLR0912
         codes: list[int] = []
         for err in all_errors:
             if isinstance(err, HydraError):
-                await ui.report(err)
-                await ui.log(f"FATAL: {err!r}", status=LogStatus.CRITICAL)
+                ui.report(err)
+                ui.log(f"FATAL: {err!r}", status=LogStatus.CRITICAL)
                 codes.append(err.exit_code)
 
         exit_code = max(codes) if codes else ExitCode.GENERAL_ERROR
@@ -357,6 +359,7 @@ def get_cfg(key: str, default: Any = None) -> Any:  # noqa: ANN401
 
 @app.command()
 def cli(
+    *,
     links: Annotated[
         list[str] | None,
         typer.Argument(

@@ -6,7 +6,7 @@ import shutil
 import sys
 import time
 import typing
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections import defaultdict
 from dataclasses import asdict, field
 from datetime import UTC, datetime
@@ -81,11 +81,13 @@ class BaseMonitor(MonitorBackend, ABC):
     is_debug: bool = False
 
     def __post_init__(self) -> None:
-        self.log_file = self.log_file / "hydra.log"
+
+        self.log_file = Path(self.log_file).expanduser().resolve()
+        self.log_file /= "hydra.log"
 
     @final
     @override
-    async def log(
+    def log(
         self,
         message: str | Rule | Table,
         *,
@@ -110,11 +112,11 @@ class BaseMonitor(MonitorBackend, ABC):
             clean_msg = Text.from_markup(str(final_msg)).plain
             self._log_queue.put_nowait(clean_msg)
 
-        await self._display_log(message, status, progress, **kwargs)
+        self._display_log(message, status, progress, **kwargs)
 
     @final
     @override
-    async def report(self, error: HydraError, **log_extra: Any) -> None:
+    def report(self, error: HydraError, **log_extra: Any) -> None:
         """
         Передаем данные ошибки в логгер.
         asdict() превратит поля датакласса в ключи для JSON-лога.
@@ -124,16 +126,16 @@ class BaseMonitor(MonitorBackend, ABC):
         for key in ["exit_code", "log_status", "message_tpl", "formatted_msg"]:
             data.pop(key, None)
 
-        await self.log(
+        self.log(
             f"[{error.error_id}] {error.formatted_msg}",
             status=error.log_status,
             **data,  # Все поля (filename, required и т.д.) попадут в JSON!
             **log_extra,  # Дополнительные флаги типа throttle_key
         )
 
-    async def _date_print(self) -> None:
+    def _date_print(self) -> None:
         current_date = datetime.now().strftime("%Y-%m-%d")
-        await self.log(f"--- {current_date} ---")
+        self.log(f"--- {current_date} ---")
 
     @final
     async def _log_worker(self) -> None:
@@ -158,7 +160,7 @@ class BaseMonitor(MonitorBackend, ABC):
                 if self.is_debug:
                     raise
                 err = LogFileError(path=str(self.log_file), original_err=str(e))
-                await self.log(f"{err.formatted_msg}", status=LogStatus.WARNING)
+                self.log(f"{err.formatted_msg}", status=LogStatus.WARNING)
 
                 self._log_fd.close()
                 self._log_fd = None
@@ -181,11 +183,11 @@ class BaseMonitor(MonitorBackend, ABC):
         pass
 
     @override
-    async def done(self, file_id: int, filename: str) -> None:
+    def done(self, file_id: int, filename: str) -> None:
 
         if self._buffer.get(file_id, 0):
             self._files_completed += 1
-            await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
+            self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
     @final
     def _safe_init(self) -> None:
@@ -193,6 +195,7 @@ class BaseMonitor(MonitorBackend, ABC):
         try:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
             # Пробуем открыть файл на дозапись (тест прав доступа)
+            print(self.log_file)
             with self.log_file.open("a", encoding="utf-8"):
                 pass
         except OSError:
@@ -203,7 +206,7 @@ class BaseMonitor(MonitorBackend, ABC):
 
     @final
     @override
-    async def start(self) -> None:
+    def start(self) -> None:
         """Запускает фонового воркера (вызывать внутри async_main)"""
         if self._is_running:
             return
@@ -215,21 +218,22 @@ class BaseMonitor(MonitorBackend, ABC):
             self._log_fd = self.log_file.open("a", encoding="utf-8")
             self._log_task = asyncio.create_task(self._log_worker())
             self._start_time = time.monotonic()
-            await self.log("--- Session Started ---")
-            await self._date_print()
-            await self._ui_start()
+            self.log("--- Session Started ---")
+            self._date_print()
+            self._ui_start()
         except OSError as e:
             if self.is_debug:
                 raise
             self._log_fd = None
 
             err = LogFileError(path=str(self.log_file), original_err=str(e))
-            await self.log(
+            self.log(
                 f"[bold yellow]LOGGING DISABLED:[/] {err.formatted_msg}",
                 status=LogStatus.WARNING,
             )
 
-    async def _handle_exit(self) -> None:
+    @final
+    def _handle_exit(self) -> None:
         self._is_running = False
 
         elapsed = time.monotonic() - self._start_time
@@ -260,7 +264,7 @@ class BaseMonitor(MonitorBackend, ABC):
             "average_speed": avg_speed,
             "time_elapsed_sec": elapsed,
         }
-        await self.log(
+        self.log(
             report,
             status=LogStatus.INFO,
             progress=False,
@@ -272,8 +276,11 @@ class BaseMonitor(MonitorBackend, ABC):
     @final
     @override
     async def stop(self) -> None:
-        await self._handle_exit()
-        await self.log("--- Session Finished ---")
+        if not self._is_running:
+            return
+        self._ui_stop()
+        self._handle_exit()
+        self.log("--- Session Finished ---")
 
         if self._log_task:
             self._log_queue.put_nowait(None)
@@ -284,7 +291,7 @@ class BaseMonitor(MonitorBackend, ABC):
             self._log_fd = None
 
     @override
-    async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
+    def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
         """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
 
         table = Table(
@@ -321,12 +328,12 @@ class BaseMonitor(MonitorBackend, ABC):
                 table.add_row(
                     f.meta.original_filename, str_size, str(len(f.chunks)), ranges
                 )
-        await self.log(table)
+        self.log(table)
         if not self.is_stream:
-            await self._check_storage_capacity(output_path=output_dir)
+            self._check_storage_capacity(output_path=output_dir)
 
     @final
-    async def _check_storage_capacity(self, output_path: str | Path) -> None:
+    def _check_storage_capacity(self, output_path: str | Path) -> None:
         """Проверяет наличие свободного места на диске перед началом загрузки."""
 
         output_dir = Path(output_path).expanduser().resolve()
@@ -337,13 +344,13 @@ class BaseMonitor(MonitorBackend, ABC):
             required = self._total_bytes
 
             if free_space < required:
-                await self.log("\n[bold red] DANGER: Insufficient disk space![/]")
-                await self.log(
+                self.log("\n[bold red] DANGER: Insufficient disk space![/]")
+                self.log(
                     f"[red]Required: {format_size(required)} | "
                     f"Available: {format_size(free_space)}[/]",
                 )
             else:
-                await self.log(
+                self.log(
                     f"\nDisk space check passed ({format_size(free_space)} free).[/]\n",
                     status=LogStatus.SUCCESS,
                 )
@@ -351,17 +358,12 @@ class BaseMonitor(MonitorBackend, ABC):
         except OSError as e:
             if self.is_debug:
                 raise
-            await self.log(
+            self.log(
                 f"Warning: Could not check disk space: {e}",
                 status=LogStatus.WARNING,
             )
 
-    @abstractmethod
-    def bind_to_state_keeper(
-        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
-    ) -> None: ...
-    @abstractmethod
-    async def _display_log(
+    def _display_log(
         self,
         message: str | Rule | Table,
         status: LogStatus | str,
@@ -370,38 +372,27 @@ class BaseMonitor(MonitorBackend, ABC):
     ) -> None:
         pass
 
-    @abstractmethod
-    async def _ui_start(self) -> None:
+    @override
+    def bind_to_state_keeper(
+        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    ) -> None:
+        pass
+
+    def _ui_start(self) -> None:
+        pass
+
+    def _ui_stop(self) -> None:
         pass
 
 
 @hydra_dataclass
-class QuietMonitor(BaseMonitor):
-    @override
-    async def _display_log(
-        self,
-        message: str | Rule | Table,
-        status: LogStatus | str,
-        progress: bool = False,
-        **kwargs: object,
-    ) -> None:
-        pass
-
-    @override
-    async def _ui_start(self) -> None:
-        pass
-
-    @override
-    def bind_to_state_keeper(
-        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
-    ) -> None:
-        pass
+class QuietMonitor(BaseMonitor): ...
 
 
 @hydra_dataclass
 class JsonMonitor(BaseMonitor):
     @override
-    async def _display_log(
+    def _display_log(
         self,
         message: str | Rule | Table,
         status: LogStatus | str,
@@ -418,7 +409,7 @@ class JsonMonitor(BaseMonitor):
         sys.stdout.buffer.write(orjson.dumps(log_record) + b"\n")
 
     @override
-    async def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
+    def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
         report_data = {
             "total_files": self._total_files,
             "total_bytes": self._total_bytes,
@@ -439,7 +430,7 @@ class JsonMonitor(BaseMonitor):
             ],
         }
 
-        await self.log(
+        self.log(
             "DRY_RUN_REPORT",
             status=LogStatus.INFO,
             progress=False,
@@ -448,17 +439,7 @@ class JsonMonitor(BaseMonitor):
             **report_data,
         )
         if self.is_stream:
-            await self._check_storage_capacity(output_dir)
-
-    @override
-    async def _ui_start(self) -> None:
-        pass
-
-    @override
-    def bind_to_state_keeper(
-        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
-    ) -> None:
-        pass
+            self._check_storage_capacity(output_dir)
 
 
 @hydra_dataclass
@@ -466,7 +447,7 @@ class PlainMonitor(BaseMonitor):
     console: Console = field(default_factory=lambda: Console(stderr=True))
 
     @override
-    async def _display_log(
+    def _display_log(
         self,
         message: str | Rule | Table,
         status: LogStatus | str,
@@ -476,16 +457,6 @@ class PlainMonitor(BaseMonitor):
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         final_msg = f"{timestamp} {message}"
         self.console.print(Text.from_markup(str(final_msg)).plain)
-
-    @override
-    async def _ui_start(self) -> None:
-        pass
-
-    @override
-    def bind_to_state_keeper(
-        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
-    ) -> None:
-        pass
 
 
 def get_gradient_color(percentage: float) -> str:
@@ -509,6 +480,7 @@ class GradientBar(BarColumn):
 
 
 class GradientPercent(ProgressColumn):
+    @override
     def render(self, task: Task) -> Text:
         if task.total is None:
             return Text(" CALC ", style="yellow")
@@ -536,11 +508,15 @@ class RichMonitor(BaseMonitor):
 
     refresh: asyncio.Task[None] = field(init=False)
     progress: Progress = field(init=False)
+    rich: Progress = field(init=False)
     live: Live = field(init=False)
 
     state_keeper_q: ActorFifoQueue[StateKeeperMsg | PoisonPill] = field(init=False)
 
+    @override
     def __post_init__(self) -> None:
+        BaseMonitor.__post_init__(self)
+
         self.renewal_rate = 1 / self.refresh_per_second
 
         self.rich = Progress(
@@ -575,7 +551,7 @@ class RichMonitor(BaseMonitor):
         )
 
     @override
-    async def _display_log(
+    def _display_log(
         self,
         message: str | Rule | Table,
         status: LogStatus | str,
@@ -583,28 +559,29 @@ class RichMonitor(BaseMonitor):
         **kwargs: object,
     ) -> None:
         renderable = self._formatting_log(message, status)
-        if progress or status in [
-            "WARNING",
-            "ERROR",
-            "CRITICAL",
-            "INTERRUPT",
-        ]:
+        if progress or status in {
+            LogStatus.WARNING,
+            LogStatus.ERROR,
+            LogStatus.CRITICAL,
+            LogStatus.INTERRUPT,
+        }:
             self.rich.console.print(renderable)
 
-    def _truncate_filename(self, name: str, w: int = 30) -> str:
+    @staticmethod
+    def _truncate_filename(name: str, w: int = 30) -> str:
         return (
             f"{name[: w // 2 - 1]}...{name[-w // 2 + 2 :]}" if len(name) > w else name
         )
 
-    async def _date_print(self) -> None:
+    def _date_print(self) -> None:
         current_date = datetime.now().strftime("%Y-%m-%d")
         date_header = f"[bold cyan] Date: {current_date}[/]"
 
         self.rich.console.print(Rule(date_header))
-        await self.log(f"--- {current_date} ---")
+        self.log(f"--- {current_date} ---")
 
+    @staticmethod
     def _formatting_log(
-        self,
         message: str | Rule | Table,
         formatted_msg: str,
         status: str | LogStatus = LogStatus.INFO,
@@ -700,7 +677,7 @@ class RichMonitor(BaseMonitor):
             except Exception as e:
                 if self.is_debug:
                     raise
-                await self.log(f"UI Refresh Error: {e!r}", status=LogStatus.ERROR)
+                self.log(f"UI Refresh Error: {e!r}", status=LogStatus.ERROR)
 
     def _update_panel_title(self) -> None:
         active = len(self.active_files)
@@ -711,24 +688,24 @@ class RichMonitor(BaseMonitor):
         )
 
     @override
-    async def done(self, file_id: int, filename: str) -> None:
+    def done(self, file_id: int, filename: str) -> None:
         task_id = self.tasks[file_id]
         self.rich.update(
             task_id,
             completed=self.rich.tasks[task_id].total,
             visible=False,
         )
-        del self.rich.tasks[file_id]
+        del self.tasks[file_id]
         self.active_files.discard(file_id)
 
         if self.rich.tasks[task_id].total is not None:
             self._files_completed += 1
             self._update_panel_title()
-            await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
+            self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
         elif self._buffer.get(file_id, 0):
             self._files_completed += 1
-            await self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
+            self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
     def _make_panel(self) -> Panel | str:
 
@@ -761,9 +738,8 @@ class RichMonitor(BaseMonitor):
             f"{format_size(self._download_bytes)}"
             + f"/{format_size(self._total_bytes)}"
         )
-
         if (
-            not self.rich.tasks
+            not self.tasks
             and self._total_files > 0
             and self._total_files == self._files_completed
         ) or self._is_cancelled:
@@ -822,56 +798,20 @@ class RichMonitor(BaseMonitor):
             padding=(1, 2),
         )
 
-    async def _handle_exit(self) -> None:
-        self._is_running = False
+    @override
+    def _ui_start(self) -> None:
+        self.live.start()
+
+    @override
+    def _ui_stop(self) -> None:
         self.live.refresh()
         self.live.stop()
         self.refresh.cancel()
-        elapsed = time.monotonic() - self._start_time
-        avg_speed = (
-            f"{format_size(self._download_bytes / elapsed)}/s" if elapsed > 0 else 0
-        )
-
-        size_str = (
-            f"{format_size(self._download_bytes)}"
-            + f"/{format_size(self._download_bytes)}"
-        )
-        mins, secs = divmod(int(elapsed), 60)
-        hours, mins = divmod(mins, 60)
-        time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
-
-        status_word = "CANCELLED" if self._is_cancelled else "SUCCESS"
-        report = (
-            f"\n--- Final Report ({status_word}) ---\n"
-            f"Total files:   {self._files_completed}/{self._total_files}\n"
-            f"Total Data:    {size_str}\n"
-            f"Average Speed: {avg_speed}\n"
-            f"Total Time:    {time_str}\n"
-            f"--------------------------------"
-        )
-        report_dict = {
-            "total_files": self._files_completed,
-            "total_bytes": self._download_bytes,
-            "average_speed": avg_speed,
-            "time_elapsed_sec": elapsed,
-        }
-        await self.log(
-            report,
-            status=LogStatus.INFO,
-            progress=False,
-            throttle_key=None,
-            throttle_sec=10.0,
-            **report_dict,
-        )
-
-    @override
-    async def _ui_start(self) -> None:
-
-        self.live.start()
 
     @override
     def bind_to_state_keeper(
         self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     ) -> None:
+
         self.state_keeper_q = state_q
         self.refresh = asyncio.create_task(self._ui_refresh_actor(self.state_keeper_q))

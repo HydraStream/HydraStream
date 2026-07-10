@@ -58,7 +58,7 @@ def extract_filename(url: str, headers: Headers) -> str:
         if "/" in clean_url and not clean_url.endswith(":/"):
             filename = unquote(name)
 
-    if not filename or filename in [".", ""]:
+    if not filename or filename in {".", ""}:
         filename = "downloaded_file"
 
     filename = re.sub(r'[\\/*?:"<>|]', "_", filename)

@@ -46,7 +46,7 @@ class TelemetryAnalyzer(BaseActor[CheckpointEvent]):
         self, e: Exception, msg: CheckpointEvent | PoisonPill | None = None
     ) -> ErrorVerdict:
 
-        await self.ui.log(
+        self.ui.log(
             f"Adaptive controller failed: {e}",
             status=LogStatus.ERROR,
         )
@@ -55,7 +55,7 @@ class TelemetryAnalyzer(BaseActor[CheckpointEvent]):
         return ErrorVerdict.STOP
 
     def _calculate_ema(self, speed_now: float, elapsed: float) -> float:
-        if self._smoothed_speed == 0.0:
+        if self._smoothed_speed == 0:
             return speed_now
         alpha = 1.0 - math.exp(-elapsed / self._tau)
         return (alpha * speed_now) + ((1.0 - alpha) * self._smoothed_speed)
@@ -83,7 +83,7 @@ class TelemetryAnalyzer(BaseActor[CheckpointEvent]):
             status = LogStatus.WARNING
             key = "scale_down"
 
-        await self.ui.log(msg, status=status, throttle_key=key, throttle_sec=5.0)
+        self.ui.log(msg, status=status, throttle_key=key, throttle_sec=5.0)
 
     async def _step(self) -> None:
         """Один шаг адаптации."""
