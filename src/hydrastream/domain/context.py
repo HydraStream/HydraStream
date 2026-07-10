@@ -75,11 +75,11 @@ class HydraContext:
     throttler_q: ActorFifoQueue[ThrottlerMsg | PoisonPill]
     controller_q: ActorFifoQueue[TrafficSignal | PoisonPill]
     state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
-    credit_q: ActorFifoQueue[int]
-    sleep_signals: ActorFifoQueue[GoToSleepPill]
-    wait_in_sleep: ActorFifoQueue[WakeUpPill]
+    credit_q: ActorFifoQueue[int | PoisonPill]
+    sleep_signals: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    wait_in_sleep: ActorFifoQueue[WakeUpPill | PoisonPill]
     # Жизненный цикл файлов
-    file_limit_q: ActorFifoQueue[FileCompleted]
+    file_limit_q: ActorFifoQueue[FileCompleted | PoisonPill]
     autosaver_q: ActorFifoQueue[PoisonPill | None]
 
     session_killer: asyncio.Event = field(default_factory=asyncio.Event)
@@ -131,10 +131,10 @@ class AppQueuesSchema(TypedDict):
     throttler_q: ActorFifoQueue[ThrottlerMsg | PoisonPill]
     controller_q: ActorFifoQueue[TrafficSignal | PoisonPill]
     state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
-    credit_q: ActorFifoQueue[int]
-    sleep_signals: ActorFifoQueue[GoToSleepPill]
-    wait_in_sleep: ActorFifoQueue[WakeUpPill]
-    file_limit_q: ActorFifoQueue[FileCompleted]
+    credit_q: ActorFifoQueue[int | PoisonPill]
+    sleep_signals: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    wait_in_sleep: ActorFifoQueue[WakeUpPill | PoisonPill]
+    file_limit_q: ActorFifoQueue[FileCompleted | PoisonPill]
     autosaver_q: ActorFifoQueue[PoisonPill | None]
 
 

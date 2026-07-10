@@ -29,6 +29,11 @@ class LogStatus(StrEnum):
 
 
 @hydra_dataclass
+class GracefulShutdownError(Exception):
+    pass
+
+
+@hydra_dataclass
 class HydraError(Exception):
     exit_code: ExitCode = ExitCode.GENERAL_ERROR
     log_status: LogStatus = LogStatus.ERROR

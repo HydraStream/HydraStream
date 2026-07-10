@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import TypedDict, TypeVar, final
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.exceptions import LogStatus
+from hydrastream.exceptions import GracefulShutdownError, LogStatus
 from hydrastream.interfaces import MonitorBackend
 from hydrastream.messages.base import ActorQueue, PoisonPill, StandardPill, TerminalPill
 
@@ -34,29 +34,30 @@ class BaseActor[T_Payload](ABC):
         """Шаблонный метод. Ни один наследник НЕ ДОЛЖЕН его переопределять!"""
         await self._on_start()
         msg = None
-        while True:
-            try:
-                msg = await self.inbox.get()
+        try:
+            while True:
+                try:
+                    msg = await self.inbox.get()
 
-                if isinstance(msg, TerminalPill):
-                    await self._on_terminal_pill()
-                    break
+                    if isinstance(msg, TerminalPill):
+                        await self._on_terminal_pill()
+                        break
 
-                if isinstance(msg, StandardPill):
-                    await self._on_standard_pill()
-                    break
+                    if isinstance(msg, StandardPill):
+                        await self._on_standard_pill()
+                        break
 
-                await self._handle_msg(msg)
+                    await self._handle_msg(msg)
 
-            except Exception as e:
-                verdict = await self._on_error(e, msg)
-                if verdict is ErrorVerdict.STOP:
-                    break
-                if verdict is ErrorVerdict.ESCALATE:
-                    raise e
+                except Exception as e:
+                    verdict = await self._on_error(e, msg)
+                    if verdict is ErrorVerdict.STOP:
+                        break
+                    if verdict is ErrorVerdict.ESCALATE:
+                        raise e
 
-            finally:
-                await self._on_stop()
+        finally:
+            await self._on_stop()
 
     async def _on_start(self) -> None:  # ruff:ignore[no-self-use]
         return  # Выполняется до начала цикла
@@ -89,6 +90,8 @@ class BaseActor[T_Payload](ABC):
         self, e: Exception, msg: T_Payload | PoisonPill | None = None
     ) -> ErrorVerdict:
         """Дефолтная обработка ошибок (можно переопределить для логов)"""
+        if isinstance(e, GracefulShutdownError):
+            return ErrorVerdict.STOP
         return ErrorVerdict.ESCALATE
 
     async def _on_stop(self) -> None:  # ruff:ignore[no-self-use]

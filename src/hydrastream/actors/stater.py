@@ -161,7 +161,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                 assert_never(unreachable)
 
     @override
-    async def _on_stop(self) -> None:
+    async def _on_stop(self) -> None:  # noqa
         if not self.is_stream:
             for trace in self._traces.values():
                 if isinstance(trace.file_obj, File):
@@ -178,3 +178,13 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                     and trace.file_obj._stream_queue is not None  # pyright: ignore[reportPrivateUsage]
                 ):
                     trace.file_obj.stream_q.send_poison_pills_nowait()
+
+        for fut_list in self._waiting_stream.values():
+            for fut in fut_list:
+                if not fut.done():
+                    fut.cancel()
+
+        for fut_list in self._result_waiters.values():
+            for fut in fut_list:
+                if not fut.done():
+                    fut.cancel()

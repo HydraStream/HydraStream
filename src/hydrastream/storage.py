@@ -214,17 +214,17 @@ class LocalStorageManager(StorageBackend):
                 temp_path = Path(tf.name)
 
             try:
-                Path.replace(temp_path, path)
+                temp_path.replace(path)
                 if os.name != "nt":
                     dir_fd = os.open(str(temp_dir), os.O_RDONLY)
                     try:
                         os.fsync(dir_fd)
                     finally:
                         os.close(dir_fd)
-            except Exception as e:
-                if Path.exists(temp_path):
-                    Path.unlink(temp_path)
-                raise e
+            except OSError:
+                if temp_path.exists():
+                    temp_path.unlink()
+                raise
         except OSError as e:
             raise StateSaveError(
                 filename=filename, target_path=str(path), reason=str(e)

@@ -4,7 +4,7 @@ from typing import assert_never, override
 
 from hydrastream.domain.base_actor import BaseActor, ErrorVerdict
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.exceptions import LogStatus
+from hydrastream.exceptions import GracefulShutdownError, LogStatus
 from hydrastream.messages.base import ActorFifoQueue, PoisonPill
 from hydrastream.messages.state import StateKeeperMsg, UpdateBytesToCheckCmd
 from hydrastream.messages.traffic import ScaleDownSignal, ScaleUpSignal, TrafficSignal
@@ -45,6 +45,8 @@ class TelemetryAnalyzer(BaseActor[CheckpointEvent]):
     async def _on_error(
         self, e: Exception, msg: CheckpointEvent | PoisonPill | None = None
     ) -> ErrorVerdict:
+        if isinstance(e, GracefulShutdownError):
+            return ErrorVerdict.STOP
 
         self.ui.log(
             f"Adaptive controller failed: {e}",

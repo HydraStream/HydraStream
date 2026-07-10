@@ -58,6 +58,7 @@ class BaseMonitor(MonitorBackend, ABC):
     _is_cancelled: bool = False
     is_stream: bool = False
     is_verify: bool = True
+    _console: Console = field(default_factory=lambda: Console(stderr=True))
 
     """Всё, что касается записи логов на жесткий диск."""
 
@@ -195,7 +196,6 @@ class BaseMonitor(MonitorBackend, ABC):
         try:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
             # Пробуем открыть файл на дозапись (тест прав доступа)
-            print(self.log_file)
             with self.log_file.open("a", encoding="utf-8"):
                 pass
         except OSError:
@@ -444,8 +444,6 @@ class JsonMonitor(BaseMonitor):
 
 @hydra_dataclass
 class PlainMonitor(BaseMonitor):
-    console: Console = field(default_factory=lambda: Console(stderr=True))
-
     @override
     def _display_log(
         self,
@@ -456,7 +454,7 @@ class PlainMonitor(BaseMonitor):
     ) -> None:
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         final_msg = f"{timestamp} {message}"
-        self.console.print(Text.from_markup(str(final_msg)).plain)
+        self._console.print(Text.from_markup(str(final_msg)).plain)
 
 
 def get_gradient_color(percentage: float) -> str:
@@ -492,8 +490,6 @@ class GradientPercent(ProgressColumn):
 @hydra_dataclass
 class RichMonitor(BaseMonitor):
     is_dry_run: bool = False
-
-    console: Console = field(default_factory=lambda: Console(stderr=True))
 
     has_hash: int = 0
     has_ranges: int = 0
@@ -537,14 +533,14 @@ class RichMonitor(BaseMonitor):
             TransferSpeedColumn(),
             "•",
             TimeRemainingColumn(),
-            console=self.console,
+            console=self._console,
             transient=False,
             expand=True,
         )
 
         self.live = Live(
             get_renderable=self._make_panel,
-            console=self.console,
+            console=self._console,
             auto_refresh=True,
             refresh_per_second=10,
             transient=False,
@@ -707,7 +703,7 @@ class RichMonitor(BaseMonitor):
             self._files_completed += 1
             self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
-    def _make_panel(self) -> Panel | str:
+    def _make_panel(self) -> Panel | str:  # ruff:ignore[too-many-locals]
 
         if not self.rich.tasks and self._is_running:
             return ""

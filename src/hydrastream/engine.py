@@ -31,7 +31,7 @@ from hydrastream.actors.worker import (
 from hydrastream.actors.writer import DiskWriter
 from hydrastream.domain.base_actor import BaseActorKwargs
 from hydrastream.domain.context import HydraContext
-from hydrastream.messages.traffic import WakeUpPill
+from hydrastream.exceptions import ExitCode, LogStatus
 
 
 async def teardown_engine(ctx: HydraContext) -> None:
@@ -57,18 +57,30 @@ def prepare_runtime(ctx: HydraContext) -> None:
     loop = asyncio.get_running_loop()
     loop.set_default_executor(custom_pool)
 
-    loop = asyncio.get_running_loop()
-    main_task = asyncio.current_task()
+    graceful_started = False
 
     def handle_signal() -> None:
+        nonlocal graceful_started
+        if graceful_started:
+            ctx.ui.log(
+                "\n[Сигнал] Повторная команда! Экстренное принудительное завершение...",
+                status=LogStatus.CRITICAL,  # Assuming your logger supports severity
+            )
+            sys.exit(ExitCode.INTERRUPTED)
+
         ctx.ui.log(
             "\n[Сигнал] Получена команда на остановку. Отменяем главную задачу...",
         )
-        if main_task and not main_task.done():
-            main_task.cancel()
+        # Mark that the first stage has been initiated
+        graceful_started = True
+
+        ctx.session_killer.set()
+        try:
+            ctx.links_q.send_poison_pills_nowait(count=ctx.resolvers)
+        except Exception as e:
+            ctx.ui.log(f"Не удалось отправить PoisonPill: {e}", status=LogStatus.ERROR)
 
     # 1. ЗАЩИТА: Отключаем дефолтный KeyboardInterrupt в Python.
-    # Теперь сигналом SIGINT будет управлять исключительно цикл событий asyncio.
     if sys.platform != "win32":
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, handle_signal)
@@ -246,17 +258,14 @@ def bootstrap_engine(  # noqa
     async def session_killer() -> None:
         try:
             await ctx.session_killer.wait()
-            ctx.session_killer.clear()
         finally:
             await ctx.net.close()
 
     tg.create_task(session_killer(), name="stage:killer")
 
     async def stage_0_stating() -> None:
-        try:
-            await stater.run()
-        finally:
-            ctx.session_killer.set()
+
+        await stater.run()
 
     tg.create_task(stage_0_stating(), name="stage:stater")
 
@@ -268,6 +277,7 @@ def bootstrap_engine(  # noqa
         finally:
             if not ctx.config.dry_run:
                 ctx.files_q.send_poison_pills_nowait(count=1)
+                ctx.file_limit_q.send_poison_pills_nowait(count=1)
             else:
                 ctx.state_q.send_poison_pills_nowait(count=1)
 
@@ -290,10 +300,11 @@ def bootstrap_engine(  # noqa
             finally:
                 if not ctx.config.is_stream:
                     ctx.chunks_q.send_poison_pills_nowait(count=ctx.workers)
-                    for _ in range(ctx.workers):
-                        await ctx.wait_in_sleep.send_data(WakeUpPill())
+                    ctx.sleep_signals.send_poison_pills_nowait(count=ctx.workers)
+                    ctx.wait_in_sleep.send_poison_pills_nowait(count=ctx.workers)
                 else:
                     ctx.chunks_q.send_poison_pills_nowait(count=1)
+                    ctx.credit_q.send_poison_pills_nowait(count=1)
 
         tg.create_task(stage_2_dispatching(), name="stage:dispatcher")
 
@@ -304,8 +315,8 @@ def bootstrap_engine(  # noqa
                     await memory_throttler.run()
                 finally:
                     ctx.ready_chunks_q.send_poison_pills_nowait(count=ctx.workers)
-                    for _ in range(ctx.workers):
-                        await ctx.wait_in_sleep.send_data(WakeUpPill())
+                    ctx.sleep_signals.send_poison_pills_nowait(count=ctx.workers)
+                    ctx.wait_in_sleep.send_poison_pills_nowait(count=ctx.workers)
 
             tg.create_task(stage_3_memory_throttling(), name="stage:feeder")
 

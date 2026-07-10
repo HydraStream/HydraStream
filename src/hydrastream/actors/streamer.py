@@ -16,9 +16,9 @@ from hydrastream.messages.base import (
 
 async def file_streamer(  # noqa
     file_obj: File,
-    credit_outbox: ActorFifoQueue[int],
+    credit_outbox: ActorFifoQueue[int | PoisonPill],
     reg_events_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill],
-    file_limit_outbox: ActorFifoQueue[FileCompleted],
+    file_limit_outbox: ActorFifoQueue[FileCompleted | PoisonPill],
     ui: MonitorBackend,
     is_debug: bool,
 ) -> AsyncGenerator[bytes, None]:

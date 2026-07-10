@@ -33,7 +33,7 @@ if sys.platform != "win32":
     try:
         import uvloop
 
-        uvloop.install()
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     except ImportError:
         pass
 
@@ -67,7 +67,7 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-async def validate(
+def validate(
     ui: MonitorBackend,
     links: list[str] | str | None,
     input_file: str | None,
@@ -80,7 +80,7 @@ async def validate(
     validate_input_file(input_file)
     if links is not None:
         links = [links] if isinstance(links, str) else list(links)
-    valid_links = await parse_urls(ui, links, input_file)
+    valid_links = parse_urls(ui, links, input_file)
     if not valid_links:
         raise ValidationError(param="links", reason="No valid URLs found to process!")
 
@@ -102,7 +102,7 @@ def is_valid_url(url: str) -> bool:
     """Checks if a given string is a structurally valid HTTP/HTTPS URL."""
     try:
         result = urlparse(url)
-        return result.scheme in ("http", "https") and bool(result.netloc)
+        return result.scheme in {"http", "https"} and bool(result.netloc)
     except ValueError:
         return False
 
@@ -129,7 +129,7 @@ def get_input_stream(filepath: str) -> Generator[TextIO, None, None]:
         raise FileReadError(path=str(path), reason=str(e)) from e
 
 
-async def parse_urls(
+def parse_urls(
     ui: MonitorBackend, links_from_args: list[str] | None, filepath: str | None
 ) -> list[str]:
     all_links: list[str] = []
@@ -166,6 +166,64 @@ async def parse_urls(
                     )
 
     return list(dict.fromkeys(all_links))
+
+
+def _prepare_checksums(
+    links: list[str], checksum: str | None, typehash: TypeHash
+) -> dict[str, Checksum]:
+    if not checksum or not links:
+        return {}
+
+    if len(links) == 1:
+        return {links[0]: Checksum(algorithm=typehash, value=checksum)}
+
+    raise ValidationError(
+        param="checksum",
+        reason=(
+            "Warning: The --checksum flag is ignored when multiple URLs are provided."
+        ),
+    )
+
+
+async def _stream_download_tasks(
+    daemon: HydraDaemon, tasks: list[int], ui: MonitorBackend, has_checksum: bool
+) -> None:
+    assert sys.__stdout__ is not None
+    is_terminal = sys.__stdout__.isatty()
+    if is_terminal:
+        ui.report(
+            InvalidParameterError(
+                param="stream",
+                reason="Warning: You are running in --stream mode but output is "
+                "not redirected!"
+                "\nThe downloaded binary data will be discarded.",
+            )
+        )
+
+        if not has_checksum:
+            ui.report(
+                ValidationError(
+                    param="stream",
+                    reason="Please use a pipe (e.g., '| zcat') or redirect to a file"
+                    "(e.g., '> file.gz').\nAborting to save bandwidth.",
+                )
+            )
+        else:
+            ui.report(
+                InvalidParameterError(
+                    param="stream",
+                    reason="Proceeding in 'Verification Only' mode "
+                    "since --checksum is provided.",
+                )
+            )
+            # Сам процесс стриминга стал плоским и читаемым
+    for i in tasks:
+        if file_stream := await daemon.get_stream(i):
+            async for chunk in file_stream:
+                if not is_terminal:
+                    sys.stdout.buffer.write(chunk)
+        if not is_terminal:
+            sys.stdout.buffer.flush()
 
 
 async def async_main(  # noqa
@@ -238,84 +296,31 @@ async def async_main(  # noqa
             debug=True,
         )
 
-        links = await validate(links=links, input_file=input_file, ui=ui)
+        active_links = validate(links=links, input_file=input_file, ui=ui)
+        expected_checksums = _prepare_checksums(active_links, checksum, typehash)
 
-        expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] = {}
-
-        # Hash logic: only map the checksum if a single URL is provided
-        if checksum and links and len(links) == 1:
-            expected_checksums[links[0]] = Checksum(algorithm=typehash, value=checksum)
-        elif checksum and links and len(links) > 1:
-            raise ValidationError(
-                param="checksum",
-                reason=(
-                    "Warning: The --checksum flag is ignored when "
-                    "multiple URLs are provided."
-                ),
-            )
         async with HydraDaemon(config=config, initial_ui=ui) as daemon:
             tasks: list[int] = []
 
-            for i in links:
-                task = await daemon.add_download(
-                    i,
-                    expected_checksums=checksum,
-                    type_hash=typehash if checksum else None,
-                )
-                if task is not None:
+            for i in active_links:
+                if (
+                    task := await daemon.add_download(
+                        i,
+                        expected_checksums=checksum,
+                        type_hash=typehash if checksum else None,
+                    )
+                ) is not None:
                     tasks.append(task)
 
             if stream and not config.dry_run:
-                assert sys.__stdout__ is not None
-                is_terminal = sys.__stdout__.isatty()
-
-                if is_terminal:
-                    ui.report(
-                        InvalidParameterError(
-                            param="stream",
-                            reason=(
-                                "Warning: You are running in --stream mode but output "
-                                "is not redirected!\n"
-                                "The downloaded binary data will be discarded."
-                            ),
-                        ),
-                    )
-
-                    if not expected_checksums:
-                        ui.report(
-                            ValidationError(
-                                param="stream",
-                                reason=(
-                                    "Please use a pipe (e.g., '| zcat') or redirect to "
-                                    "a file (e.g., '> file.gz').\n"
-                                    "Aborting to save bandwidth."
-                                ),
-                            ),
-                        )
-
-                        ui.report(
-                            InvalidParameterError(
-                                param="stream",
-                                reason=(
-                                    "Proceeding in 'Verification Only' mode "
-                                    "since --checksum is provided."
-                                ),
-                            ),
-                        )
-                for i in tasks:
-                    if file_stream := await daemon.get_stream(i):
-                        async for chunk in file_stream:
-                            if not is_terminal:
-                                sys.stdout.buffer.write(chunk)
-
-                    if not is_terminal:
-                        sys.stdout.buffer.flush()
+                await _stream_download_tasks(
+                    daemon, tasks, ui, has_checksum=bool(expected_checksums)
+                )
             else:
                 for i in tasks:
                     await daemon.wait_for_file(i)
 
     except (KeyboardInterrupt, asyncio.CancelledError):
-        print(1111)
         if debug:
             raise
         sys.exit(ExitCode.INTERRUPTED)

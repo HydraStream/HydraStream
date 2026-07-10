@@ -9,6 +9,7 @@ from typing import assert_never, override
 from hydrastream.domain.base_actor import BaseActor, ErrorVerdict
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
+    GracefulShutdownError,
     LogStatus,
 )
 from hydrastream.interfaces import NetworkStream
@@ -77,7 +78,11 @@ class ThrottleController(BaseActor[ThrottlerMsg]):
         self, e: Exception, msg: ThrottlerMsg | PoisonPill | None = None
     ) -> ErrorVerdict:
 
+        if isinstance(e, GracefulShutdownError):
+            return ErrorVerdict.STOP
+
         self.ui.log(f"Throttle controller failed: {e}", status=LogStatus.ERROR)
+
         if self.is_debug:
             return ErrorVerdict.ESCALATE
         return ErrorVerdict.STOP

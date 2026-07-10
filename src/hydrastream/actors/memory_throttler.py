@@ -3,17 +3,20 @@ from typing import assert_never, override
 from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.entities import Chunk
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
+from hydrastream.exceptions import GracefulShutdownError
 from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
     PoisonPill,
+    StandardPill,
+    TerminalPill,
 )
 
 
 @hydra_dataclass
 class MemoryThrottler(BaseActor[Chunk]):
     chunk_outbox: ActorPriorityQueue[Chunk | PoisonPill]
-    credit_inbox: ActorFifoQueue[int]
+    credit_inbox: ActorFifoQueue[int | PoisonPill]
 
     num_workers: int
     budget: int
@@ -24,8 +27,9 @@ class MemoryThrottler(BaseActor[Chunk]):
             case Chunk() as pending_chunk:
                 while pending_chunk.size > self.budget:
                     credit = await self.credit_inbox.get()
-                    if isinstance(credit, int):
-                        self.budget += credit
+                    if isinstance(credit, (StandardPill, TerminalPill)):
+                        raise GracefulShutdownError
+                    self.budget += credit
 
                 self.budget -= pending_chunk.size
                 await self.chunk_outbox.send_data(

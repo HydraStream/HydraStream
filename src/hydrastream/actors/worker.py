@@ -20,6 +20,7 @@ from hydrastream.domain.entities import Chunk, StreamChunk
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     DownloadFailedError,
+    GracefulShutdownError,
     LogStatus,
     StreamError,
 )
@@ -30,6 +31,8 @@ from hydrastream.interfaces import (
 from hydrastream.messages.base import (
     ActorFifoQueue,
     PoisonPill,
+    StandardPill,
+    TerminalPill,
     ask,
 )
 from hydrastream.messages.io import WriteChunk
@@ -54,8 +57,8 @@ class BaseWorkerKwargs(BaseActorKwargs):
     throttler_outbox: ActorFifoQueue[ThrottlerMsg | PoisonPill]
     controller_outbox: ActorFifoQueue[TrafficSignal | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
-    sleep_signals_indox: ActorFifoQueue[GoToSleepPill]
-    wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill]
+    sleep_signals_indox: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill | PoisonPill]
 
     net: NetworkBackend
 
@@ -65,8 +68,8 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
     throttler_outbox: ActorFifoQueue[ThrottlerMsg | PoisonPill] | None = None
     controller_outbox: ActorFifoQueue[TrafficSignal | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
-    sleep_signals_indox: ActorFifoQueue[GoToSleepPill]
-    wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill]
+    sleep_signals_indox: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill | PoisonPill]
 
     net: NetworkBackend
 
@@ -77,18 +80,22 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
         match msg:
             case Chunk() as chunk:
                 try:
-                    _ = self.sleep_signals_indox.get_nowait()
+                    msq_ = self.sleep_signals_indox.get_nowait()
 
                     await self.inbox.send_data(
                         sort_key=self._get_sort_key(msg.file.meta.id, msg.current_pos),
                         data=msg,
                     )
 
-                    await self.wait_in_sleep_inbox.get()
+                    msq_ = await self.wait_in_sleep_inbox.get()
+
+                    if isinstance(msq_, (StandardPill, TerminalPill)):
+                        raise GracefulShutdownError
 
                     return
                 except asyncio.QueueEmpty:
                     pass
+
                 file_obj = chunk.file
                 if not file_obj or file_obj.is_failed:
                     return
@@ -103,7 +110,9 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
                         throttle_key="truncated_read",
                         throttle_sec=2.0,
                     )
+
                     await self._requeue_chunk(chunk, delay_range=(0.1, 1.0))
+
                     return
 
                 await self._file_done(chunk)
@@ -111,15 +120,6 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
             case _ as unreachable:
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)
-
-    @final
-    @override
-    async def _on_terminal_pill(self) -> None:
-        await self._finally()
-
-    @abstractmethod
-    async def _finally(self) -> None:
-        pass
 
     @final
     @override
@@ -137,6 +137,9 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
         if isinstance(e, TimeoutError):
             await self._requeue_chunk(msg)
             return ErrorVerdict.RESUME
+
+        if isinstance(e, GracefulShutdownError):
+            return ErrorVerdict.STOP
 
         tb_str = traceback.format_exc()
 
@@ -204,10 +207,6 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
 
 @hydra_dataclass
 class StreamDownloadWorker(BaseDownloadWorker):
-    @override
-    async def _finally(self) -> None:
-        pass
-
     @override
     async def _handle_critical_requests_error(
         self, chunk: Chunk, response: Response
@@ -303,13 +302,9 @@ class StreamDownloadWorker(BaseDownloadWorker):
 @hydra_dataclass
 class DiskDownloadWorker(BaseDownloadWorker):
     disk_outbox: ActorFifoQueue[WriteChunk | FlushCmd | PoisonPill]
-    file_limit_outbox: ActorFifoQueue[FileCompleted]
+    file_limit_outbox: ActorFifoQueue[FileCompleted | PoisonPill]
 
     fs: StorageBackend
-
-    @override
-    async def _finally(self) -> None:
-        pass
 
     @override
     async def _handle_critical_requests_error(

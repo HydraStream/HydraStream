@@ -5,7 +5,7 @@ from typing import assert_never, override
 
 from hydrastream.domain.base_actor import BaseActor, ErrorVerdict
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.exceptions import LogStatus
+from hydrastream.exceptions import GracefulShutdownError, LogStatus
 from hydrastream.interfaces import StorageBackend
 from hydrastream.messages.base import (
     ActorFifoQueue,
@@ -36,6 +36,9 @@ class DiskWriter(BaseActor[list[WriteChunk]]):
     async def _on_error(
         self, e: Exception, msg: list[WriteChunk] | PoisonPill | None = None
     ) -> ErrorVerdict:
+        if isinstance(e, GracefulShutdownError):
+            return ErrorVerdict.STOP
+
         msg_ = self._handle_disk_error(e)
         self.ui.log(
             f"Disk Write Failure: {msg_}",

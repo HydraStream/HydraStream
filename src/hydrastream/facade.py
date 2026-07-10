@@ -207,6 +207,7 @@ class HydraDaemon:
             async with asyncio.timeout(timeout):
                 # 1. Запускаем каскад смерти через пилюлю фидеру
                 self._ctx.links_q.send_poison_pills_nowait(count=self._ctx.resolvers)
+                self._ctx.session_killer.set()
 
                 # 2. Ждем штатного закрытия, но не вечно (защита от зависания)
                 await asyncio.shield(self._engine_task)

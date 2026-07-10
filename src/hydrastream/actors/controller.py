@@ -5,7 +5,7 @@ from typing import assert_never, override
 
 from hydrastream.domain.base_actor import BaseActor
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.messages.base import ActorFifoQueue
+from hydrastream.messages.base import ActorFifoQueue, PoisonPill
 from hydrastream.messages.traffic import (
     GoToSleepPill,
     NetworkCongestionSignal,
@@ -18,8 +18,8 @@ from hydrastream.messages.traffic import (
 
 @hydra_dataclass
 class TrafficController(BaseActor[TrafficSignal]):
-    sleep_signals_outdox: ActorFifoQueue[GoToSleepPill]
-    wait_in_sleep_outbox: ActorFifoQueue[WakeUpPill]
+    sleep_signals_outdox: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    wait_in_sleep_outbox: ActorFifoQueue[WakeUpPill | PoisonPill]
     workers: int
     dynamic_limit: int
     prev_dynamic_limit: int

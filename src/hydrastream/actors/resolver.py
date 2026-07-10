@@ -12,7 +12,7 @@ from curl_cffi.requests import RequestsError
 from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs, ErrorVerdict
 from hydrastream.domain.entities import Checksum, File, FileMeta, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.exceptions import LogStatus
+from hydrastream.exceptions import GracefulShutdownError, LogStatus
 from hydrastream.interfaces import (
     NetworkBackend,
     StorageBackend,
@@ -89,7 +89,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
 
     @final
     @override
-    async def _on_error(
+    async def _on_error(  # ruff:ignore[too-many-return-statements]
         self, e: Exception, msg: LinkData | PoisonPill | None = None
     ) -> ErrorVerdict:
         if not isinstance(msg, LinkData):
@@ -119,9 +119,14 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
             await self._requeue_chunk(msg)
             return ErrorVerdict.RESUME
 
+        if isinstance(e, GracefulShutdownError):
+            return ErrorVerdict.STOP
+
         # Если мы здесь, значит ошибка критическая (Exception)
         self.ui.log(f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL)
-        return ErrorVerdict.ESCALATE
+        if not self.is_debug:
+            return ErrorVerdict.ESCALATE
+        return ErrorVerdict.STOP
 
     @final
     async def _register_file(self, file_obj: File) -> None:

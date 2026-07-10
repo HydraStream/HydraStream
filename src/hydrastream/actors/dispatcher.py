@@ -8,12 +8,14 @@ from typing import assert_never, final, override
 from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs
 from hydrastream.domain.entities import Chunk, File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.exceptions import LogStatus
+from hydrastream.exceptions import GracefulShutdownError, LogStatus
 from hydrastream.interfaces import StorageBackend
 from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
     PoisonPill,
+    StandardPill,
+    TerminalPill,
 )
 from hydrastream.messages.state import StateKeeperMsg, UpdateStatusDownloading
 from hydrastream.messages.traffic import FileCompleted
@@ -25,7 +27,7 @@ class BaseDispatcherKwargs(BaseActorKwargs):
     inbox: ActorPriorityQueue[File | PoisonPill]
 
     chunks_outbox: ActorPriorityQueue[Chunk | PoisonPill]
-    file_limit_inbox: ActorFifoQueue[FileCompleted]
+    file_limit_inbox: ActorFifoQueue[FileCompleted | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
 
 
@@ -34,7 +36,7 @@ class BaseFileDispatcher(BaseActor[File], ABC):
     limit: int
 
     chunks_outbox: ActorPriorityQueue[Chunk | PoisonPill]
-    file_limit_inbox: ActorFifoQueue[FileCompleted]
+    file_limit_inbox: ActorFifoQueue[FileCompleted | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
 
     _current_files: int = 0
@@ -45,7 +47,9 @@ class BaseFileDispatcher(BaseActor[File], ABC):
         match msg:
             case File() as file_obj:
                 if self._current_files >= self.limit:
-                    await self.file_limit_inbox.get()
+                    msg_ = await self.file_limit_inbox.get()
+                    if isinstance(msg_, (StandardPill, TerminalPill)):
+                        raise GracefulShutdownError
                     self._current_files -= 1
 
                 self._current_files += 1
