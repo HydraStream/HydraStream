@@ -124,7 +124,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
 
         # Если мы здесь, значит ошибка критическая (Exception)
         self.ui.log(f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL)
-        if not self.is_debug:
+        if self.is_debug:
             return ErrorVerdict.ESCALATE
         return ErrorVerdict.STOP
 

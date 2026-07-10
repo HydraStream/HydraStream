@@ -4,6 +4,7 @@
 import asyncio
 import os
 import random
+import sys
 import traceback
 from abc import ABC, abstractmethod
 from typing import assert_never, final, override
@@ -30,6 +31,7 @@ from hydrastream.interfaces import (
 )
 from hydrastream.messages.base import (
     ActorFifoQueue,
+    ActorPriorityQueue,
     PoisonPill,
     StandardPill,
     TerminalPill,
@@ -48,6 +50,7 @@ from hydrastream.messages.traffic import (
     RegisterStreamCmd,
     RemoveStreamCmd,
     ThrottlerMsg,
+    TooManyRequests,
     WakeUpPill,
 )
 from hydrastream.network import stream_chunk
@@ -131,7 +134,6 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
 
         if isinstance(e, RequestsError):
             await self._handle_requests_error(msg, e)
-            await self.controller_outbox.send_data(NetworkCongestionSignal())
             return ErrorVerdict.RESUME
 
         if isinstance(e, TimeoutError):
@@ -163,7 +165,6 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
             return
 
         status = response.status_code
-
         if status in {400, 401, 403, 404, 410, 416}:
             self.ui.log(
                 f"Chunk for {chunk.file.actual_filename} "
@@ -171,8 +172,15 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
                 status=LogStatus.ERROR,
             )
             await self._handle_critical_requests_error(chunk, response)
-        else:
-            await self._requeue_chunk(chunk, delay_range=(0.5, 2.0))
+            return
+
+        if status == 503:
+            await self.controller_outbox.send_data(NetworkCongestionSignal())
+
+        elif status == 429:
+            await self.controller_outbox.send_data(TooManyRequests())
+
+        await self._requeue_chunk(chunk, delay_range=(0.5, 2.0))
 
     @abstractmethod
     async def _handle_critical_requests_error(
@@ -301,7 +309,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
 
 @hydra_dataclass
 class DiskDownloadWorker(BaseDownloadWorker):
-    disk_outbox: ActorFifoQueue[WriteChunk | FlushCmd | PoisonPill]
+    aggregator_outbox: ActorPriorityQueue[WriteChunk | FlushCmd | PoisonPill]
     file_limit_outbox: ActorFifoQueue[FileCompleted | PoisonPill]
 
     fs: StorageBackend
@@ -409,7 +417,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
                     )
 
                     if current_buffer_size >= buffer_size:
-                        await self.disk_outbox.send_data(
+                        await self.aggregator_outbox.send_data(
                             WriteChunk(
                                 fd=fd,
                                 offset=chunk.current_pos,
@@ -429,7 +437,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
                 if self.throttler_outbox is not None:
                     await self.throttler_outbox.send_data(RemoveStreamCmd(stream=r))
                 if buffer_list:
-                    await self.disk_outbox.send_data(
+                    await self.aggregator_outbox.send_data(
                         WriteChunk(
                             fd=fd,
                             offset=chunk.current_pos,
@@ -458,10 +466,10 @@ class DiskDownloadWorker(BaseDownloadWorker):
             chunk.file.verified = True
 
         await ask(
-            inbox=self.disk_outbox,
+            inbox=self.aggregator_outbox,
             msg_factory=FlushCmd.create_request,
             timeout=60.0,
-            sort_key=(-1,),
+            sort_key=(sys.maxsize,),
         )
 
         self.fs.verify_size(filename, file_obj.meta.content_length)

@@ -29,8 +29,6 @@ def _evaluate_failure(
 
     safe_url = redact_url(url)
     if response is not None:
-        if response.status_code == 503:
-            return None
         if response.status_code not in retry_codes:
             ui.log(
                 f"Fatal HTTP error {response.status_code} for {safe_url}",

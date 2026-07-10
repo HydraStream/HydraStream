@@ -165,12 +165,12 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
         if not self.is_stream:
             for trace in self._traces.values():
                 if isinstance(trace.file_obj, File):
-                    if trace.file_obj.chunks and not trace.file_obj.is_complete:
-                        self.fs.save_state(trace.file_obj)
-
                     if trace.file_obj.fd is not None:
                         self.fs.close_file(trace.file_obj.fd)
                         trace.file_obj.fd = None
+
+                    if trace.file_obj.chunks and not trace.file_obj.is_complete:
+                        self.fs.save_state(trace.file_obj)
         else:
             for trace in self._traces.values():
                 if (
@@ -183,7 +183,6 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
             for fut in fut_list:
                 if not fut.done():
                     fut.cancel()
-
         for fut_list in self._result_waiters.values():
             for fut in fut_list:
                 if not fut.done():

@@ -56,13 +56,6 @@ class BaseFileDispatcher(BaseActor[File], ABC):
 
                 await self._prepare_file(file_obj)
 
-                if file_obj.meta.original_filename != file_obj.actual_filename:
-                    self.ui.log(
-                        f"{file_obj.meta.original_filename} already exists. "
-                        f"Saving as {file_obj.actual_filename}.",
-                        status=LogStatus.WARNING,
-                    )
-
                 file_obj.create_chunks()
                 await self.state_outbox.send_data(
                     UpdateStatusDownloading(file_id=file_obj.meta.id)
@@ -114,14 +107,22 @@ class DiskFileDispatcher(BaseFileDispatcher):
         await loop.run_in_executor(None, self._prepare_file_on_disk, file_obj)
 
     def _prepare_file_on_disk(self, file_obj: File) -> None:
-        new_filename = self.fs.allocate_space(
-            filename=file_obj.meta.original_filename, size=file_obj.meta.content_length
-        )
-        if new_filename:
-            file_obj.actual_filename = new_filename
-            self.ui.update_filename(file_obj.meta.id, new_filename)
-        else:
-            file_obj.actual_filename = file_obj.meta.original_filename
+        if not file_obj.actual_filename:
+            new_filename = self.fs.allocate_space(
+                filename=file_obj.meta.original_filename,
+                size=file_obj.meta.content_length,
+            )
+
+            if new_filename:
+                file_obj.actual_filename = new_filename
+                self.ui.update_filename(file_obj.meta.id, new_filename)
+                self.ui.log(
+                    f"{file_obj.meta.original_filename} already exists. "
+                    f"Saving as {file_obj.actual_filename}.",
+                    status=LogStatus.WARNING,
+                )
+            else:
+                file_obj.actual_filename = file_obj.meta.original_filename
 
         file_obj.fd = self.fs.open_file(filename=file_obj.actual_filename)
 

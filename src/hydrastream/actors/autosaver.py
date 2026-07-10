@@ -10,7 +10,12 @@ from hydrastream.domain.entities import File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import StorageBackend
-from hydrastream.messages.base import ActorFifoQueue, PoisonPill, ask
+from hydrastream.messages.base import (
+    ActorFifoQueue,
+    ActorPriorityQueue,
+    PoisonPill,
+    ask,
+)
 from hydrastream.messages.io import WriteChunk
 from hydrastream.messages.state import GetSnapshotCmd, StateKeeperMsg
 from hydrastream.messages.traffic import FlushCmd
@@ -18,7 +23,7 @@ from hydrastream.messages.traffic import FlushCmd
 
 @hydra_dataclass
 class FileAutosaver(BaseActor[None]):
-    disk_q: ActorFifoQueue[WriteChunk | FlushCmd | PoisonPill]
+    aggregator_outbox: ActorPriorityQueue[WriteChunk | FlushCmd | PoisonPill]
     reg_events_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     interval: float
     fs: StorageBackend
@@ -40,7 +45,7 @@ class FileAutosaver(BaseActor[None]):
                 # --- The Core Trigger Logic ---
                 # 1. Force Disk to write everything down
                 await ask(
-                    inbox=self.disk_q,
+                    inbox=self.aggregator_outbox,
                     msg_factory=FlushCmd.create_request,
                     timeout=60.0,
                     sort_key=(-1,),

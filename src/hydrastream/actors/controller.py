@@ -11,6 +11,7 @@ from hydrastream.messages.traffic import (
     NetworkCongestionSignal,
     ScaleDownSignal,
     ScaleUpSignal,
+    TooManyRequests,
     TrafficSignal,
     WakeUpPill,
 )
@@ -37,6 +38,10 @@ class TrafficController(BaseActor[TrafficSignal]):
 
             case ScaleUpSignal():
                 self.dynamic_limit = min(self.workers, self.dynamic_limit + 1)
+
+            case TooManyRequests():
+                self.dynamic_limit = max(1, int(self.dynamic_limit / 2))
+
             case _ as unreachable:
                 await super()._handle_msg(unreachable)
                 assert_never(unreachable)

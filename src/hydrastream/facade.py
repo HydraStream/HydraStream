@@ -41,7 +41,7 @@ class HydraDaemon:
     def __post_init__(self, initial_ui: MonitorBackend | None) -> None:
         if self.config.custom_monitor is not None:
             self._ui = self.config.custom_monitor
-        if initial_ui is None:
+        elif initial_ui is None:
             self._ui = create_monitor(config=self.ui_config)
         else:
             self._ui = initial_ui
@@ -96,8 +96,7 @@ class HydraDaemon:
                 "Engine background task was explicitly cancelled.",
                 status=LogStatus.INFO,
             )
-            if self.config.debug:
-                raise
+
             return None
 
         return file_streamer(
@@ -139,8 +138,6 @@ class HydraDaemon:
         try:
             return await reply_future
         except asyncio.CancelledError:
-            if self.config.debug:
-                raise
             return None
 
         except Exception as e:

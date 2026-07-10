@@ -196,7 +196,7 @@ def bootstrap_engine(  # noqa
                 else DiskDownloadWorker(
                     **base_worker_kwargs,
                     inbox=ctx.chunks_q,
-                    disk_outbox=ctx.aggregator_q,
+                    aggregator_outbox=ctx.aggregator_q,
                     file_limit_outbox=ctx.file_limit_q,
                     fs=ctx.fs,
                 )
@@ -233,7 +233,7 @@ def bootstrap_engine(  # noqa
             **base_actor_kwargs,
             inbox=ctx.autosaver_q,
             interval=60,
-            disk_q=ctx.aggregator_q,
+            aggregator_outbox=ctx.aggregator_q,
             reg_events_q=ctx.state_q,
             fs=ctx.fs,
         )

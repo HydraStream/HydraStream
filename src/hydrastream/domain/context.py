@@ -63,11 +63,11 @@ class HydraContext:
     files_q: ActorPriorityQueue[File | PoisonPill]
     chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
     ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
+    aggregator_q: ActorPriorityQueue[DiskMsg | PoisonPill]
     # =========================================================================
     # 3. ОБЫЧНЫЕ ОЧЕРЕДИ (FIFO Queues)
     # =========================================================================
-    # Диск и агрегация
-    aggregator_q: ActorFifoQueue[DiskMsg | PoisonPill]
+    # Диск
     writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill]
     ack_q: ActorFifoQueue[WriteCompleted | PoisonPill]
     # Управление и телеметрия
@@ -123,8 +123,8 @@ class AppQueuesSchema(TypedDict):
     files_q: ActorPriorityQueue[File | PoisonPill]
     chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
     ready_chunks_q: ActorPriorityQueue[Chunk | PoisonPill]
+    aggregator_q: ActorPriorityQueue[DiskMsg | PoisonPill]
 
-    aggregator_q: ActorFifoQueue[DiskMsg | PoisonPill]
     writer_q: ActorFifoQueue[list[WriteChunk] | PoisonPill]
     ack_q: ActorFifoQueue[WriteCompleted | PoisonPill]
     analyzer_q: ActorFifoQueue[CheckpointEvent | PoisonPill]

@@ -186,7 +186,10 @@ def _prepare_checksums(
 
 
 async def _stream_download_tasks(
-    daemon: HydraDaemon, tasks: list[int], ui: MonitorBackend, has_checksum: bool
+    daemon: HydraDaemon,
+    tasks: list[int],
+    ui: MonitorBackend,
+    has_checksum: bool,
 ) -> None:
     assert sys.__stdout__ is not None
     is_terminal = sys.__stdout__.isatty()
@@ -216,14 +219,17 @@ async def _stream_download_tasks(
                     "since --checksum is provided.",
                 )
             )
-            # Сам процесс стриминга стал плоским и читаемым
-    for i in tasks:
-        if file_stream := await daemon.get_stream(i):
-            async for chunk in file_stream:
-                if not is_terminal:
-                    sys.stdout.buffer.write(chunk)
-        if not is_terminal:
+    else:
+        loop = asyncio.get_running_loop()
+
+        def _blocking_write(data: bytes) -> None:
+            sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
+
+        for i in tasks:
+            if file_stream := await daemon.get_stream(i):
+                async for chunk in file_stream:
+                    await loop.run_in_executor(None, _blocking_write, chunk)
 
 
 async def async_main(  # noqa
@@ -314,7 +320,10 @@ async def async_main(  # noqa
 
             if stream and not config.dry_run:
                 await _stream_download_tasks(
-                    daemon, tasks, ui, has_checksum=bool(expected_checksums)
+                    daemon,
+                    tasks,
+                    ui,
+                    has_checksum=bool(expected_checksums),
                 )
             else:
                 for i in tasks:

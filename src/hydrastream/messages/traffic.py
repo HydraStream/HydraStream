@@ -25,7 +25,14 @@ class NetworkCongestionSignal:
     pass
 
 
-type TrafficSignal = ScaleDownSignal | ScaleUpSignal | NetworkCongestionSignal
+@hydra_dataclass(frozen=True)
+class TooManyRequests:
+    pass
+
+
+type TrafficSignal = (
+    ScaleDownSignal | ScaleUpSignal | NetworkCongestionSignal | TooManyRequests
+)
 
 
 @hydra_dataclass(frozen=True)

@@ -313,8 +313,9 @@ class LocalStorageManager(StorageBackend):
         calculated = await loop.run_in_executor(None, _compute_hash, algorithm)
 
         if calculated != expected_checksum:
-            filepath = self.output_dir / filename
-            filepath.unlink(missing_ok=True)
+            # filepath = self.output_dir / filename
+            # filepath.unlink(missing_ok=True)
+            self.delete_state(filename)
             raise HashMismatchError(
                 filename=filename,
                 algorithm=algorithm,
