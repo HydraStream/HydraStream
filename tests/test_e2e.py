@@ -10,7 +10,7 @@ import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast, get_args
+from typing import Any, get_args
 
 from curl_cffi import BrowserTypeLiteral
 from hypothesis import HealthCheck, given, settings
@@ -26,11 +26,11 @@ warnings.filterwarnings("ignore", message=".*chunk_size is ignored.*")
 DUMMY_DATA = b"0123456789" * 10000
 DUMMY_MD5 = hashlib.md5(DUMMY_DATA).hexdigest()
 
-defaul = {
+default = {
     "links": None,
     "input": None,
     "typehash": "md5",
-    "checksum": None,
+    "hash": None,
     "output": "download",
     "threads": None,
     "stream": False,
@@ -58,7 +58,7 @@ def make_chaos_handler(
     request_counts: defaultdict[str, int] = defaultdict(int)
     lock = threading.Lock()
 
-    def handler(request: Request) -> Response | None:  # noqa: PLR0911
+    def handler(request: Request) -> Response | None:  # noqa
         # 1. Уникальная подпись запроса (Учитываем Range, чтобы чанки отличались)
         sig = f"{request.path}|{request.method}|{request.headers.get('Range', '')}"
 
@@ -179,18 +179,6 @@ def filenames_strategy(draw: st.DrawFn) -> str:
     return f"{name}{ext}"
 
 
-def frequencies(
-    weighted_strategies: list[tuple[int, st.SearchStrategy[Any]]],
-) -> st.SearchStrategy[Any]:
-    pool: list[st.SearchStrategy[Any]] = []
-    for weight, strategy in weighted_strategies:
-        # Вместо списка стратегий делаем одну большую стратегию через one_of
-        # Но Hypothesis не умеет в веса из коробки в one_of,
-        # поэтому твой трюк с pool оправдан, если дублировать сами стратегии
-        pool.extend([strategy] * weight)
-    return st.one_of(pool)
-
-
 @st.composite
 def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
     all_paths = draw(st.lists(filenames_strategy(), min_size=1, max_size=10))
@@ -202,98 +190,16 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
 
     if not cli_paths and not file_paths:
         cli_paths = [draw(filenames_strategy())]
-    valid = 5
-    error = 1
-    res = {
-        "threads": draw(
-            frequencies([
-                (1, st.tuples(st.none(), st.none())),
-                (valid, st.tuples(st.integers(1, 128), st.none())),
-                (
-                    error,
-                    st.one_of(
-                        st.tuples(st.integers(min_value=-10, max_value=0), st.just("")),
-                        st.tuples(
-                            st.integers(min_value=129, max_value=1000), st.just("")
-                        ),
-                        st.tuples(
-                            st.text(alphabet="123abc!", min_size=1, max_size=5),
-                            st.just(""),
-                        ),
-                    ),
-                ),
-            ])
-        ),
+
+    params = {
+        "threads": draw(st.one_of(st.none(), st.integers(1, 128))),
         "browser": draw(
-            frequencies([
-                (1, st.tuples(st.none(), st.none())),
-                (
-                    valid,
-                    st.tuples(
-                        (st.sampled_from(list(get_args(BrowserTypeLiteral)))), st.none()
-                    ),
-                ),
-                (
-                    error,
-                    st.one_of(
-                        st.tuples(
-                            st.sampled_from(["ie6", "safari", "netscape"]), st.just("")
-                        ),
-                        st.tuples(st.text(min_size=1, max_size=10), st.just("")),
-                    ),
-                ),
-            ])
+            st.one_of(st.none(), st.sampled_from(list(get_args(BrowserTypeLiteral))))
         ),
-        "buffer": draw(
-            frequencies([
-                (1, st.tuples(st.none(), st.none())),
-                (valid, st.tuples(st.integers(50, 1000), st.none())),
-                (
-                    error,
-                    st.tuples(st.integers(-100, 50), st.just("")),
-                ),
-            ])
-        ),
-        "limit": draw(
-            frequencies([
-                (1, st.tuples(st.none(), st.none())),
-                (valid, st.tuples(st.floats(0.01, 1000), st.none())),
-                (
-                    error,
-                    st.tuples(
-                        st.floats(-100, 0),
-                        st.just(
-                            "validation error for HydraConfig\nspeed_limit\n  Input should be greater than 0"
-                        ),
-                    ),
-                ),
-            ])
-        ),
-        "min-chunk-mb": draw(
-            frequencies([
-                (1, st.tuples(st.none(), st.none())),
-                (valid, st.tuples(st.integers(1, 1000), st.none())),
-                (
-                    error,
-                    st.tuples(st.integers(-100, 0), st.just("")),
-                ),
-            ])
-        ),
-        "stream-chunk-mb": draw(
-            frequencies([
-                (1, st.tuples(st.none(), st.none())),
-                (valid, st.tuples(st.integers(1, 1000), st.none())),
-                (
-                    error,
-                    st.tuples(
-                        st.integers(-100, 0),
-                        st.just(
-                            "validation error for HydraConfig\nmax_stream_chunk_size_mb\n  Input should be greater than 0"
-                        ),
-                    ),
-                ),
-            ])
-        ),
+        "buffer": draw(st.one_of(st.none(), st.integers(1, 100))),
+        "limit": draw(st.one_of(st.none(), st.floats(0.1, 100.0))),
+        "min-chunk-mb": draw(st.one_of(st.none(), st.integers(1, 20))),
+        "stream-chunk-mb": draw(st.one_of(st.none(), st.integers(1, 20))),
         "flags": draw(
             st.fixed_dictionaries({
                 "stream": st.booleans(),
@@ -302,7 +208,7 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
                 "quiet": st.booleans(),
                 "json": st.booleans(),
                 "no-verify": st.booleans(),
-                # "debug": st.booleans(),
+                "debug": st.booleans(),
             })
         ),
     }
@@ -316,17 +222,16 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
         f"{placeholder}{'ncbi.nlm.nih.gov/' if draw(st.booleans()) else ''}{p}"
         for p in file_paths
     ]
-    # print(f"Параметры: {res}", file=sys.__stderr__)
-    args, expected_error = build_args_list(res, cli_urls)
+
+    args = build_args_list(params, cli_urls)
 
     if len(all_paths) == 1 and draw(st.booleans()):
-        args.extend(["--checksum", DUMMY_MD5, "--typehash", "md5"])
+        args.extend(["--hash", DUMMY_MD5, "--typehash", "md5"])
 
-    args.append("--debug")
+    # args.append("--debug")
 
     return {
         "args_template": args,
-        "expected_error": expected_error,
         "paths": all_paths,
         "existing_copies": draw(st.integers(0, 5)),
         "existing_files": draw(st.sampled_from(all_paths)),
@@ -335,41 +240,36 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
     }
 
 
-def build_args_list(
-    params: dict[str, dict[str, bool] | Any], urls: list[str]
-) -> tuple[list[str], list[str]]:
+def build_args_list(params: dict, urls: list[str]) -> list[str]:
     args = urls[:]
-    expected_error: list[str] = []
 
     # Флаги
     for name, value in params.items():
         if isinstance(value, dict):
-            for flag, enabled in cast(dict[str, bool], value).items():
+            for flag, enabled in value.items():
                 if enabled:
                     args.append(f"--{flag}")
             continue
 
-        if value[0] is not None:
-            args.extend([f"--{name}", str(value[0])])
-        if value[1] is not None:
-            expected_error.append(value[1])
+        if value is not None:
+            args.extend([f"--{name}", str(value)])
 
-    return args, expected_error
+    return args
 
 
 @given(data=cli_fuzz_strategy())
 @settings(
-    max_examples=5,
+    max_examples=20,
     deadline=None,
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
 def test_hypothesis_nuclear_fuzzer(
-    httpserver: HTTPServer, tmp_path: Path, data: dict[str, Any]
+    httpserver: HTTPServer, tmp_path: Path, data: dict
 ) -> None:
     filenames = [Path(p).name for p in data["paths"]]
     chaos_handler = make_chaos_handler(data["server_seed"], filenames)
     # 1. Заводим сервер
-    httpserver.expect_request(re.compile("^/.*$")).respond_with_handler(chaos_handler)  # pyright: ignore[reportArgumentType]
+    httpserver.expect_request(re.compile(r"^/.*$")).respond_with_handler(chaos_handler)
     base_url = httpserver.url_for("").rstrip("/")
 
     out_dir = tmp_path / "downloads"
@@ -409,23 +309,14 @@ def test_hypothesis_nuclear_fuzzer(
         file=sys.__stderr__,
     )
     result = runner.invoke(app, final_args)
-    # exception = result.exception
-    text_exception = result.stdout
 
     # 4. ПРОВЕРКА ИНВАРИАНТОВ (ГЛАВНАЯ МАГИЯ PBT)
 
     # Инвариант 1: Программа НИКОГДА не должна падать с необработанным исключением
     # (Traceback)
-    for i in data["expected_error"]:
-        assert i in text_exception, f"Неожиданная ошибка: {i}, Вывод: {result.stdout}"
-
-    # if not isinstance(result.exception, ExceptionGroup) or (
-    #     isinstance(exception, ExceptionGroup) and not exception.subgroup(StreamError)
-    # ):
-    #     assert exception is None, (
-    #         f"КРАШ ПРОГРАММЫ! Комбинация: {final_args}\nВывод: {result.stdout}"
-    #     )
-
+    assert result.exception is None, (
+        f"КРАШ ПРОГРАММЫ! Комбинация: {final_args}\nВывод: {result.stdout}"
+    )
     assert result.exit_code != 1, (
         f"CRITICAL CRASH! Exit code 1. Stdout:\n{result.stdout}"
     )

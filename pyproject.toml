@@ -55,6 +55,7 @@ dependencies =[
     "pydantic-settings>=2.14.0",
     "pygments>=2.20.0",                  # Transitive via rich; pinned to avoid CVE-2026-4539 (ReDoS in AdlLexer)
     "rich>=14.3.2",                      # Отрисовка красивых прогресс-баров в консоли
+    "snakeviz>=2.2.2",
     "typer>=0.24.1",                     # Для создания CLI-интерфейса (парсинг аргументов)
     "uvloop>=0.22.1 ; sys_platform != 'win32'", # Сверхбыстрый event-loop для asyncio (не ставим на Windows)
 ]
@@ -121,6 +122,7 @@ hydrastream = { workspace = true }
 src = ["src"]
 line-length = 88         # Максимальная длина строки (стандарт Black)
 target-version = "py312" # Оптимизируем код под фичи Python 3.12+
+preview = true
 
 [tool.ruff.lint]
 # Включаем жесткие наборы правил проверок:
@@ -138,7 +140,10 @@ select =[
     "RUF",       # Собственные жесткие правила Ruff
     "N",         # Проверка имен переменных/классов (pep8-naming)
     "C90",       # mccabe сложность
-    "PL"         # Pylint (очень строгий анализатор)
+    "PL",        # Pylint (очень строгий анализатор)
+    "ASYNC",
+    "RUF029"
+
 ]
 
 # Разрешаем ruff автоматически исправлять найденные косяки при запуске --fix
@@ -150,7 +155,10 @@ ignore = [
     "RUF001", # String contains ambiguous unicode character (cyrillic)
     "RUF002", # Docstring contains ambiguous unicode character
     "RUF003", # Comment contains ambiguous unicode character
+    "ASYNC109", # Разрешаем аргумент timeout в асинхронных функциях
+    "too-many-statements-in-try-clause"
 ]
+
 [tool.ruff.format]
 quote-style = "double"           # Всегда используем двойные кавычки " "
 indent-style = "space"           # Отступы пробелами

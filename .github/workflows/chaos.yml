@@ -6,7 +6,7 @@ name: HydraStream Chaos Engineering
 on:
   # Запускать автоматически каждое воскресенье в 03:00 ночи
   schedule:
-    - cron: '0 3 * * 0'
+    - cron: "0 3 * * 0"
   # Позволяет запускать этот тест руками из интерфейса GitHub (вкладка Actions)
   workflow_dispatch:
 
@@ -28,8 +28,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Set up Python 3.11
-        run: uv python install 3.11
+      - name: Set up Python 3.12
+        run: uv python install 3.12
 
       - name: Install HydraStream globally
         run: uv tool install . # Устанавливаем нашу утилиту, чтобы команда `hs` стала доступна в консоли

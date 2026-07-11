@@ -1,7 +1,7 @@
 # HydraStream
 
 [![PyPI version](https://badge.fury.io/py/hydrastream.svg)](https://pypi.org/project/hydrastream/)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Coverage: 90%](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)](https://github.com/Zhukovetski/HydraStream)
 [![Tests](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml/badge.svg)](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml)
@@ -30,7 +30,7 @@ HydraStream is a concurrent HTTP downloader written in Python. It fetches file c
 
 ## Installation
 
-Requires Python 3.11+.
+Requires Python 3.12+.
 
 ```bash
 uv tool install hydrastream
@@ -86,6 +86,7 @@ min-chunk-mb = 5
 import asyncio
 from hydrastream import HydraClient, HydraConfig
 
+
 async def main():
     config = HydraConfig(threads=20, quiet=True)
     urls = ["https://example.com/file1.gz"]
@@ -95,6 +96,7 @@ async def main():
         async for filename, file_stream in await client.stream(urls):
             async for chunk in file_stream:
                 sys.stdout.buffer.write(chunk)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

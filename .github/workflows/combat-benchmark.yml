@@ -32,7 +32,7 @@ jobs:
           enable-cache: true
 
       - run: |
-          uv python install 3.11
+          uv python install 3.12
           uv tool install .
           sudo apt-get update && sudo apt-get install -y aria2
           uv venv hf_env > /dev/null
@@ -88,7 +88,7 @@ jobs:
           time hs "${{ matrix.target.url }}" -t 20 -q --no-verify -o ./hs_out || echo "❌ HYDRASTREAM FAILED"
           rm -rf ./hs_out
 
-         # 5. HYDRASTREAM (Streaming to /dev/null)
+        # 5. HYDRASTREAM (Streaming to /dev/null)
       # ---------------------------------------------------------
       - name: Test 5 - HydraStream STREAM MODE (20 connections)
         run: |
