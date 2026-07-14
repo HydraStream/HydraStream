@@ -31,7 +31,7 @@ def _evaluate_failure(
     if response is not None:
         if response.status_code not in retry_codes:
             ui.log(
-                f"Fatal HTTP error {response.status_code} for {safe_url}",
+                f"HTTP error {response.status_code} for {safe_url}",
                 status=LogStatus.ERROR,
             )
             return None

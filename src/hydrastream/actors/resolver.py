@@ -202,11 +202,13 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
     ) -> Checksum | None:
         if checksum_tuple:
             return Checksum(algorithm=checksum_tuple[0], value=checksum_tuple[1])
-
         self.ui.add_file(id, filename)
-
-        checksum = await self.provider.resolve_hash(self.net, self.ui, url, filename)
-        self.ui.done(id, filename)
+        try:
+            checksum = await self.provider.resolve_hash(
+                self.net, self.ui, url, filename
+            )
+        finally:
+            self.ui.done(id, filename)
 
         if checksum is None:
             self.ui.log(

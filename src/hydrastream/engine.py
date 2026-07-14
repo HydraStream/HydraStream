@@ -42,8 +42,11 @@ async def teardown_engine(ctx: HydraContext) -> None:
 
     loop = asyncio.get_running_loop()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.remove_signal_handler(sig)
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)
+    else:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     await loop.shutdown_default_executor()
 

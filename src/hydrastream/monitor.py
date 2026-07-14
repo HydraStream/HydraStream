@@ -7,7 +7,6 @@ import sys
 import time
 import typing
 from abc import ABC
-from collections import defaultdict
 from dataclasses import asdict, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,11 +76,13 @@ class BaseMonitor(MonitorBackend, ABC):
     _download_bytes: int = 0
     _total_files: int = 0
     _files_completed: int = 0
-    _buffer: defaultdict[int, int] = field(default_factory=lambda: defaultdict(int))
+    _files_size: dict[int, int] = field(default_factory=dict[int, int])
 
     is_debug: bool = False
 
     def __post_init__(self) -> None:
+        if self.is_debug:
+            self._console = Console(stderr=True, file=sys.__stderr__)
 
         self.log_file = Path(self.log_file).expanduser().resolve()
         self.log_file /= "hydra.log"
@@ -174,6 +175,7 @@ class BaseMonitor(MonitorBackend, ABC):
         if total_size is not None:
             self._total_bytes += total_size
             self._total_files += 1
+            self._files_size[file_id] = total_size
 
     @override
     def update_progress(self, file_id: int, advance_bytes: int) -> None:
@@ -186,7 +188,7 @@ class BaseMonitor(MonitorBackend, ABC):
     @override
     def done(self, file_id: int, filename: str) -> None:
 
-        if self._buffer.get(file_id, 0):
+        if self._files_size.get(file_id, 0):
             self._files_completed += 1
             self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
@@ -507,8 +509,6 @@ class RichMonitor(BaseMonitor):
     rich: Progress = field(init=False)
     live: Live = field(init=False)
 
-    state_keeper_q: ActorFifoQueue[StateKeeperMsg | PoisonPill] = field(init=False)
-
     @override
     def __post_init__(self) -> None:
         BaseMonitor.__post_init__(self)
@@ -618,6 +618,7 @@ class RichMonitor(BaseMonitor):
         if total_size is not None:
             self._total_bytes += total_size
             self._total_files += 1
+            self._files_size[file_id] = total_size
 
         t_filename = self._truncate_filename(filename)
         if total_size is None:
@@ -657,14 +658,13 @@ class RichMonitor(BaseMonitor):
 
                 # 3. Отрисовываем!
                 for file_id, bytes_to_advance in deltas.items():
-                    self._buffer[file_id] += bytes_to_advance
+                    if file_id in self.tasks:
+                        self.rich.update(
+                            self.tasks[file_id],
+                            advance=bytes_to_advance,
+                            visible=True,
+                        )
                     self._download_bytes += bytes_to_advance
-
-                    self.rich.update(
-                        self.tasks[file_id],
-                        advance=bytes_to_advance,
-                        visible=True,
-                    )
 
                     if file_id not in self.active_files:
                         self.active_files.add(file_id)
@@ -699,12 +699,11 @@ class RichMonitor(BaseMonitor):
             self._update_panel_title()
             self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
-        elif self._buffer.get(file_id, 0):
+        elif self._files_size.get(file_id, 0):
             self._files_completed += 1
             self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
-    def _make_panel(self) -> Panel | str:  # ruff:ignore[too-many-locals]
-
+    def _make_panel(self) -> Panel | str:
         if not self.rich.tasks and self._is_running:
             return ""
 
@@ -802,12 +801,12 @@ class RichMonitor(BaseMonitor):
     def _ui_stop(self) -> None:
         self.live.refresh()
         self.live.stop()
-        self.refresh.cancel()
+        if hasattr(self, "refresh") and not self.refresh.done():
+            self.refresh.cancel()
 
     @override
     def bind_to_state_keeper(
         self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     ) -> None:
 
-        self.state_keeper_q = state_q
-        self.refresh = asyncio.create_task(self._ui_refresh_actor(self.state_keeper_q))
+        self.refresh = asyncio.create_task(self._ui_refresh_actor(state_q))

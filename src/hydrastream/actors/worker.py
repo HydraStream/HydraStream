@@ -235,8 +235,11 @@ class StreamDownloadWorker(BaseDownloadWorker):
         supports_ranges = file_obj.meta.supports_ranges
 
         if not supports_ranges:
-            raise StreamError(
-                url=chunk.file.meta.url, filename=chunk.file.actual_filename
+            await file_obj.stream_q.send_data(
+                data=StreamError(
+                    url=chunk.file.meta.url, filename=chunk.file.actual_filename
+                ),
+                sort_key=(-1,),
             )
         await self.inbox.send_data(
             sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),

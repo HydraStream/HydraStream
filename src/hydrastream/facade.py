@@ -1,9 +1,11 @@
 import asyncio
 import contextlib
-from collections.abc import AsyncGenerator, Iterator
+import sys
+from collections.abc import AsyncGenerator, Callable, Iterator
 from dataclasses import InitVar, field
 from itertools import count
 from types import TracebackType
+from typing import Any
 from urllib.parse import urlparse
 
 from hydrastream.actors.streamer import file_streamer
@@ -25,6 +27,8 @@ from hydrastream.messages.state import (
     TaskStatus,
 )
 
+ON_ENGINE_START_HOOK: Callable[[], Any] = lambda: None
+
 
 @hydra_dataclass
 class HydraDaemon:
@@ -45,7 +49,7 @@ class HydraDaemon:
             self._ui = create_monitor(config=self.ui_config)
         else:
             self._ui = initial_ui
-
+        print("Your debug message here 3", file=sys.__stderr__, flush=True)
         self._ctx = build_context(self.config, ui=self._ui)
 
     async def __aenter__(self) -> "HydraDaemon":
@@ -151,6 +155,7 @@ class HydraDaemon:
     async def _run_engine_in_background(self) -> None:
         try:
             prepare_runtime(self._ctx)
+            ON_ENGINE_START_HOOK()
 
             try:
                 async with asyncio.TaskGroup() as tg:
@@ -169,7 +174,7 @@ class HydraDaemon:
                 self._ctx.ui.log(
                     f"Critical failure in TaskGroup: {eg.exceptions}",
                     status=LogStatus.CRITICAL,
-                )  # type: ignore
+                )
                 if self.config.debug:
                     raise
 
@@ -186,6 +191,8 @@ class HydraDaemon:
                 raise
 
         except Exception as e:
+            if isinstance(e, ExceptionGroup):
+                raise
             self._ui.log(f"Fatal crash in HydraEngine: {e}", status=LogStatus.CRITICAL)
             if self.config.debug:
                 raise

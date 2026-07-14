@@ -190,6 +190,7 @@ async def _stream_download_tasks(
     tasks: list[int],
     ui: MonitorBackend,
     has_checksum: bool,
+    debug: bool,
 ) -> None:
     assert sys.__stdout__ is not None
     is_terminal = sys.__stdout__.isatty()
@@ -219,6 +220,11 @@ async def _stream_download_tasks(
                     "since --checksum is provided.",
                 )
             )
+        if debug:
+            for i in tasks:
+                if file_stream := await daemon.get_stream(i):
+                    async for _ in file_stream:
+                        pass
     else:
         loop = asyncio.get_running_loop()
 
@@ -228,8 +234,10 @@ async def _stream_download_tasks(
 
         for i in tasks:
             if file_stream := await daemon.get_stream(i):
+                print("Your debug message here -11", file=sys.__stderr__, flush=True)
                 async for chunk in file_stream:
                     await loop.run_in_executor(None, _blocking_write, chunk)
+                print("Your debug message here -12", file=sys.__stderr__, flush=True)
 
 
 async def async_main(  # noqa
@@ -275,6 +283,7 @@ async def async_main(  # noqa
         browser: Browser TLS fingerprint to impersonate.
         debug: Enable debug mode to propagate full tracebacks on failure.
     """  # noqa: E501
+    print("Your debug message here -1", file=sys.__stderr__, flush=True)
     ui_config = UIConfig(
         is_verify=verify,
         quiet=quiet,
@@ -283,11 +292,13 @@ async def async_main(  # noqa
         log_file_dir=Path(output_dir),
         is_debug=debug,
     )
-
+    print("Your debug message here -2", file=sys.__stderr__, flush=True)
     ui = create_monitor(ui_config)
     ui.start()
+    print("Your debug message here -3", file=sys.__stderr__, flush=True)
 
     try:
+        print("Your debug message here -35", file=sys.__stderr__, flush=True)
         config = HydraConfig(
             is_stream=stream,
             threads=threads,
@@ -301,13 +312,13 @@ async def async_main(  # noqa
             impersonate=impersonate,
             debug=True,
         )
-
+        print("Your debug message here -4", file=sys.__stderr__, flush=True)
         active_links = validate(links=links, input_file=input_file, ui=ui)
         expected_checksums = _prepare_checksums(active_links, checksum, typehash)
 
         async with HydraDaemon(config=config, initial_ui=ui) as daemon:
             tasks: list[int] = []
-
+            print("Your debug message here -5", file=sys.__stderr__, flush=True)
             for i in active_links:
                 if (
                     task := await daemon.add_download(
@@ -317,24 +328,28 @@ async def async_main(  # noqa
                     )
                 ) is not None:
                     tasks.append(task)
-
+            print("Your debug message here -6", file=sys.__stderr__, flush=True)
             if stream and not config.dry_run:
                 await _stream_download_tasks(
                     daemon,
                     tasks,
                     ui,
                     has_checksum=bool(expected_checksums),
+                    debug=debug,
                 )
             else:
                 for i in tasks:
                     await daemon.wait_for_file(i)
 
     except (KeyboardInterrupt, asyncio.CancelledError):
+        print("Your debug message here -101", file=sys.__stderr__, flush=True)
         if debug:
             raise
         sys.exit(ExitCode.INTERRUPTED)
 
     except (Exception, ExceptionGroup) as e:
+        print("Your debug message here -100", file=sys.__stderr__, flush=True)
+        print(e, file=sys.__stderr__, flush=True)
         if debug:
             raise
 
@@ -532,6 +547,7 @@ def cli(
     HydraStream: Concurrent HTTP downloader with in-memory stream reordering
     (curl_cffi + uvloop).
     """
+    print("Your debug message here 0", file=sys.__stderr__, flush=True)
 
     if threads is None:
         threads = 128

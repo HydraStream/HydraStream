@@ -1,10 +1,16 @@
 import hashlib
+import sys
 from collections.abc import AsyncGenerator
 
 from hydrastream.actors.dispatcher import FileCompleted
 from hydrastream.actors.stater import FileFinishedCmd, StateKeeperMsg
 from hydrastream.domain.entities import Checksum, File
-from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
+from hydrastream.exceptions import (
+    FileSizeMismatchError,
+    HashMismatchError,
+    LogStatus,
+    StreamError,
+)
 from hydrastream.interfaces import Hasher, MonitorBackend
 from hydrastream.messages.base import (
     ActorFifoQueue,
@@ -44,12 +50,17 @@ async def file_streamer(  # noqa
 
             yield data
             expected_offset += len(data)
+            print(f"expected_offset {expected_offset}", file=sys.__stderr__, flush=True)
             await credit_outbox.send_data(len(data))
+
+        print(f"total_size {total_size}", file=sys.__stderr__, flush=True)
 
     try:
         while expected_offset < total_size:
             msg = await file_obj.stream_q.get()
 
+            if isinstance(msg, StreamError):
+                raise msg
             # 1. Избавляемся от глубокого match/case с помощью Guard Clauses
             if isinstance(msg, (StandardPill, TerminalPill)):
                 break
@@ -89,6 +100,7 @@ async def file_streamer(  # noqa
             ui.done(file_obj.meta.id, file_obj.actual_filename)
 
     finally:
+        print("Your debug message here -13", file=sys.__stderr__, flush=True)
         buffer.clear()
 
         await reg_events_outbox.send_data(FileFinishedCmd(file_id=file_obj.meta.id))
