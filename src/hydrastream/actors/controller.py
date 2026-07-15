@@ -54,9 +54,18 @@ class TrafficController(BaseActor[TrafficSignal]):
         if self.dynamic_limit > self.prev_dynamic_limit:
             for _ in range(self.dynamic_limit - self.prev_dynamic_limit):
                 await self.wait_in_sleep_outbox.send_data(WakeUpPill())
+            self.ui.log(
+                f"worker wake up: {self.dynamic_limit - self.prev_dynamic_limit}, limit: {self.dynamic_limit}, prev_limit: {self.prev_dynamic_limit}",
+                progress=True,
+            )
         else:
             for _ in range(self.prev_dynamic_limit - self.dynamic_limit):
                 await self.sleep_signals_outdox.send_data(GoToSleepPill())
+            self.ui.log(
+                f"worker go sleep: {self.prev_dynamic_limit - self.dynamic_limit}, limit: {self.dynamic_limit}",
+                progress=True,
+            )
+        self.prev_dynamic_limit = self.dynamic_limit
 
     @override
     async def _on_terminal_pill(self) -> None:

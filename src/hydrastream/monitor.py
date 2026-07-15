@@ -280,8 +280,8 @@ class BaseMonitor(MonitorBackend, ABC):
     async def stop(self) -> None:
         if not self._is_running:
             return
-        self._ui_stop()
         self._handle_exit()
+        self._ui_stop()
         self.log("--- Session Finished ---")
 
         if self._log_task:
@@ -733,11 +733,7 @@ class RichMonitor(BaseMonitor):
             f"{format_size(self._download_bytes)}"
             + f"/{format_size(self._total_bytes)}"
         )
-        if (
-            not self.tasks
-            and self._total_files > 0
-            and self._total_files == self._files_completed
-        ) or self._is_cancelled:
+        if not self._is_running or self._is_cancelled:
             grid = Table.grid(expand=True)
             grid.add_column()
             grid.add_column(justify="center")

@@ -183,8 +183,8 @@ def bootstrap_engine(  # noqa
             "throttler_outbox": ctx.throttler_q,
             "controller_outbox": ctx.controller_q,
             "state_outbox": ctx.state_q,
-            "sleep_signals_indox": ctx.sleep_signals,
-            "wait_in_sleep_inbox": ctx.wait_in_sleep,
+            "sleep_signals_indox": ctx.sleep_signals_q,
+            "wait_in_sleep_inbox": ctx.wait_in_sleep_q,
             "net": ctx.net,
         }
         workers: list[DiskDownloadWorker | StreamDownloadWorker] | None = []
@@ -244,8 +244,8 @@ def bootstrap_engine(  # noqa
         controller = TrafficController(
             **base_actor_kwargs,
             inbox=ctx.controller_q,
-            sleep_signals_outdox=ctx.sleep_signals,
-            wait_in_sleep_outbox=ctx.wait_in_sleep,
+            sleep_signals_outdox=ctx.sleep_signals_q,
+            wait_in_sleep_outbox=ctx.wait_in_sleep_q,
             dynamic_limit=ctx.start_works,
             prev_dynamic_limit=ctx.start_works,
             workers=ctx.workers,
@@ -287,7 +287,7 @@ def bootstrap_engine(  # noqa
     tg.create_task(stage_1_resolving(), name="stage:resolvers")
 
     if (
-        not ctx.config.dry_run  # ruff:ignore[too-many-boolean-expressions]
+        not ctx.config.dry_run  # noqa: PLR0916
         and dispatcher is not None
         and workers is not None
         and aggregator is not None
@@ -303,8 +303,8 @@ def bootstrap_engine(  # noqa
             finally:
                 if not ctx.config.is_stream:
                     ctx.chunks_q.send_poison_pills_nowait(count=ctx.workers)
-                    ctx.sleep_signals.send_poison_pills_nowait(count=ctx.workers)
-                    ctx.wait_in_sleep.send_poison_pills_nowait(count=ctx.workers)
+                    ctx.sleep_signals_q.send_poison_pills_nowait(count=ctx.workers)
+                    ctx.wait_in_sleep_q.send_poison_pills_nowait(count=ctx.workers)
                 else:
                     ctx.chunks_q.send_poison_pills_nowait(count=1)
                     ctx.credit_q.send_poison_pills_nowait(count=1)
@@ -318,8 +318,8 @@ def bootstrap_engine(  # noqa
                     await memory_throttler.run()
                 finally:
                     ctx.ready_chunks_q.send_poison_pills_nowait(count=ctx.workers)
-                    ctx.sleep_signals.send_poison_pills_nowait(count=ctx.workers)
-                    ctx.wait_in_sleep.send_poison_pills_nowait(count=ctx.workers)
+                    ctx.sleep_signals_q.send_poison_pills_nowait(count=ctx.workers)
+                    ctx.wait_in_sleep_q.send_poison_pills_nowait(count=ctx.workers)
 
             tg.create_task(stage_3_memory_throttling(), name="stage:feeder")
 

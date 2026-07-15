@@ -77,8 +77,8 @@ class HydraContext:
     controller_q: ActorFifoQueue[TrafficSignal | PoisonPill]
     state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     credit_q: ActorFifoQueue[int | PoisonPill]
-    sleep_signals: ActorFifoQueue[GoToSleepPill | PoisonPill]
-    wait_in_sleep: ActorFifoQueue[WakeUpPill | PoisonPill]
+    sleep_signals_q: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    wait_in_sleep_q: ActorFifoQueue[WakeUpPill | PoisonPill]
     # Жизненный цикл файлов
     file_limit_q: ActorFifoQueue[FileCompleted | PoisonPill]
     autosaver_q: ActorFifoQueue[PoisonPill | None]
@@ -135,8 +135,8 @@ class AppQueuesSchema(TypedDict):
     controller_q: ActorFifoQueue[TrafficSignal | PoisonPill]
     state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     credit_q: ActorFifoQueue[int | PoisonPill]
-    sleep_signals: ActorFifoQueue[GoToSleepPill | PoisonPill]
-    wait_in_sleep: ActorFifoQueue[WakeUpPill | PoisonPill]
+    sleep_signals_q: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    wait_in_sleep_q: ActorFifoQueue[WakeUpPill | PoisonPill]
     file_limit_q: ActorFifoQueue[FileCompleted | PoisonPill]
     autosaver_q: ActorFifoQueue[PoisonPill | None]
 
@@ -165,8 +165,8 @@ def _create_channels() -> AppQueuesSchema:
         "state_q": 0,
         "file_limit_q": 0,
         "credit_q": 0,
-        "sleep_signals": 0,
-        "wait_in_sleep": 0,
+        "sleep_signals_q": 0,
+        "wait_in_sleep_q": 0,
         "autosaver_q": 0,
     }
     for k, v in actor_queues.items():

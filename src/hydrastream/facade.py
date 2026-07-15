@@ -27,7 +27,7 @@ from hydrastream.messages.state import (
     TaskStatus,
 )
 
-ON_ENGINE_START_HOOK: Callable[[], Any] = lambda: None
+ON_ENGINE_START_HOOK: Callable[[HydraContext], Any] = lambda: None
 
 
 @hydra_dataclass
@@ -155,7 +155,7 @@ class HydraDaemon:
     async def _run_engine_in_background(self) -> None:
         try:
             prepare_runtime(self._ctx)
-            ON_ENGINE_START_HOOK()
+            ON_ENGINE_START_HOOK(self._ctx)
 
             try:
                 async with asyncio.TaskGroup() as tg:

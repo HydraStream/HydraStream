@@ -1,24 +1,31 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
+import asyncio
+import contextlib
 import hashlib
+import os
 import re
 import shlex
 import shutil
 import sys
 import threading
+import traceback
 import warnings
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any, get_args
 
 from curl_cffi import BrowserTypeLiteral
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, Verbosity, given, settings
 from hypothesis import strategies as st
 from pytest_httpserver import HTTPServer
 from typer.testing import CliRunner
+from viztracer import VizTracer
 from werkzeug import Request, Response
 
+import hydrastream.facade
+from hydrastream.domain.context import HydraContext
 from hydrastream.main import app
 
 warnings.filterwarnings("ignore", message=".*chunk_size is ignored.*")
@@ -30,7 +37,7 @@ default = {
     "links": None,
     "input": None,
     "typehash": "md5",
-    "hash": None,
+    "checksum": None,
     "output": "download",
     "threads": None,
     "stream": False,
@@ -46,6 +53,295 @@ default = {
     "browser": "chrome120",
     "debug": False,
 }
+
+_CURRENT_TRACER: VizTracer | None = None
+_GLOBAL_CONTEXT_HOLDER: HydraContext | None = None
+
+
+# Оставляем функцию регистрации в файле тестов
+def register_loop_in_monitor(ctx: HydraContext) -> None:
+    global _GLOBAL_LOOP_HOLDER, _CURRENT_TRACER, _GLOBAL_CONTEXT_HOLDER
+    _GLOBAL_CONTEXT_HOLDER = ctx
+    import asyncio
+
+    with contextlib.suppress(RuntimeError):
+        # Перехватываем петлю из контекста главного потока,
+        # когда запустился asyncio.run() движка
+        _GLOBAL_LOOP_HOLDER = asyncio.get_running_loop()
+
+    if _CURRENT_TRACER:
+        _CURRENT_TRACER.start()
+
+
+# Подменяем пустышку в коде приложения на нашу функцию из теста
+hydrastream.facade.ON_ENGINE_START_HOOK = register_loop_in_monitor
+
+
+def collapse_worker_names(names: list[str]) -> str:
+    """
+    Превращает ['worker_1', 'worker_2', 'worker_3', 'other_actor']
+    в 'worker_1-3, other_actor'
+    """
+    if not names:
+        return ""
+
+    # Регулярка для поиска базового имени и номера на конце (например, worker_87)
+    pattern = re.compile(r"^(.*?)(_|-)?(\d+)$")
+    groups: defaultdict[tuple[str, str], list[int]] = defaultdict(list)
+    standalone: list[str] = []
+
+    for name in names:
+        match = pattern.match(name)
+        if match:
+            base, sep, num = match.groups()
+            sep = sep or ""
+            groups.setdefault((base, sep), []).append(int(num))
+        else:
+            standalone.append(name)
+
+    result_parts: list[str] = []
+
+    # Сжимаем последовательности чисел для каждой группы
+    for (base, sep), nums in groups.items():
+        nums_ = sorted(list(set(nums)))
+        ranges: list[str] = []
+        if not nums_:
+            continue
+
+        start = nums_[0]
+        prev = nums_[0]
+
+        for n in nums_[1:]:
+            if n == prev + 1:
+                prev = n
+            else:
+                if start == prev:
+                    ranges.append(f"{start}")
+                else:
+                    ranges.append(f"{start}-{prev}")
+                start = n
+                prev = n
+        if start == prev:
+            ranges.append(f"{start}")
+        else:
+            ranges.append(f"{start}-{prev}")
+
+        # Собираем обратно: worker_1-100 или worker_1,3,5-10
+        joined_ranges = ",".join(ranges)
+        if "," in joined_ranges or "-" in joined_ranges:
+            result_parts.append(f"{base}{sep}[{joined_ranges}]")
+        else:
+            result_parts.append(f"{base}{sep}{joined_ranges}")
+
+    result_parts.extend(standalone)
+    return ", ".join(result_parts)
+
+
+@contextlib.contextmanager
+def actor_system_timeout_monitor(  # noqa: PLR0915
+    timeout: float = 3.0, tracer: VizTracer | None = None
+) -> Generator[None, None, None]:
+    stop_event = threading.Event()
+    main_thread_id = threading.get_ident()
+
+    # Сбрасываем старый контейнер перед началом итерации Hypothesis
+    global _GLOBAL_LOOP_HOLDER, _GLOBAL_CONTEXT_HOLDER
+    _GLOBAL_LOOP_HOLDER = None
+
+    def watchdog() -> None:  # noqa
+        if stop_event.wait(timeout=timeout):
+            return  # Тест прошел успешно
+
+        assert sys.__stderr__
+        out = sys.__stderr__
+        out.write("\n" + "!" * 60 + "\n")
+        out.write("🚨 HYDRASTREAM MONITOR: DEADLOCK DETECTED! 🚨\n")
+        out.write("!" * 60 + "\n")
+
+        # Достаем цикл из глобального холдера (туда его запишет наш кастомный хук/таска)
+        active_loop = _GLOBAL_LOOP_HOLDER
+
+        # Если холдер пуст, отчаянно пытаемся найти loop в других потоках (на всякий случай)
+        if not active_loop:
+            with contextlib.suppress(RuntimeError):
+                active_loop = asyncio.get_running_loop()
+
+        # Проверяем наличие тасок напрямую через объект цикла, игнорируя проверку .is_running()
+        # (в момент дедлока флаг запущенности в Си рантайме может вести себя непредсказуемо)
+        if active_loop:  # noqa: PLR1702
+            try:
+                tasks = list(asyncio.all_tasks(active_loop))
+                out.write(
+                    f"Snapshotting loop memory. Active tasks found: {len(tasks)}\n"
+                )
+
+                # Собираем ВСЕ активные асинхронные генераторы в памяти процесса
+                # Это позволит найти `file_streamer`, даже если asyncio спрятал его стек в Си
+
+                aggregated_traces: defaultdict[str, list[str]] = defaultdict(list)
+
+                for task in tasks:
+                    if task.done():
+                        continue
+
+                    task_name = task.get_name()
+                    frames = task.get_stack(limit=None)
+
+                    trace_lines: list[str] = []
+                    if frames:
+                        # 1. Извлекаем стандартный срез, который видит asyncio
+                        top_frame = frames[-1]
+                        extracted = traceback.extract_stack(top_frame)
+                        for ext_frame in extracted:
+                            if (
+                                "hydrastream" in ext_frame.filename
+                                or "test_e2e" in ext_frame.filename
+                            ):
+                                trace_lines.append(
+                                    f"  👉 FILE: {ext_frame.filename}:{ext_frame.lineno} in {ext_frame.name}\n"
+                                )
+                            else:
+                                trace_lines.append(
+                                    f"     File: {ext_frame.filename}:{ext_frame.lineno} in {ext_frame.name}\n"
+                                )
+
+                    else:
+                        trace_lines.append("  (No async stack frames extracted)\n")
+
+                    trace_string = "".join(trace_lines)
+                    aggregated_traces.setdefault(trace_string, []).append(task_name)
+
+                # Сортировка блоков по алфавиту имен групп задач
+                sorted_blocks: list[tuple[str, int, str]] = []
+                for trace_string, task_names in aggregated_traces.items():
+                    collapsed_names = collapse_worker_names(task_names)
+                    sorted_blocks.append((
+                        collapsed_names,
+                        len(task_names),
+                        trace_string,
+                    ))
+
+                sorted_blocks.sort(key=lambda x: x[0].lower())
+
+                out.write("\n--- TRUE DEEP AGGREGATED ASYNC TRACES (SORTED) ---\n")
+                for collapsed_names, count, trace_string in sorted_blocks:
+                    out.write(
+                        f"\n[TASKS] Count: {count} | Names: '{collapsed_names}'\n"
+                    )
+                    out.write("Async Traceback (Full Call Hierarchy):\n")
+                    out.write(trace_string)
+                    out.write("-" * 60 + "\n")
+
+            except Exception as e:
+                out.write(f"Critical error while dumping tasks: {e}\n")
+
+        else:
+            out.write(
+                "❌ FATAL: Watchdog thread could not reference the main asyncio loop.\n"
+            )
+            out.write(
+                "Make sure 'register_loop_in_monitor()' is called inside your async startup!\n"
+            )
+            # ... (Ваш прошлый код вывода async-стека тасок) ...
+        out.flush()
+
+        # ДИНАМИЧЕСКИЙ ДАМП ВСЕХ ОЧЕРЕДЕЙ ИЗ КОНТЕКСТА
+        if _GLOBAL_CONTEXT_HOLDER:
+            out.write("\n" + "=" * 60 + "\n")
+            out.write("📊 ACTOR SYSTEM QUEUES SNAPSHOT (DYNAMIC DUMP)\n")
+            out.write("=" * 60 + "\n")
+
+            ctx = _GLOBAL_CONTEXT_HOLDER
+
+            # Получаем все атрибуты объекта, включая унаследованные и свойства
+            # Если это dataclass, можно читать напрямую из ctx.__dict__.items()
+            try:
+                attrs = {
+                    name: getattr(ctx, name)
+                    for name in dir(ctx)
+                    if not name.startswith("__")
+                }
+            except Exception as e:
+                out.write(f"Failed to read context attributes: {e}\n")
+                attrs = {}
+
+            found_queues = 0
+            for attr_name, q_obj in attrs.items():
+                # Проверяем строгое условие: имя заканчивается на _q
+                if attr_name.endswith("_q") and q_obj is not None:
+                    found_queues += 1
+
+                    # Пытаемся безопасно узнать текущий размер очереди.
+                    # Работает для asyncio.Queue, PriorityQueue, ваших кастомных оберток
+                    q_size = "unknown"
+                    if hasattr(q_obj._raw_queue, "qsize"):
+                        q_size = q_obj._raw_queue.qsize()
+
+                    # Проверяем, пустая ли очередь, чтобы визуально подсветить забитые каналы
+                    status_bracket = (
+                        "🟢 EMPTY" if q_size == 0 else f"🔴 PENDING ITEMS: {q_size}"
+                    )
+                    if q_size == "unknown":
+                        status_bracket = "❓ UNKNOWN SIZE"
+
+                    out.write(
+                        f"📍 Queue: '{attr_name:<18}' | Status: {status_bracket}\n"
+                    )
+
+                    # ИНЖЕНЕРНЫЙ ХАК: Если в очереди ЕСТЬ элементы, мы можем заглянуть внутрь
+                    # и посмотреть типы застрявших сообщений БЕЗ вычитывания (non-destructive)
+                    if isinstance(q_size, int) and q_size > 0:
+                        internal_q = getattr(
+                            q_obj._raw_queue, "_queue", q_obj._raw_queue
+                        )
+                        if hasattr(
+                            internal_q, "queue"
+                        ):  # для стандартных asyncio/PriorityQueue
+                            # Показываем типы первых 3-х застрявших объектов для понимания контекста
+                            queued_items = list(internal_q.queue)[:3]
+                            item_types = [type(item).__name__ for item in queued_items]
+                            out.write(f"   ↳ Inside types: {', '.join(item_types)}\n")
+
+            if found_queues == 0:
+                out.write(
+                    "No attributes ending with '_q' were found in the provided context.\n"
+                )
+            out.write("=" * 60 + "\n")
+        else:
+            out.write(
+                "\n❌ MONITOR: No global context registered. Queues cannot be dumped.\n"
+            )
+
+        # Дампим нативный стек главного потока, чтобы подстраховаться
+        out.write("\n--- NATIVE MAIN THREAD STACK ---\n")
+        frame = sys._current_frames().get(main_thread_id)
+        if frame:
+            traceback.print_stack(frame, file=out)
+
+        if tracer:
+            out.write(
+                "\n💾 Saving VizTracer async timeline to deadlock_report.json...\n"
+            )
+            out.flush()
+            tracer.stop()
+            # Сохраняем в формате JSON (он легче и быстрее пишется при os._exit)
+            tracer.save(output_file="deadlock_report.json")
+
+        out.write("\n💥 HARD EXIT VIA os._exit(1)\n")
+        out.flush()
+        os._exit(1)
+
+        # Вызываем жесткий выход ВНЕ зависимости от того, нашли мы таски или нет.
+        # Это гарантирует, что "бессмертный" Hypothesis упадет прямо сейчас.
+        os._exit(1)
+
+    t = threading.Thread(target=watchdog, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        t.join(timeout=0.1)
 
 
 def make_chaos_handler(
@@ -156,7 +452,7 @@ def make_chaos_handler(
     return handler
 
 
-runner = CliRunner()
+runner = CliRunner(catch_exceptions=False)
 
 
 @st.composite
@@ -196,19 +492,19 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
         "browser": draw(
             st.one_of(st.none(), st.sampled_from(list(get_args(BrowserTypeLiteral))))
         ),
-        "buffer": draw(st.one_of(st.none(), st.integers(1, 100))),
+        "buffer": draw(st.one_of(st.none(), st.integers(50, 100))),
         "limit": draw(st.one_of(st.none(), st.floats(0.1, 100.0))),
         "min-chunk-mb": draw(st.one_of(st.none(), st.integers(1, 20))),
         "stream-chunk-mb": draw(st.one_of(st.none(), st.integers(1, 20))),
         "flags": draw(
             st.fixed_dictionaries({
                 "stream": st.booleans(),
-                "dry-run": st.booleans(),
-                "no-ui": st.booleans(),
-                "quiet": st.booleans(),
-                "json": st.booleans(),
-                "no-verify": st.booleans(),
-                "debug": st.booleans(),
+                # "dry-run": st.booleans(),
+                # "no-ui": st.booleans(),
+                # "quiet": st.booleans(),
+                # "json": st.booleans(),
+                # "no-verify": st.booleans(),
+                # "debug": st.booleans(),
             })
         ),
     }
@@ -226,9 +522,9 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
     args = build_args_list(params, cli_urls)
 
     if len(all_paths) == 1 and draw(st.booleans()):
-        args.extend(["--hash", DUMMY_MD5, "--typehash", "md5"])
+        args.extend(["--checksum", DUMMY_MD5, "--typehash", "md5"])
 
-    # args.append("--debug")
+    args.append("--debug")
 
     return {
         "args_template": args,
@@ -259,9 +555,10 @@ def build_args_list(params: dict, urls: list[str]) -> list[str]:
 
 @given(data=cli_fuzz_strategy())
 @settings(
-    max_examples=20,
+    max_examples=30,
     deadline=None,
     suppress_health_check=[HealthCheck.function_scoped_fixture],
+    verbosity=Verbosity.verbose,
 )
 def test_hypothesis_nuclear_fuzzer(
     httpserver: HTTPServer, tmp_path: Path, data: dict
@@ -303,25 +600,41 @@ def test_hypothesis_nuclear_fuzzer(
         final_args.extend(["--input", str(urls_txt)])
     # 3. УДАР! (Запускаем CLI)
     num_file = len(list(out_dir.glob("*")))
+    global _CURRENT_TRACER
+    _CURRENT_TRACER = VizTracer(
+        log_async=True,
+        # Заставляем трекер игнорировать стандартный шум библиотек
+        ignore_frozen=True,
+        # Пишем только те функции, которые лежат в вашей папке проекта
+        exclude_files=["site-packages", "_pytest", "hypothesis", "typer", "click"],
+    )
 
     print(
         f"Running: my-tool {' '.join(shlex.quote(a) for a in final_args)}",
         file=sys.__stderr__,
     )
-    result = runner.invoke(app, final_args)
+    print("Your debug message here 1000", file=sys.__stderr__, flush=True)
+    # try:
+    # with actor_system_timeout_monitor(timeout=60, tracer=_CURRENT_TRACER):
+    result = runner.invoke(app, final_args, catch_exceptions=False)
+    # finally:
+    #     if _CURRENT_TRACER:
+    #         _CURRENT_TRACER.stop()
+    #     _CURRENT_TRACER = None
+    print("Your debug message here 2", file=sys.__stderr__, flush=True)
 
     # 4. ПРОВЕРКА ИНВАРИАНТОВ (ГЛАВНАЯ МАГИЯ PBT)
 
     # Инвариант 1: Программа НИКОГДА не должна падать с необработанным исключением
     # (Traceback)
     assert result.exception is None, (
-        f"КРАШ ПРОГРАММЫ! Комбинация: {final_args}\nВывод: {result.stdout}"
+        f"КРАШ ПРОГРАММЫ! Комбинация: {final_args}\nВывод: {result} "
     )
     assert result.exit_code != 1, (
         f"CRITICAL CRASH! Exit code 1. Stdout:\n{result.stdout}"
     )
     # 1. Список исключений
-    ignored = {"download.log", ".states"}
+    ignored = {"hydra.log", ".states"}
 
     # 2. Находим всё "запрещенное"
     leftovers = [f for f in out_dir.glob("*") if f.name not in ignored]

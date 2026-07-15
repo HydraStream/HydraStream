@@ -102,9 +102,10 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
                 file_obj = chunk.file
                 if not file_obj or file_obj.is_failed:
                     return
+                print("Worker 1", file=sys.__stderr__, flush=True)
 
                 await self._process_chunk(chunk)
-
+                print("Worker 2", file=sys.__stderr__, flush=True)
                 if not chunk.is_finished:
                     self.ui.log(
                         f"Truncated read for {chunk.file.actual_filename}. "
@@ -113,12 +114,13 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
                         throttle_key="truncated_read",
                         throttle_sec=2.0,
                     )
-
+                    print("Worker 3", file=sys.__stderr__, flush=True)
                     await self._requeue_chunk(chunk, delay_range=(0.1, 1.0))
 
                     return
-
+                print("Worker 4", file=sys.__stderr__, flush=True)
                 await self._file_done(chunk)
+                print("Worker 5", file=sys.__stderr__, flush=True)
 
             case _ as unreachable:
                 await super()._handle_msg(unreachable)

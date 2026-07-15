@@ -24,6 +24,7 @@ from hydrastream.exceptions import (
     HydraError,
     InvalidParameterError,
     LogStatus,
+    StreamError,
     ValidationError,
 )
 from hydrastream.facade import HydraDaemon
@@ -194,7 +195,7 @@ async def _stream_download_tasks(
 ) -> None:
     assert sys.__stdout__ is not None
     is_terminal = sys.__stdout__.isatty()
-    if is_terminal:
+    if is_terminal:  # noqa: PLR1702
         ui.report(
             InvalidParameterError(
                 param="stream",
@@ -222,9 +223,12 @@ async def _stream_download_tasks(
             )
         if debug:
             for i in tasks:
-                if file_stream := await daemon.get_stream(i):
-                    async for _ in file_stream:
-                        pass
+                try:
+                    if file_stream := await daemon.get_stream(i):
+                        async for _ in file_stream:
+                            pass
+                except StreamError as e:
+                    ui.report(e)
     else:
         loop = asyncio.get_running_loop()
 
@@ -234,10 +238,17 @@ async def _stream_download_tasks(
 
         for i in tasks:
             if file_stream := await daemon.get_stream(i):
-                print("Your debug message here -11", file=sys.__stderr__, flush=True)
-                async for chunk in file_stream:
-                    await loop.run_in_executor(None, _blocking_write, chunk)
-                print("Your debug message here -12", file=sys.__stderr__, flush=True)
+                try:
+                    print(
+                        "Your debug message here -11", file=sys.__stderr__, flush=True
+                    )
+                    async for chunk in file_stream:
+                        await loop.run_in_executor(None, _blocking_write, chunk)
+                    print(
+                        "Your debug message here -12", file=sys.__stderr__, flush=True
+                    )
+                except StreamError as e:
+                    ui.report(e)
 
 
 async def async_main(  # noqa
