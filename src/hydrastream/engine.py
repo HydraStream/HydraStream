@@ -134,6 +134,7 @@ def bootstrap_engine(  # noqa
         ui=ctx.ui,
         fs=ctx.fs,
         is_stream=ctx.config.is_stream,
+        is_dru_run=ctx.config.dry_run,
         is_debug=ctx.config.debug,
     )
 
@@ -260,20 +261,24 @@ def bootstrap_engine(  # noqa
 
     async def session_killer() -> None:
         try:
+            print("Engine start killer", file=sys.__stderr__, flush=True)
             await ctx.session_killer.wait()
         finally:
             await ctx.net.close()
+            print("Engine killer", file=sys.__stderr__, flush=True)
 
     tg.create_task(session_killer(), name="stage:killer")
 
     async def stage_0_stating() -> None:
-
+        print("Engine 0 start", file=sys.__stderr__, flush=True)
         await stater.run()
+        print("Engine 0", file=sys.__stderr__, flush=True)
 
     tg.create_task(stage_0_stating(), name="stage:stater")
 
     async def stage_1_resolving() -> None:
         try:
+            print("Engine 1 start", file=sys.__stderr__, flush=True)
             async with asyncio.TaskGroup() as stage_tg:
                 for i, resolver in enumerate(resolvers):
                     stage_tg.create_task(resolver.run(), name=f"resolver_{i}")
@@ -283,7 +288,9 @@ def bootstrap_engine(  # noqa
                 ctx.file_limit_q.send_poison_pills_nowait(count=1)
             else:
                 ctx.state_q.send_poison_pills_nowait(count=1)
+            print("Engine 1", file=sys.__stderr__, flush=True)
 
+    print("Engine 1 start", file=sys.__stderr__, flush=True)
     tg.create_task(stage_1_resolving(), name="stage:resolvers")
 
     if (

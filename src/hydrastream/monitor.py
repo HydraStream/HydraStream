@@ -70,7 +70,8 @@ class BaseMonitor(MonitorBackend, ABC):
     _log_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     """Чисто статистика и счетчики загрузки."""
-
+    _has_hash: int = 0
+    _has_ranges: int = 0
     _start_time: float = 0.0
     _total_bytes: int = 0
     _download_bytes: int = 0
@@ -310,11 +311,11 @@ class BaseMonitor(MonitorBackend, ABC):
             f.create_chunks()
             str_size = format_size(f.meta.content_length)
             if self.is_verify and f.meta.expected_checksum:
-                self.has_hash += 1
+                self._has_hash += 1
 
             if f.meta.supports_ranges:
                 ranges = "✅"
-                self.has_ranges += 1
+                self._has_ranges += 1
             else:
                 ranges = "❌ (Fallback to 1 thread)"
 
@@ -353,7 +354,7 @@ class BaseMonitor(MonitorBackend, ABC):
                 )
             else:
                 self.log(
-                    f"\nDisk space check passed ({format_size(free_space)} free).[/]\n",
+                    f"\nDisk space check passed ({format_size(free_space)} free).\n",
                     status=LogStatus.SUCCESS,
                 )
 
@@ -493,9 +494,6 @@ class GradientPercent(ProgressColumn):
 class RichMonitor(BaseMonitor):
     is_dry_run: bool = False
 
-    has_hash: int = 0
-    has_ranges: int = 0
-
     dynamic_title: str = ""
 
     refresh_per_second: int = 10
@@ -505,7 +503,6 @@ class RichMonitor(BaseMonitor):
     active_files: set[int] = field(default_factory=set[int])
 
     refresh: asyncio.Task[None] = field(init=False)
-    progress: Progress = field(init=False)
     rich: Progress = field(init=False)
     live: Live = field(init=False)
 
@@ -733,7 +730,7 @@ class RichMonitor(BaseMonitor):
             f"{format_size(self._download_bytes)}"
             + f"/{format_size(self._total_bytes)}"
         )
-        if not self._is_running or self._is_cancelled:
+        if (not self._is_running or self._is_cancelled) and not self.is_dry_run:
             grid = Table.grid(expand=True)
             grid.add_column()
             grid.add_column(justify="center")
@@ -763,11 +760,11 @@ class RichMonitor(BaseMonitor):
             if self.is_verify:
                 grid.add_row(
                     "[white]Hash Found:",
-                    f"[bold yellow]{self.has_hash}/{self._total_files}[/]",
+                    f"[bold yellow]{self._has_hash}/{self._total_files}[/]",
                 )
             grid.add_row(
                 "[white]Ranges:",
-                f"[bold magenta]{self.has_ranges}/{self._total_files}[/]",
+                f"[bold magenta]{self._has_ranges}/{self._total_files}[/]",
             )
             return Panel(
                 grid,

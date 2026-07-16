@@ -499,11 +499,11 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
         "flags": draw(
             st.fixed_dictionaries({
                 "stream": st.booleans(),
-                # "dry-run": st.booleans(),
-                # "no-ui": st.booleans(),
-                # "quiet": st.booleans(),
-                # "json": st.booleans(),
-                # "no-verify": st.booleans(),
+                "dry-run": st.booleans(),
+                "no-ui": st.booleans(),
+                "quiet": st.booleans(),
+                "json": st.booleans(),
+                "no-verify": st.booleans(),
                 # "debug": st.booleans(),
             })
         ),
@@ -555,7 +555,7 @@ def build_args_list(params: dict, urls: list[str]) -> list[str]:
 
 @given(data=cli_fuzz_strategy())
 @settings(
-    max_examples=30,
+    max_examples=100,
     deadline=None,
     suppress_health_check=[HealthCheck.function_scoped_fixture],
     verbosity=Verbosity.verbose,
@@ -600,27 +600,32 @@ def test_hypothesis_nuclear_fuzzer(
         final_args.extend(["--input", str(urls_txt)])
     # 3. УДАР! (Запускаем CLI)
     num_file = len(list(out_dir.glob("*")))
-    global _CURRENT_TRACER
-    _CURRENT_TRACER = VizTracer(
-        log_async=True,
-        # Заставляем трекер игнорировать стандартный шум библиотек
-        ignore_frozen=True,
-        # Пишем только те функции, которые лежат в вашей папке проекта
-        exclude_files=["site-packages", "_pytest", "hypothesis", "typer", "click"],
-    )
+    debug = True
+    if debug:
+        global _CURRENT_TRACER
+        _CURRENT_TRACER = VizTracer(
+            log_async=True,
+            # Заставляем трекер игнорировать стандартный шум библиотек
+            ignore_frozen=True,
+            # Пишем только те функции, которые лежат в вашей папке проекта
+            exclude_files=["site-packages", "_pytest", "hypothesis", "typer", "click"],
+        )
 
     print(
         f"Running: my-tool {' '.join(shlex.quote(a) for a in final_args)}",
         file=sys.__stderr__,
     )
     print("Your debug message here 1000", file=sys.__stderr__, flush=True)
-    # try:
-    # with actor_system_timeout_monitor(timeout=60, tracer=_CURRENT_TRACER):
-    result = runner.invoke(app, final_args, catch_exceptions=False)
-    # finally:
-    #     if _CURRENT_TRACER:
-    #         _CURRENT_TRACER.stop()
-    #     _CURRENT_TRACER = None
+    if debug:
+        try:
+            with actor_system_timeout_monitor(timeout=60, tracer=_CURRENT_TRACER):
+                result = runner.invoke(app, final_args, catch_exceptions=False)
+        finally:
+            if _CURRENT_TRACER:
+                _CURRENT_TRACER.stop()
+            _CURRENT_TRACER = None
+    else:
+        result = runner.invoke(app, final_args, catch_exceptions=False)
     print("Your debug message here 2", file=sys.__stderr__, flush=True)
 
     # 4. ПРОВЕРКА ИНВАРИАНТОВ (ГЛАВНАЯ МАГИЯ PBT)

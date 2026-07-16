@@ -31,6 +31,7 @@ from hydrastream.interfaces import (
 
 class UIConfig(BaseSettings):
     is_verify: bool = True
+    is_dry_run: bool = False
     quiet: bool = True
     no_ui: bool = False
     json_logs: bool = False

@@ -27,7 +27,7 @@ from hydrastream.messages.state import (
     TaskStatus,
 )
 
-ON_ENGINE_START_HOOK: Callable[[HydraContext], Any] = lambda: None
+ON_ENGINE_START_HOOK: Callable[[HydraContext], Any] = lambda x: None
 
 
 @hydra_dataclass
@@ -63,7 +63,7 @@ class HydraDaemon:
         exc_tb: TracebackType | None,
     ) -> None:
 
-        await self.stop(timeout=5.0)
+        await self.stop(timeout=100.0)
 
     def start(self) -> None:
         """Включает завод. Он работает в фоне и ждет задач."""
@@ -159,16 +159,20 @@ class HydraDaemon:
 
             try:
                 async with asyncio.TaskGroup() as tg:
+                    reply_future = None
+
+                    if self._ctx.config.dry_run:
+                        loop = asyncio.get_running_loop()
+                        reply_future = loop.create_future()
+
+                        await self._ctx.state_q.send_data(
+                            GetSnapshotCmd(reply_to=reply_future)
+                        )
                     bootstrap_engine(self._ctx, tg)
 
-                if self._ctx.config.dry_run:
-                    files = await ask(
-                        inbox=self._ctx.state_q,
-                        msg_factory=GetSnapshotCmd.create_request,
-                        timeout=5.0,
-                        sort_key=(-1,),
-                    )
-                    self._ctx.ui.dry_run(files, self._ctx.config.output_dir)
+                    if self._ctx.config.dry_run and reply_future is not None:
+                        files = await reply_future
+                        self._ctx.ui.dry_run(files, self._ctx.config.output_dir)
 
             except* Exception as eg:
                 self._ctx.ui.log(
@@ -199,7 +203,7 @@ class HydraDaemon:
         finally:
             await teardown_engine(self._ctx)
 
-    async def stop(self, timeout: float = 10.0) -> None:
+    async def stop(self, timeout: float = 100.0) -> None:
         """Останавливает завод изящно с ограничением по времени."""
         if self._engine_task is None or self._is_stopping:
             return
@@ -210,8 +214,11 @@ class HydraDaemon:
         try:
             async with asyncio.timeout(timeout):
                 # 1. Запускаем каскад смерти через пилюлю фидеру
+                print("Engine stop", file=sys.__stderr__, flush=True)
                 self._ctx.links_q.send_poison_pills_nowait(count=self._ctx.resolvers)
+                print("Engine stop pill", file=sys.__stderr__, flush=True)
                 self._ctx.session_killer.set()
+                print("Engine stop killer", file=sys.__stderr__, flush=True)
 
                 # 2. Ждем штатного закрытия, но не вечно (защита от зависания)
                 await asyncio.shield(self._engine_task)

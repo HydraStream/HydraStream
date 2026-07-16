@@ -34,6 +34,7 @@ from hydrastream.messages.traffic import CheckpointReachedCmd, ThrottlerMsg
 @hydra_dataclass
 class StateKeeperActor(BaseActor[StateKeeperMsg]):
     is_stream: bool
+    is_dru_run: bool
 
     throttler_output: ActorFifoQueue[ThrottlerMsg | PoisonPill]
 
@@ -52,6 +53,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
     _finished_results: dict[int, TaskStatus] = field(
         default_factory=dict[int, TaskStatus]
     )
+    _waited_dru_run: asyncio.Future[dict[int, File]] = field(init=False)
     size_history_result: int = 50
 
     _global_bytes: int = 0
@@ -77,6 +79,15 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                     for fut in self._waiting_stream.pop(fid):
                         if not fut.cancelled():
                             fut.set_result(fobj)
+
+                if self.is_dru_run:
+                    trace = self._traces[fid]
+                    result = trace.create_task_status
+                    self._finished_results[fid] = result
+
+                    for fut in self._result_waiters.pop(fid, []):
+                        if not fut.cancelled():
+                            fut.set_result(result)
 
                 if self.is_debug:
                     self.ui.log(
@@ -145,6 +156,9 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                     fut.set_exception(ValueError(f"Unknown file_id: {fid}"))
 
             case GetSnapshotCmd(reply_to=reply_future):
+                if self.is_dru_run:
+                    self._waited_dru_run = reply_future
+                    return
                 if not reply_future.cancelled():
                     snaphot: dict[int, File] = {}
                     for k, v in self._traces.items():
@@ -204,7 +218,16 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
             for fut in fut_list:
                 if not fut.done():
                     fut.cancel()
+
         for fut_list in self._result_waiters.values():
             for fut in fut_list:
                 if not fut.done():
                     fut.cancel()
+
+        if self.is_dru_run and not self._waited_dru_run.cancelled():
+            snaphot: dict[int, File] = {}
+            for k, v in self._traces.items():
+                if isinstance(v.file_obj, File):
+                    snaphot[k] = v.file_obj
+
+            self._waited_dru_run.set_result(snaphot)

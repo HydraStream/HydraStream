@@ -138,8 +138,10 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
 
         # ВЫЗЫВАЕМ ХУК (Стрим проигнорирует, Диск - обновит UI)
         await self._on_file_registered(file_obj)
-
-        await self.files_outbox.send_data(sort_key=(file_obj.meta.id,), data=file_obj)
+        if not self.is_dry_run:
+            await self.files_outbox.send_data(
+                sort_key=(file_obj.meta.id,), data=file_obj
+            )
 
     @abstractmethod
     async def _prepare_file_object(

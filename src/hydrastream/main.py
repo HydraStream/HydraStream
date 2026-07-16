@@ -297,6 +297,7 @@ async def async_main(  # noqa
     print("Your debug message here -1", file=sys.__stderr__, flush=True)
     ui_config = UIConfig(
         is_verify=verify,
+        is_dry_run=dry_run,
         quiet=quiet,
         no_ui=no_ui,
         json_logs=json_logs,
@@ -350,7 +351,8 @@ async def async_main(  # noqa
                 )
             else:
                 for i in tasks:
-                    await daemon.wait_for_file(i)
+                    x = await daemon.wait_for_file(i)
+                    print(x, file=sys.__stderr__, flush=True)
 
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("Your debug message here -101", file=sys.__stderr__, flush=True)

@@ -87,7 +87,7 @@ class HydraContext:
 
     workers: int = field(init=False)
     start_works: int = field(init=False)
-    resolvers: int = 1
+    resolvers: int = 10
 
     def __post_init__(self) -> None:
 
@@ -206,5 +206,5 @@ def create_monitor(config: UIConfig) -> MonitorBackend:
     elif config.no_ui:
         ui = PlainMonitor(**base_resolver_kwargs)
     else:
-        ui = RichMonitor(**base_resolver_kwargs)
+        ui = RichMonitor(**base_resolver_kwargs, is_dry_run=config.is_dry_run)
     return ui
