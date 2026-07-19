@@ -53,9 +53,13 @@ async def file_streamer(  # noqa
             print(f"expected_offset {expected_offset}", file=sys.__stderr__, flush=True)
             await credit_outbox.send_data(len(data))
 
-        print(f"total_size {total_size}", file=sys.__stderr__, flush=True)
-
     try:
+        print(
+            f"total_size {total_size} queue id {id(file_obj.stream_q)} url:  {file_obj.meta.url}",
+            file=sys.__stderr__,
+            flush=True,
+        )
+
         while expected_offset < total_size:
             msg = await file_obj.stream_q.get()
 
@@ -104,7 +108,9 @@ async def file_streamer(  # noqa
         buffer.clear()
 
         await reg_events_outbox.send_data(FileFinishedCmd(file_id=file_obj.meta.id))
+        print("Your debug message here -14", file=sys.__stderr__, flush=True)
         await file_limit_outbox.send_data(FileCompleted())
+        print("Your debug message here -15", file=sys.__stderr__, flush=True)
 
 
 def _verify_stream(

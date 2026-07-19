@@ -291,11 +291,17 @@ class StreamDownloadWorker(BaseDownloadWorker):
             finally:
                 if self.throttler_outbox is not None:
                     await self.throttler_outbox.send_data(RemoveStreamCmd(stream=r))
-
+                print("Worker 11", file=sys.__stderr__, flush=True)
                 if buffer_list:
+                    print("Worker 12", file=sys.__stderr__, flush=True)
                     await chunk.file.stream_q.send_data(
                         sort_key=(chunk.current_pos,),
                         data=StreamChunk(start=chunk.current_pos, data=buffer_list),
+                    )
+                    print(
+                        f"Worker 13, buffer {current_buffer_size}, queue id {id(chunk.file.stream_q)} url:  {chunk.file.meta.url}",
+                        file=sys.__stderr__,
+                        flush=True,
                     )
                     chunk.current_pos += current_buffer_size
 

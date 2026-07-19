@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import asyncio
+import sys
 from abc import ABC, abstractmethod
 from typing import assert_never, final, override
 
@@ -51,8 +52,18 @@ class BaseFileDispatcher(BaseActor[File], ABC):
                     if isinstance(msg_, (StandardPill, TerminalPill)):
                         raise GracefulShutdownError
                     self._current_files -= 1
+                    print(
+                        f"_current_files {self._current_files}, limit {self.limit}",
+                        file=sys.__stderr__,
+                        flush=True,
+                    )
 
                 self._current_files += 1
+                print(
+                    f"_current_files {self._current_files}",
+                    file=sys.__stderr__,
+                    flush=True,
+                )
 
                 await self._prepare_file(file_obj)
 

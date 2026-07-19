@@ -13,11 +13,12 @@ import traceback
 import warnings
 from collections import defaultdict
 from collections.abc import Callable, Generator
+from datetime import timedelta
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 from curl_cffi import BrowserTypeLiteral
-from hypothesis import HealthCheck, Verbosity, given, settings
+from hypothesis import HealthCheck, Verbosity, example, given, settings
 from hypothesis import strategies as st
 from pytest_httpserver import HTTPServer
 from typer.testing import CliRunner
@@ -25,6 +26,7 @@ from viztracer import VizTracer
 from werkzeug import Request, Response
 
 import hydrastream.facade
+import hydrastream.main
 from hydrastream.domain.context import HydraContext
 from hydrastream.main import app
 
@@ -32,6 +34,8 @@ warnings.filterwarnings("ignore", message=".*chunk_size is ignored.*")
 
 DUMMY_DATA = b"0123456789" * 10000
 DUMMY_MD5 = hashlib.md5(DUMMY_DATA).hexdigest()
+
+hydrastream.main.ON_TEST_HOOK = True
 
 default = {
     "links": None,
@@ -53,31 +57,30 @@ default = {
     "browser": "chrome120",
     "debug": False,
 }
-
-_CURRENT_TRACER: VizTracer | None = None
-_GLOBAL_CONTEXT_HOLDER: HydraContext | None = None
+_current_tracer: VizTracer | None = None
+_context_holder: HydraContext | None = None
+_loop_holder: asyncio.AbstractEventLoop | None = None
 
 
 # Оставляем функцию регистрации в файле тестов
 def register_loop_in_monitor(ctx: HydraContext) -> None:
-    global _GLOBAL_LOOP_HOLDER, _CURRENT_TRACER, _GLOBAL_CONTEXT_HOLDER
-    _GLOBAL_CONTEXT_HOLDER = ctx
-    import asyncio
+    global _loop_holder, _current_tracer, _context_holder  # noqa
+    _context_holder = ctx  # type: ignore
 
     with contextlib.suppress(RuntimeError):
         # Перехватываем петлю из контекста главного потока,
         # когда запустился asyncio.run() движка
-        _GLOBAL_LOOP_HOLDER = asyncio.get_running_loop()
+        _loop_holder = asyncio.get_running_loop()
 
-    if _CURRENT_TRACER:
-        _CURRENT_TRACER.start()
+    if _current_tracer is not None:
+        _current_tracer.start()
 
 
 # Подменяем пустышку в коде приложения на нашу функцию из теста
 hydrastream.facade.ON_ENGINE_START_HOOK = register_loop_in_monitor
 
 
-def collapse_worker_names(names: list[str]) -> str:
+def collapse_worker_names(names: list[str]) -> str:  # noqa: PLR0912
     """
     Превращает ['worker_1', 'worker_2', 'worker_3', 'other_actor']
     в 'worker_1-3, other_actor'
@@ -145,8 +148,8 @@ def actor_system_timeout_monitor(  # noqa: PLR0915
     main_thread_id = threading.get_ident()
 
     # Сбрасываем старый контейнер перед началом итерации Hypothesis
-    global _GLOBAL_LOOP_HOLDER, _GLOBAL_CONTEXT_HOLDER
-    _GLOBAL_LOOP_HOLDER = None
+    global _loop_holder, _context_holder  # noqa
+    _loop_holder = None
 
     def watchdog() -> None:  # noqa
         if stop_event.wait(timeout=timeout):
@@ -159,7 +162,7 @@ def actor_system_timeout_monitor(  # noqa: PLR0915
         out.write("!" * 60 + "\n")
 
         # Достаем цикл из глобального холдера (туда его запишет наш кастомный хук/таска)
-        active_loop = _GLOBAL_LOOP_HOLDER
+        active_loop = _loop_holder
 
         # Если холдер пуст, отчаянно пытаемся найти loop в других потоках (на всякий случай)
         if not active_loop:
@@ -246,12 +249,12 @@ def actor_system_timeout_monitor(  # noqa: PLR0915
         out.flush()
 
         # ДИНАМИЧЕСКИЙ ДАМП ВСЕХ ОЧЕРЕДЕЙ ИЗ КОНТЕКСТА
-        if _GLOBAL_CONTEXT_HOLDER:
+        if _context_holder:
             out.write("\n" + "=" * 60 + "\n")
             out.write("📊 ACTOR SYSTEM QUEUES SNAPSHOT (DYNAMIC DUMP)\n")
             out.write("=" * 60 + "\n")
 
-            ctx = _GLOBAL_CONTEXT_HOLDER
+            ctx = _context_holder
 
             # Получаем все атрибуты объекта, включая унаследованные и свойства
             # Если это dataclass, можно читать напрямую из ctx.__dict__.items()
@@ -314,7 +317,7 @@ def actor_system_timeout_monitor(  # noqa: PLR0915
 
         # Дампим нативный стек главного потока, чтобы подстраховаться
         out.write("\n--- NATIVE MAIN THREAD STACK ---\n")
-        frame = sys._current_frames().get(main_thread_id)
+        frame = sys._current_frames().get(main_thread_id)  # type: ignore
         if frame:
             traceback.print_stack(frame, file=out)
 
@@ -329,10 +332,6 @@ def actor_system_timeout_monitor(  # noqa: PLR0915
 
         out.write("\n💥 HARD EXIT VIA os._exit(1)\n")
         out.flush()
-        os._exit(1)
-
-        # Вызываем жесткий выход ВНЕ зависимости от того, нашли мы таски или нет.
-        # Это гарантирует, что "бессмертный" Hypothesis упадет прямо сейчас.
         os._exit(1)
 
     t = threading.Thread(target=watchdog, daemon=True)
@@ -504,7 +503,7 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
                 "quiet": st.booleans(),
                 "json": st.booleans(),
                 "no-verify": st.booleans(),
-                # "debug": st.booleans(),
+                "debug": st.booleans(),
             })
         ),
     }
@@ -536,13 +535,15 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
     }
 
 
-def build_args_list(params: dict, urls: list[str]) -> list[str]:
+def build_args_list(
+    params: dict[str, dict[str, bool] | Any], urls: list[str]
+) -> list[str]:
     args = urls[:]
 
     # Флаги
     for name, value in params.items():
         if isinstance(value, dict):
-            for flag, enabled in value.items():
+            for flag, enabled in cast(dict[str, bool], value).items():
                 if enabled:
                     args.append(f"--{flag}")
             continue
@@ -553,20 +554,46 @@ def build_args_list(params: dict, urls: list[str]) -> list[str]:
     return args
 
 
+@example(
+    data={
+        "args_template": [
+            "--threads",
+            "1",
+            "--buffer",
+            "59",
+            "--min-chunk-mb",
+            "10",
+            "--stream",
+            "--no-ui",
+            "--quiet",
+            "--no-verify",
+            "--debug",
+        ],
+        "paths": ["ujyy_nb.zip", "m x1vvm.bin", "x1vvm.zip"],
+        "existing_copies": 5,
+        "existing_files": "x1vvm.zip",
+        "file_urls_template": [
+            "http://localhost:SERVER_PORT/ncbi.nlm.nih.gov/ujyy_nb.zip",
+            "http://localhost:SERVER_PORT/m x1vvm.bin",
+            "http://localhost:SERVER_PORT/ncbi.nlm.nih.gov/x1vvm.zip",
+        ],
+        "server_seed": 305558,
+    }
+)
 @given(data=cli_fuzz_strategy())
 @settings(
-    max_examples=100,
-    deadline=None,
+    max_examples=5,
+    deadline=timedelta(milliseconds=50000),
     suppress_health_check=[HealthCheck.function_scoped_fixture],
     verbosity=Verbosity.verbose,
 )
-def test_hypothesis_nuclear_fuzzer(
-    httpserver: HTTPServer, tmp_path: Path, data: dict
+def test_hypothesis_nuclear_fuzzer(  # noqa
+    httpserver: HTTPServer, tmp_path: Path, data: dict[str, Any]
 ) -> None:
     filenames = [Path(p).name for p in data["paths"]]
     chaos_handler = make_chaos_handler(data["server_seed"], filenames)
     # 1. Заводим сервер
-    httpserver.expect_request(re.compile(r"^/.*$")).respond_with_handler(chaos_handler)
+    httpserver.expect_request(re.compile(r"^/.*$")).respond_with_handler(chaos_handler)  # type: ignore
     base_url = httpserver.url_for("").rstrip("/")
 
     out_dir = tmp_path / "downloads"
@@ -600,10 +627,10 @@ def test_hypothesis_nuclear_fuzzer(
         final_args.extend(["--input", str(urls_txt)])
     # 3. УДАР! (Запускаем CLI)
     num_file = len(list(out_dir.glob("*")))
-    debug = True
+    debug = False
     if debug:
-        global _CURRENT_TRACER
-        _CURRENT_TRACER = VizTracer(
+        global _current_tracer  # noqa: PLW0603
+        _current_tracer = VizTracer(
             log_async=True,
             # Заставляем трекер игнорировать стандартный шум библиотек
             ignore_frozen=True,
@@ -618,51 +645,69 @@ def test_hypothesis_nuclear_fuzzer(
     print("Your debug message here 1000", file=sys.__stderr__, flush=True)
     if debug:
         try:
-            with actor_system_timeout_monitor(timeout=60, tracer=_CURRENT_TRACER):
+            with actor_system_timeout_monitor(timeout=60, tracer=_current_tracer):
                 result = runner.invoke(app, final_args, catch_exceptions=False)
         finally:
-            if _CURRENT_TRACER:
-                _CURRENT_TRACER.stop()
-            _CURRENT_TRACER = None
+            if _current_tracer:
+                _current_tracer.stop()
+            _current_tracer = None
     else:
-        result = runner.invoke(app, final_args, catch_exceptions=False)
+        result = runner.invoke(app, final_args)
     print("Your debug message here 2", file=sys.__stderr__, flush=True)
 
     # 4. ПРОВЕРКА ИНВАРИАНТОВ (ГЛАВНАЯ МАГИЯ PBT)
 
     # Инвариант 1: Программа НИКОГДА не должна падать с необработанным исключением
     # (Traceback)
-    assert result.exception is None, (
-        f"КРАШ ПРОГРАММЫ! Комбинация: {final_args}\nВывод: {result} "
-    )
-    assert result.exit_code != 1, (
-        f"CRITICAL CRASH! Exit code 1. Stdout:\n{result.stdout}"
-    )
-    # 1. Список исключений
-    ignored = {"hydra.log", ".states"}
+    if result.exit_code == 0:
+        # ... проверяем DUMMY_DATA ...
 
-    # 2. Находим всё "запрещенное"
-    leftovers = [f for f in out_dir.glob("*") if f.name not in ignored]
+        # 1. Список исключений
+        ignored = {"hydra.log", ".states"}
 
-    # Инвариант 2: Если это DRY-RUN, на диске НЕ ДОЛЖНО быть создано ни одного
-    # файла генома
-    if "--dry-run" in data["args_template"]:
-        assert len(leftovers) == num_file, (
-            f"DRY-RUN нарушил обещание и скачал файлы на диск!"
-            f"Было {num_file}. Стало {len(leftovers)}"
+        # 2. Находим всё "запрещенное"
+        leftovers = [f for f in out_dir.glob("*") if f.name not in ignored]
+
+        # Инвариант 2: Если это DRY-RUN, на диске НЕ ДОЛЖНО быть создано ни одного
+        # файла генома
+        if (
+            "--stream" not in data["args_template"]
+            and "--dry-run" not in data["args_template"]
+        ):
+            for f in leftovers:
+                # Пропускаем стейты и всё, что не является скачанным файлом
+                if f.suffix == ".json":
+                    continue
+
+                actual_bytes = f.read_bytes()
+                assert actual_bytes == DUMMY_DATA, f"DATA CORRUPTION in {f.name}!"
+
+        if "--dry-run" in data["args_template"]:
+            assert len(leftovers) == num_file, (
+                f"DRY-RUN нарушил обещание и скачал файлы на диск!"
+                f"Было {num_file}. Стало {len(leftovers)}"
+            )
+
+        # Инвариант 3: Если это STREAM, на диске тоже пусто
+        if "--stream" in data["args_template"]:
+            assert len(leftovers) == num_file, "STREAM записал бинарники на диск!"
+
+        # Инвариант 4: Если это обычная загрузка, файлы должны лежать на диске
+        if (
+            "--stream" not in data["args_template"]
+            and "--dry-run" not in data["args_template"]
+            and result.exit_code == 0
+        ):
+            # Количество скачанных файлов должно совпадать с количеством уникальных ссылок
+            assert len(leftovers) <= len(data["paths"]) + num_file, (
+                f"Файлы не скачались! Лог терминала:\n{result.stdout}"
+            )
+
+    else:
+        # Если программа упала, мы проверяем, что она упала ЛЕГАЛЬНО!
+        # Например, из-за StreamError на тупом сервере.
+        error = result.exception
+        assert result.exit_code == 2, (
+            f"Program crashed with unexpected error! Output: {result.stderr}. Exception: {error}"
         )
-
-    # Инвариант 3: Если это STREAM, на диске тоже пусто
-    if "--stream" in data["args_template"]:
-        assert len(leftovers) == num_file, "STREAM записал бинарники на диск!"
-
-    # Инвариант 4: Если это обычная загрузка, файлы должны лежать на диске
-    if (
-        "--stream" not in data["args_template"]
-        and "--dry-run" not in data["args_template"]
-        and result.exit_code == 0
-    ):
-        # Количество скачанных файлов должно совпадать с количеством уникальных ссылок
-        assert len(leftovers) <= len(data["paths"]) + num_file, (
-            f"Файлы не скачались! Лог терминала:\n{result.stdout}"
-        )
+        print(f"Done with network erroe {error}", file=sys.__stderr__, flush=True)

@@ -30,6 +30,8 @@ from hydrastream.exceptions import (
 from hydrastream.facade import HydraDaemon
 from hydrastream.interfaces import MonitorBackend
 
+ON_TEST_HOOK: bool = False
+
 if sys.platform != "win32":
     try:
         import uvloop
@@ -195,7 +197,7 @@ async def _stream_download_tasks(
 ) -> None:
     assert sys.__stdout__ is not None
     is_terminal = sys.__stdout__.isatty()
-    if is_terminal:  # noqa: PLR1702
+    if is_terminal and not ON_TEST_HOOK:
         ui.report(
             InvalidParameterError(
                 param="stream",
@@ -221,14 +223,6 @@ async def _stream_download_tasks(
                     "since --checksum is provided.",
                 )
             )
-        if debug:
-            for i in tasks:
-                try:
-                    if file_stream := await daemon.get_stream(i):
-                        async for _ in file_stream:
-                            pass
-                except StreamError as e:
-                    ui.report(e)
     else:
         loop = asyncio.get_running_loop()
 
@@ -249,6 +243,7 @@ async def _stream_download_tasks(
                     )
                 except StreamError as e:
                     ui.report(e)
+                    sys.exit(e.exit_code)
 
 
 async def async_main(  # noqa

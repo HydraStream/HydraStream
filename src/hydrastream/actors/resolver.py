@@ -3,6 +3,7 @@
 
 import asyncio
 import random
+import sys
 from abc import ABC, abstractmethod
 from typing import assert_never, final, override
 
@@ -65,14 +66,15 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
         checksum = None
         match msg:
             case LinkData() as data:
+                print("Resolver 1", file=sys.__stderr__, flush=True)
                 meta = await self._fetch_metadata(data.url)
                 filename, total_size, supports_ranges = meta
-
+                print("Resolver 2", file=sys.__stderr__, flush=True)
                 if self.is_verify and not data.checksum:
                     checksum = await self._resolve_hash(
                         data.id, data.url, filename, data.checksum
                     )
-
+                print("Resolver 3", file=sys.__stderr__, flush=True)
                 file_obj = await self._prepare_file_object(
                     data=data,
                     filename=filename,
@@ -80,8 +82,9 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
                     supports_ranges=supports_ranges,
                     checksum=checksum,
                 )
-
+                print("Resolver 4", file=sys.__stderr__, flush=True)
                 await self._register_file(file_obj)
+                print("Resolver 5", file=sys.__stderr__, flush=True)
 
             case _ as unreachable:
                 await super()._handle_msg(unreachable)
@@ -138,10 +141,6 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
 
         # ВЫЗЫВАЕМ ХУК (Стрим проигнорирует, Диск - обновит UI)
         await self._on_file_registered(file_obj)
-        if not self.is_dry_run:
-            await self.files_outbox.send_data(
-                sort_key=(file_obj.meta.id,), data=file_obj
-            )
 
     @abstractmethod
     async def _prepare_file_object(
@@ -307,4 +306,8 @@ class DiskMetadataResolver(BaseMetadataResolver):
         if downloaded - len(chunks) > 0:
             await self.state_outbox.send_data(
                 ProgressDeltaCmd(file_id=file_obj.meta.id, delta_bytes=downloaded)
+            )
+        if not self.is_dry_run:
+            await self.files_outbox.send_data(
+                sort_key=(file_obj.meta.id,), data=file_obj
             )

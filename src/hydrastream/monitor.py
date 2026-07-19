@@ -82,8 +82,8 @@ class BaseMonitor(MonitorBackend, ABC):
     is_debug: bool = False
 
     def __post_init__(self) -> None:
-        if self.is_debug:
-            self._console = Console(stderr=True, file=sys.__stderr__)
+        # if self.is_debug:
+        # self._console = Console(stderr=True, file=sys.__stderr__)
 
         self.log_file = Path(self.log_file).expanduser().resolve()
         self.log_file /= "hydra.log"
@@ -700,7 +700,7 @@ class RichMonitor(BaseMonitor):
             self._files_completed += 1
             self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
 
-    def _make_panel(self) -> Panel | str:
+    def _make_panel(self) -> Panel | str:  # noqa: PLR0914
         if not self.rich.tasks and self._is_running:
             return ""
 

@@ -271,7 +271,8 @@ def bootstrap_engine(  # noqa
 
     async def stage_0_stating() -> None:
         print("Engine 0 start", file=sys.__stderr__, flush=True)
-        await stater.run()
+        async with asyncio.TaskGroup() as stage_tg:
+            stage_tg.create_task(stater.run(), name="stater")
         print("Engine 0", file=sys.__stderr__, flush=True)
 
     tg.create_task(stage_0_stating(), name="stage:stater")
@@ -306,7 +307,8 @@ def bootstrap_engine(  # noqa
 
         async def stage_2_dispatching() -> None:
             try:
-                await dispatcher.run()
+                async with asyncio.TaskGroup() as stage_tg:
+                    stage_tg.create_task(dispatcher.run(), name="dispatcher")
             finally:
                 if not ctx.config.is_stream:
                     ctx.chunks_q.send_poison_pills_nowait(count=ctx.workers)
@@ -322,7 +324,10 @@ def bootstrap_engine(  # noqa
 
             async def stage_3_memory_throttling() -> None:
                 try:
-                    await memory_throttler.run()
+                    async with asyncio.TaskGroup() as stage_tg:
+                        stage_tg.create_task(
+                            memory_throttler.run(), name="memory_throttler"
+                        )
                 finally:
                     ctx.ready_chunks_q.send_poison_pills_nowait(count=ctx.workers)
                     ctx.sleep_signals_q.send_poison_pills_nowait(count=ctx.workers)
@@ -368,7 +373,8 @@ def bootstrap_engine(  # noqa
 
             async def stage_6_writing() -> None:
                 try:
-                    await writer.run()
+                    async with asyncio.TaskGroup() as stage_tg:
+                        stage_tg.create_task(writer.run(), name="writer")
                 finally:
                     ctx.state_q.send_poison_pills_nowait(count=1)
 

@@ -27,7 +27,7 @@ from hydrastream.messages.state import (
     TaskStatus,
 )
 
-ON_ENGINE_START_HOOK: Callable[[HydraContext], Any] = lambda x: None
+ON_ENGINE_START_HOOK: Callable[[HydraContext], Any] = lambda x: None  # noqa: E731
 
 
 @hydra_dataclass
@@ -63,7 +63,7 @@ class HydraDaemon:
         exc_tb: TracebackType | None,
     ) -> None:
 
-        await self.stop(timeout=100.0)
+        await self.stop(timeout=100)
 
     def start(self) -> None:
         """Включает завод. Он работает в фоне и ждет задач."""
@@ -93,7 +93,7 @@ class HydraDaemon:
         )
 
         try:
-            msg = await reply_future
+            file_obj = await reply_future
 
         except asyncio.CancelledError:
             self._ui.log(
@@ -103,10 +103,12 @@ class HydraDaemon:
 
             return None
 
+        await self._ctx.files_q.send_data(file_obj, sort_key=(id,))
+
         return file_streamer(
             ui=self._ctx.ui,
             is_debug=self._ctx.config.debug,
-            file_obj=msg,
+            file_obj=file_obj,
             credit_outbox=self._ctx.credit_q,
             reg_events_outbox=self._ctx.state_q,
             file_limit_outbox=self._ctx.file_limit_q,
@@ -152,7 +154,7 @@ class HydraDaemon:
                 raise
             return None
 
-    async def _run_engine_in_background(self) -> None:
+    async def _run_engine_in_background(self) -> None:  # noqa: C901
         try:
             prepare_runtime(self._ctx)
             ON_ENGINE_START_HOOK(self._ctx)
@@ -203,7 +205,7 @@ class HydraDaemon:
         finally:
             await teardown_engine(self._ctx)
 
-    async def stop(self, timeout: float = 100.0) -> None:
+    async def stop(self, timeout: float = 10) -> None:
         """Останавливает завод изящно с ограничением по времени."""
         if self._engine_task is None or self._is_stopping:
             return

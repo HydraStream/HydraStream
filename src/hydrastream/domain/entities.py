@@ -159,8 +159,8 @@ class File:
     fd: int | None = field(default=None, repr=False)
     verified: bool = field(default=False)
     is_failed: bool = field(default=False)
-    _stream_queue: ActorPriorityQueue[StreamChunk | StreamError | PoisonPill] | None = (
-        None
+    _stream_queue: ActorPriorityQueue[StreamChunk | StreamError | PoisonPill] = field(
+        default_factory=ActorPriorityQueue[StreamChunk | StreamError | PoisonPill]
     )
 
     def create_chunks(self) -> None:
@@ -213,8 +213,6 @@ class File:
 
     @property
     def stream_q(self) -> ActorPriorityQueue[StreamChunk | StreamError | PoisonPill]:
-        if self._stream_queue is None:
-            self._stream_queue = ActorPriorityQueue()
         return self._stream_queue
 
     @classmethod
