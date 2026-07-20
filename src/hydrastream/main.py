@@ -296,7 +296,7 @@ async def async_main(  # noqa
         quiet=quiet,
         no_ui=no_ui,
         json_logs=json_logs,
-        log_file_dir=Path(output_dir),
+        log_file_dir=Path(output_dir) / "downloads",
         is_debug=debug,
     )
     print("Your debug message here -2", file=sys.__stderr__, flush=True)
@@ -313,14 +313,16 @@ async def async_main(  # noqa
             min_chunk_size_mb=min_chunk_size_mb,
             max_stream_chunk_size_mb=max_stream_chunk_size_mb,
             speed_limit=speed_limit,
-            output_dir=Path(output_dir),
+            output_dir=Path(output_dir) / "downloads",
             buffer_size_mb=buffer_size_mb,
             client_kwargs=None,
             impersonate=impersonate,
             debug=True,
         )
         print("Your debug message here -4", file=sys.__stderr__, flush=True)
+        print(f"links {links}", file=sys.__stderr__, flush=True)
         active_links = validate(links=links, input_file=input_file, ui=ui)
+        print(f"active_links {active_links}", file=sys.__stderr__, flush=True)
         expected_checksums = _prepare_checksums(active_links, checksum, typehash)
 
         async with HydraDaemon(config=config, initial_ui=ui) as daemon:

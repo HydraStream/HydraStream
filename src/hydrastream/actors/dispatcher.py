@@ -119,12 +119,13 @@ class DiskFileDispatcher(BaseFileDispatcher):
 
     def _prepare_file_on_disk(self, file_obj: File) -> None:
         if not file_obj.actual_filename:
-            new_filename = self.fs.allocate_space(
+            fd, new_filename = self.fs.allocate_space(
                 filename=file_obj.meta.original_filename,
                 size=file_obj.meta.content_length,
             )
+            file_obj.fd = fd
 
-            if new_filename:
+            if new_filename is not None:
                 file_obj.actual_filename = new_filename
                 self.ui.update_filename(file_obj.meta.id, new_filename)
                 self.ui.log(
@@ -134,8 +135,8 @@ class DiskFileDispatcher(BaseFileDispatcher):
                 )
             else:
                 file_obj.actual_filename = file_obj.meta.original_filename
-
-        file_obj.fd = self.fs.open_file(filename=file_obj.actual_filename)
+        else:
+            file_obj.fd = self.fs.open_file(filename=file_obj.actual_filename)
 
     @override
     def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:

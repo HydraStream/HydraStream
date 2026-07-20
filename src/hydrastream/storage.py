@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 from dataclasses import field
@@ -42,33 +43,42 @@ class LocalStorageManager(StorageBackend):
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     @override
-    def allocate_space(self, filename: str, size: int) -> str | None:
+    def allocate_space(self, filename: str, size: int) -> tuple[int, str | None]:
+        print(f"Create file {filename}", file=sys.__stderr__, flush=True)
         free_space = shutil.disk_usage(self.output_dir).free
         if free_space < size:
             raise InsufficientSpaceError(
                 path=self.output_dir, required=size, free=free_space
             )
 
-        filepath = self.output_dir / filename
+        stem = Path(filename).stem
+        suffix = Path(filename).suffix
+        counter = 0
 
-        if filepath.is_file():
-            filepath = self.get_unique_path(filepath)
+        while True:
+            # Формируем имя: при counter=0 берем оригинал, далее добавляем (1), (2)...
+            current_name = filename if counter == 0 else f"{stem} ({counter}){suffix}"
+            filepath = self.output_dir / current_name
 
-        fd = None
-        try:
-            fd = os.open(filepath, os.O_RDWR | os.O_CREAT)
+            fd = None
+            try:
+                # os.O_EXCL гарантирует, что если файл уже создается другим потоком,
+                # мы упадем в FileExistsError на уровне ОС, исключая race condition.
+                fd = os.open(filepath, os.O_RDWR | os.O_CREAT | os.O_EXCL)
 
-            if hasattr(os, "posix_fallocate") and size > 0:
-                os.posix_fallocate(fd, 0, size)
-            else:
-                os.ftruncate(fd, size)
-        finally:
-            if fd is not None:
-                os.close(fd)
+                if hasattr(os, "posix_fallocate") and size > 0:
+                    os.posix_fallocate(fd, 0, size)
+                else:
+                    os.ftruncate(fd, size)
 
-        if filepath.name != filename:
-            return filepath.name
-        return None
+                # Если успешно создали файл, выходим из цикла
+                if current_name != filename:
+                    return fd, current_name
+                return fd, None
+
+            except FileExistsError:
+                counter += 1
+                continue
 
     @override
     def open_file(self, filename: str) -> int:
@@ -88,6 +98,7 @@ class LocalStorageManager(StorageBackend):
             # Сброс кэша (только для POSIX)
             if hasattr(os, "posix_fadvise"):
                 with contextlib.suppress(Exception):
+                    os.fdatasync(fd_or_conn)
                     os.posix_fadvise(
                         fd_or_conn, offset, len_data, os.POSIX_FADV_DONTNEED
                     )
@@ -138,21 +149,27 @@ class LocalStorageManager(StorageBackend):
     def _write_windows_merged(
         self, fd: int, data_bytes: list[bytes], len_data: int, offset: int
     ) -> None:
-        """Классическая запись склеенным куском для Windows."""
-        merged_data = b"".join(data_bytes)
-        view = memoryview(merged_data)
-        written = 0
-        retries = 0
+        current_offset = offset
 
-        while written < len_data:
-            try:
-                n = os.pwrite(fd, view[written:], offset + written)
-                if n <= 0:
-                    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
-                written += n
-            except OSError as e:
-                self._handle_io_retry(e, retries)
-                retries += 1
+        for chunk in data_bytes:
+            view = memoryview(chunk)
+            chunk_len = len(view)
+            written = 0
+            retries = 0
+
+            while written < chunk_len:
+                try:
+                    # Пишем строго по текущему смещению текущего чанка
+                    n = os.pwrite(fd, view[written:], current_offset)
+                    if n <= 0:
+                        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+                    written += n
+                    current_offset += n
+
+                except OSError as e:
+                    self._handle_io_retry(e, retries)
+                    retries += 1
 
     @staticmethod
     def _rebuild_memoryviews(
@@ -322,23 +339,6 @@ class LocalStorageManager(StorageBackend):
                 expected=expected_checksum,
                 actual=calculated,
             )
-
-    @override
-    def get_unique_path(self, file_path: Path) -> Path:
-        stem = file_path.stem
-        suffix = file_path.suffix
-        directory = file_path.parent
-
-        counter = 1
-
-        while True:
-            new_name = f"{stem} ({counter}){suffix}"
-            new_path = directory / new_name
-
-            if not new_path.is_file():
-                return new_path
-
-            counter += 1
 
     @override
     def get_state_path(self, filename: str) -> Path:

@@ -409,7 +409,7 @@ class JsonMonitor(BaseMonitor):
             **kwargs,  # Распаковываем дополнительные данные!
         }
         # Сериализуем в байты, потом в строку
-        sys.stdout.buffer.write(orjson.dumps(log_record) + b"\n")
+        sys.stderr.buffer.write(orjson.dumps(log_record) + b"\n")
 
     @override
     def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:

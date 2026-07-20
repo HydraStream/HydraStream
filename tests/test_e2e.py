@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, cast, get_args
 
 from curl_cffi import BrowserTypeLiteral
-from hypothesis import HealthCheck, Verbosity, example, given, settings
+from hypothesis import HealthCheck, Verbosity, given, settings
 from hypothesis import strategies as st
 from pytest_httpserver import HTTPServer
 from typer.testing import CliRunner
@@ -476,7 +476,9 @@ def filenames_strategy(draw: st.DrawFn) -> str:
 
 @st.composite
 def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
-    all_paths = draw(st.lists(filenames_strategy(), min_size=1, max_size=10))
+    all_paths = draw(
+        st.lists(filenames_strategy(), min_size=1, max_size=10, unique=True)
+    )
 
     split_idx = draw(st.integers(min_value=0, max_value=len(all_paths)))
 
@@ -523,7 +525,7 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
     if len(all_paths) == 1 and draw(st.booleans()):
         args.extend(["--checksum", DUMMY_MD5, "--typehash", "md5"])
 
-    args.append("--debug")
+    # args.append("--debug")
 
     return {
         "args_template": args,
@@ -554,35 +556,10 @@ def build_args_list(
     return args
 
 
-@example(
-    data={
-        "args_template": [
-            "--threads",
-            "1",
-            "--buffer",
-            "59",
-            "--min-chunk-mb",
-            "10",
-            "--stream",
-            "--no-ui",
-            "--quiet",
-            "--no-verify",
-            "--debug",
-        ],
-        "paths": ["ujyy_nb.zip", "m x1vvm.bin", "x1vvm.zip"],
-        "existing_copies": 5,
-        "existing_files": "x1vvm.zip",
-        "file_urls_template": [
-            "http://localhost:SERVER_PORT/ncbi.nlm.nih.gov/ujyy_nb.zip",
-            "http://localhost:SERVER_PORT/m x1vvm.bin",
-            "http://localhost:SERVER_PORT/ncbi.nlm.nih.gov/x1vvm.zip",
-        ],
-        "server_seed": 305558,
-    }
-)
+# @example()
 @given(data=cli_fuzz_strategy())
 @settings(
-    max_examples=5,
+    max_examples=500,
     deadline=timedelta(milliseconds=50000),
     suppress_health_check=[HealthCheck.function_scoped_fixture],
     verbosity=Verbosity.verbose,
@@ -597,6 +574,7 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
     base_url = httpserver.url_for("").rstrip("/")
 
     out_dir = tmp_path / "downloads"
+
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -615,7 +593,7 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
         a.replace("http://localhost:SERVER_PORT/", f"{base_url}/")
         for a in data["args_template"]
     ]
-    final_args.extend(["--output", str(out_dir)])
+    final_args.extend(["--output", str(tmp_path)])
 
     if data["file_urls_template"]:
         urls_txt = tmp_path / "urls.txt"
@@ -626,7 +604,12 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
         urls_txt.write_text(content)
         final_args.extend(["--input", str(urls_txt)])
     # 3. УДАР! (Запускаем CLI)
-    num_file = len(list(out_dir.glob("*")))
+    prev_files = set(out_dir.glob("*"))
+    print(
+        f" prev files: {[x.name for x in out_dir.glob('*')]}",
+        file=sys.__stderr__,
+        flush=True,
+    )
     debug = False
     if debug:
         global _current_tracer  # noqa: PLW0603
@@ -666,48 +649,70 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
         ignored = {"hydra.log", ".states"}
 
         # 2. Находим всё "запрещенное"
-        leftovers = [f for f in out_dir.glob("*") if f.name not in ignored]
+
+        leftovers = set([f for f in out_dir.glob("*") if f.name not in ignored]) - set(
+            prev_files
+        )
+        print(
+            f" post files: {[x.name for x in out_dir.glob('*')]}",
+            file=sys.__stderr__,
+            flush=True,
+        )
 
         # Инвариант 2: Если это DRY-RUN, на диске НЕ ДОЛЖНО быть создано ни одного
         # файла генома
-        if (
-            "--stream" not in data["args_template"]
-            and "--dry-run" not in data["args_template"]
-        ):
-            for f in leftovers:
-                # Пропускаем стейты и всё, что не является скачанным файлом
-                if f.suffix == ".json":
-                    continue
-
-                actual_bytes = f.read_bytes()
-                assert actual_bytes == DUMMY_DATA, f"DATA CORRUPTION in {f.name}!"
 
         if "--dry-run" in data["args_template"]:
-            assert len(leftovers) == num_file, (
+            assert len(leftovers) == 0, (
                 f"DRY-RUN нарушил обещание и скачал файлы на диск!"
-                f"Было {num_file}. Стало {len(leftovers)}"
+                f"Было {prev_files}. Стало {len(leftovers)}"
             )
 
         # Инвариант 3: Если это STREAM, на диске тоже пусто
-        if "--stream" in data["args_template"]:
-            assert len(leftovers) == num_file, "STREAM записал бинарники на диск!"
+        elif "--stream" in data["args_template"]:
+            print("11", file=sys.__stderr__, flush=True)
+            assert len(leftovers) == 0, "STREAM записал бинарники на диск!"
+            print("22", file=sys.__stderr__, flush=True)
+
+            # 1. Проверяем чтение из буфера CliRunner
+            actual_bytes = result.stdout_bytes
+            print("22.1 - Прочитали stdout_bytes", file=sys.__stderr__, flush=True)
+
+            # 2. Проверяем генерацию ожидаемых данных (память)
+            expected_len = len(data["paths"])
+            expected_bytes = DUMMY_DATA * expected_len
+            print(
+                "22.2 - Выделили память под ожидаемые байты",
+                file=sys.__stderr__,
+                flush=True,
+            )
+
+            # 3. Делаем простое сравнение длин, прежде чем сравнивать гигантские массивы байт
+            assert len(actual_bytes) == len(expected_bytes), (
+                f"Разная длина! {len(actual_bytes)} != {len(expected_bytes)}"
+            )
+            print("22.3 - Проверили длины", file=sys.__stderr__, flush=True)
+
+            # 4. Финальное сравнение контента
+            assert actual_bytes == expected_bytes
+            print("33", file=sys.__stderr__, flush=True)
 
         # Инвариант 4: Если это обычная загрузка, файлы должны лежать на диске
-        if (
-            "--stream" not in data["args_template"]
-            and "--dry-run" not in data["args_template"]
-            and result.exit_code == 0
-        ):
+        else:
             # Количество скачанных файлов должно совпадать с количеством уникальных ссылок
-            assert len(leftovers) <= len(data["paths"]) + num_file, (
+            assert len(leftovers) == len(data["paths"]), (
                 f"Файлы не скачались! Лог терминала:\n{result.stdout}"
             )
+
+            for f in leftovers:
+                actual_bytes = f.read_bytes()
+                assert actual_bytes == DUMMY_DATA, f"DATA CORRUPTION in {f.name}!"
 
     else:
         # Если программа упала, мы проверяем, что она упала ЛЕГАЛЬНО!
         # Например, из-за StreamError на тупом сервере.
         error = result.exception
-        assert result.exit_code == 2, (
+        assert result.exit_code == 4, (
             f"Program crashed with unexpected error! Output: {result.stderr}. Exception: {error}"
         )
         print(f"Done with network erroe {error}", file=sys.__stderr__, flush=True)

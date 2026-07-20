@@ -168,6 +168,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                     reply_future.set_result(snaphot)
 
             case ProgressDeltaCmd(file_id=fid, delta_bytes=delta):
+                self._traces[fid].downloaded_bytes += delta
                 self._ui_deltas[fid] += delta
                 self._global_bytes += delta
 
