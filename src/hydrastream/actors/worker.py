@@ -102,10 +102,9 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
                 file_obj = chunk.file
                 if not file_obj or file_obj.is_failed:
                     return
-                print("Worker 1", file=sys.__stderr__, flush=True)
 
                 await self._process_chunk(chunk)
-                print("Worker 2", file=sys.__stderr__, flush=True)
+
                 if not chunk.is_finished:
                     self.ui.log(
                         f"Truncated read for {chunk.file.actual_filename}. "
@@ -114,13 +113,12 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
                         throttle_key="truncated_read",
                         throttle_sec=2.0,
                     )
-                    print("Worker 3", file=sys.__stderr__, flush=True)
+
                     await self._requeue_chunk(chunk, delay_range=(0.1, 1.0))
 
                     return
-                print("Worker 4", file=sys.__stderr__, flush=True)
+
                 await self._file_done(chunk)
-                print("Worker 5", file=sys.__stderr__, flush=True)
 
             case _ as unreachable:
                 await super()._handle_msg(unreachable)
@@ -291,18 +289,13 @@ class StreamDownloadWorker(BaseDownloadWorker):
             finally:
                 if self.throttler_outbox is not None:
                     await self.throttler_outbox.send_data(RemoveStreamCmd(stream=r))
-                print("Worker 11", file=sys.__stderr__, flush=True)
+
                 if buffer_list:
-                    print("Worker 12", file=sys.__stderr__, flush=True)
                     await chunk.file.stream_q.send_data(
                         sort_key=(chunk.current_pos,),
                         data=StreamChunk(start=chunk.current_pos, data=buffer_list),
                     )
-                    print(
-                        f"Worker 13, buffer {current_buffer_size}, queue id {id(chunk.file.stream_q)} url:  {chunk.file.meta.url}",
-                        file=sys.__stderr__,
-                        flush=True,
-                    )
+
                     chunk.current_pos += current_buffer_size
 
     @override

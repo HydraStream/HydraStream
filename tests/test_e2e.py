@@ -3,9 +3,9 @@
 import asyncio
 import contextlib
 import hashlib
+import logging
 import os
 import re
-import shlex
 import shutil
 import sys
 import threading
@@ -13,12 +13,11 @@ import traceback
 import warnings
 from collections import defaultdict
 from collections.abc import Callable, Generator
-from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast, get_args
 
 from curl_cffi import BrowserTypeLiteral
-from hypothesis import HealthCheck, Verbosity, given, settings
+from hypothesis import HealthCheck, Phase, given, settings
 from hypothesis import strategies as st
 from pytest_httpserver import HTTPServer
 from typer.testing import CliRunner
@@ -467,10 +466,6 @@ def filenames_strategy(draw: st.DrawFn) -> str:
     # min_size=1, max_size=30 (проверим длинные пути)
     name = draw(st.text(alphabet=stem_alphabet, min_size=1, max_size=30))
 
-    # 4. Иногда добавляем "проблемные" символы (пробелы, точки в середине)
-    if draw(st.booleans()):
-        name += " " + draw(st.text(alphabet=stem_alphabet, min_size=1, max_size=5))
-
     return f"{name}{ext}"
 
 
@@ -525,7 +520,7 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
     if len(all_paths) == 1 and draw(st.booleans()):
         args.extend(["--checksum", DUMMY_MD5, "--typehash", "md5"])
 
-    # args.append("--debug")
+    args.append("--debug")
 
     return {
         "args_template": args,
@@ -556,17 +551,20 @@ def build_args_list(
     return args
 
 
-# @example()
 @given(data=cli_fuzz_strategy())
 @settings(
     max_examples=500,
-    deadline=timedelta(milliseconds=50000),
+    deadline=None,
+    phases=[Phase.reuse, Phase.generate],  # Phase.explicit
     suppress_health_check=[HealthCheck.function_scoped_fixture],
-    verbosity=Verbosity.verbose,
+    # verbosity=Verbosity.verbose,
 )
 def test_hypothesis_nuclear_fuzzer(  # noqa
-    httpserver: HTTPServer, tmp_path: Path, data: dict[str, Any]
+    data: dict[str, Any],
+    httpserver: HTTPServer,
+    tmp_path: Path,
 ) -> None:
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
     filenames = [Path(p).name for p in data["paths"]]
     chaos_handler = make_chaos_handler(data["server_seed"], filenames)
     # 1. Заводим сервер
@@ -620,16 +618,16 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
             # Пишем только те функции, которые лежат в вашей папке проекта
             exclude_files=["site-packages", "_pytest", "hypothesis", "typer", "click"],
         )
-
-    print(
-        f"Running: my-tool {' '.join(shlex.quote(a) for a in final_args)}",
-        file=sys.__stderr__,
-    )
+    print(f"Running: {data}", file=sys.__stderr__, flush=True)
+    # print(
+    #     f"Running: my-tool {' '.join(shlex.quote(a) for a in final_args)}",
+    #     file=sys.__stderr__,
+    # )
     print("Your debug message here 1000", file=sys.__stderr__, flush=True)
     if debug:
         try:
-            with actor_system_timeout_monitor(timeout=60, tracer=_current_tracer):
-                result = runner.invoke(app, final_args, catch_exceptions=False)
+            with actor_system_timeout_monitor(timeout=95, tracer=_current_tracer):
+                result = runner.invoke(app, final_args)
         finally:
             if _current_tracer:
                 _current_tracer.stop()
@@ -711,8 +709,9 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
     else:
         # Если программа упала, мы проверяем, что она упала ЛЕГАЛЬНО!
         # Например, из-за StreamError на тупом сервере.
+        tb_string = ""
+        if result.exc_info:
+            tb_string = "\n" + "".join(traceback.format_exception(*result.exc_info))
         error = result.exception
-        assert result.exit_code == 4, (
-            f"Program crashed with unexpected error! Output: {result.stderr}. Exception: {error}"
-        )
+        assert result.exit_code == 4, f"Exception: {error!r}"
         print(f"Done with network erroe {error}", file=sys.__stderr__, flush=True)

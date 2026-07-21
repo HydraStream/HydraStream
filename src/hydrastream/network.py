@@ -80,13 +80,14 @@ async def safe_request(
     ui: MonitorBackend,
     method: HttpMethod,
     url: str,
-    max_retries: int = 3,
+    max_retries: int = 1,
     **kwargs: Unpack[RequestParams],
 ) -> Response | None:
     for attempt in range(1, max_retries + 1):
         response = None
         try:
             resp = await net.request(method, url, **kwargs)
+
             if resp.status_code < 400:
                 return resp
 
@@ -101,6 +102,7 @@ async def safe_request(
                     response=response,
                 )
             raise RequestsError(f"Request failed on {url} before response was received")
+
         await asyncio.sleep(delay)
 
     raise RequestsError(
@@ -114,7 +116,7 @@ async def stream_chunk(
     ui: MonitorBackend,
     url: str,
     headers: dict[str, str] | None = None,
-    max_retries: int = 3,
+    max_retries: int = 1,
 ) -> AsyncIterator[NetworkStream]:
     for attempt in range(1, max_retries + 1):
         response = None

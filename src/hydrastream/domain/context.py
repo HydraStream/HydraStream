@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-import sys
 from dataclasses import field
 from typing import TypedDict
 
@@ -112,9 +111,9 @@ class HydraContext:
 
 def build_context(config: HydraConfig, ui: MonitorBackend) -> HydraContext:
     channels = _create_channels()
-    print("Your debug message here 4", file=sys.__stderr__, flush=True)
+
     ui.bind_to_state_keeper(channels["state_q"])
-    print("Your debug message here 5", file=sys.__stderr__, flush=True)
+
     net = _create_network(config)
     fs = _create_storage(config)
 

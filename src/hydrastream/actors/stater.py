@@ -67,9 +67,6 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                 trace.transition_to(TaskState.QUEUED)
                 self._traces[data.id] = trace
 
-                if self.is_debug:
-                    self.ui.log(f"{data.url}{trace.timeline[-1]}", progress=True)
-
             case RegisterFileCmd(file_obj=fobj):
                 fid = fobj.meta.id
                 self._traces[fid].file_obj = fobj
@@ -89,20 +86,8 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                         if not fut.cancelled():
                             fut.set_result(result)
 
-                if self.is_debug:
-                    self.ui.log(
-                        f"{fobj.meta.url}{self._traces[fid].timeline[-1]}",
-                        progress=True,
-                    )
-
             case UpdateStatusDownloading(file_id=id):
                 self._traces[id].transition_to(TaskState.DOWNLOADING)
-
-                if self.is_debug:
-                    self.ui.log(
-                        f"{self._traces[id].file_obj.meta.url}{self._traces[id].timeline[-1]}",
-                        progress=True,
-                    )
 
             case GetReadyFileCmd(file_id=fid, reply_to=reply_future):
                 trace = self._traces[fid]
@@ -138,12 +123,6 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                 for fut in self._result_waiters.pop(fid, []):
                     if not fut.cancelled():
                         fut.set_result(result)
-
-                if self.is_debug:
-                    self.ui.log(
-                        f"{trace.file_obj.meta.url}{trace.timeline[-1]}",
-                        progress=True,
-                    )
 
             case AwaitFileCmd(file_id=fid, reply_to=fut):
                 if fid in self._finished_results:
@@ -209,10 +188,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                         self.fs.save_state(trace.file_obj)
         else:
             for trace in self._traces.values():
-                if (
-                    isinstance(trace.file_obj, File)
-                    and trace.file_obj._stream_queue is not None  # pyright: ignore[reportPrivateUsage]
-                ):
+                if isinstance(trace.file_obj, File):
                     trace.file_obj.stream_q.send_poison_pills_nowait()
 
         for fut_list in self._waiting_stream.values():

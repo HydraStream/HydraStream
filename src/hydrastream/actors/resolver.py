@@ -3,7 +3,6 @@
 
 import asyncio
 import random
-import sys
 from abc import ABC, abstractmethod
 from typing import assert_never, final, override
 
@@ -66,15 +65,14 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
         checksum = None
         match msg:
             case LinkData() as data:
-                print("Resolver 1", file=sys.__stderr__, flush=True)
                 meta = await self._fetch_metadata(data.url)
                 filename, total_size, supports_ranges = meta
-                print("Resolver 2", file=sys.__stderr__, flush=True)
+
                 if self.is_verify and not data.checksum:
                     checksum = await self._resolve_hash(
                         data.id, data.url, filename, data.checksum
                     )
-                print("Resolver 3", file=sys.__stderr__, flush=True)
+
                 file_obj = await self._prepare_file_object(
                     data=data,
                     filename=filename,
@@ -82,9 +80,8 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
                     supports_ranges=supports_ranges,
                     checksum=checksum,
                 )
-                print("Resolver 4", file=sys.__stderr__, flush=True)
+
                 await self._register_file(file_obj)
-                print("Resolver 5", file=sys.__stderr__, flush=True)
 
             case _ as unreachable:
                 await super()._handle_msg(unreachable)
@@ -95,6 +92,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
     async def _on_error(  # ruff:ignore[too-many-return-statements]
         self, e: Exception, msg: LinkData | PoisonPill | None = None
     ) -> ErrorVerdict:
+
         if not isinstance(msg, LinkData):
             return ErrorVerdict.RESUME
 
@@ -127,6 +125,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
 
         # Если мы здесь, значит ошибка критическая (Exception)
         self.ui.log(f"Critical Task Creator crash: {e!r}", status=LogStatus.CRITICAL)
+
         if self.is_debug:
             return ErrorVerdict.ESCALATE
         return ErrorVerdict.STOP
@@ -162,16 +161,21 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
         data: LinkData,
         delay_range: tuple[float, float] = (1.0, 3.0),
     ) -> None:
+
         await self.inbox.send_data(data)
         delay = random.uniform(*delay_range)
+
         await asyncio.sleep(delay)
 
     async def _fetch_metadata(self, url: str) -> tuple[str, int, bool]:
         # 1. Пробуем HEAD
+
         response = await safe_request(net=self.net, ui=self.ui, url=url, method="HEAD")
+
         # 2. Если HEAD не дал инфы, используем GET, но ОБЯЗАТЕЛЬНО через stream
         if response is None or int(response.headers.get("content-length", 0)) == 0:
             # Контекстный менеджер 'async with' сам закроет соединение в конце
+
             async with stream_chunk(
                 net=self.net,
                 ui=self.ui,

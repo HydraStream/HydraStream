@@ -1,6 +1,5 @@
 import asyncio
 import contextlib
-import sys
 from collections.abc import AsyncGenerator, Callable, Iterator
 from dataclasses import InitVar, field
 from itertools import count
@@ -14,7 +13,7 @@ from hydrastream.domain.context import HydraContext, build_context, create_monit
 from hydrastream.domain.entities import Checksum, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.engine import bootstrap_engine, prepare_runtime, teardown_engine
-from hydrastream.exceptions import LogStatus
+from hydrastream.exceptions import ExitCode, HydraError, LogStatus
 from hydrastream.interfaces import MonitorBackend
 from hydrastream.messages.base import ask
 from hydrastream.messages.io import LinkData
@@ -49,7 +48,7 @@ class HydraDaemon:
             self._ui = create_monitor(config=self.ui_config)
         else:
             self._ui = initial_ui
-        print("Your debug message here 3", file=sys.__stderr__, flush=True)
+
         self._ctx = build_context(self.config, ui=self._ui)
 
     async def __aenter__(self) -> "HydraDaemon":
@@ -63,7 +62,7 @@ class HydraDaemon:
         exc_tb: TracebackType | None,
     ) -> None:
 
-        await self.stop(timeout=100)
+        await self.stop(timeout=5)
 
     def start(self) -> None:
         """Включает завод. Он работает в фоне и ждет задач."""
@@ -216,17 +215,15 @@ class HydraDaemon:
         try:
             async with asyncio.timeout(timeout):
                 # 1. Запускаем каскад смерти через пилюлю фидеру
-                print("Engine stop", file=sys.__stderr__, flush=True)
+
                 self._ctx.links_q.send_poison_pills_nowait(count=self._ctx.resolvers)
-                print("Engine stop pill", file=sys.__stderr__, flush=True)
                 self._ctx.session_killer.set()
-                print("Engine stop killer", file=sys.__stderr__, flush=True)
 
                 # 2. Ждем штатного закрытия, но не вечно (защита от зависания)
                 await asyncio.shield(self._engine_task)
             self._ui.log("Daemon stopped gracefully.", status=LogStatus.INFO)
 
-        except TimeoutError:
+        except TimeoutError as e:
             self._ui.log(
                 f"Graceful shutdown timed out after {timeout}s! Forcing cancel...",
                 status=LogStatus.ERROR,
@@ -238,7 +235,11 @@ class HydraDaemon:
                 await self._engine_task
 
             if self.config.debug:
-                raise
+                raise HydraError(
+                    exit_code=ExitCode.GENERAL_ERROR,  # Или заведи EXIT_CODE_TIMEOUT
+                    log_status=LogStatus.CRITICAL,
+                    message_tpl="Daemon shutdown timed out!",
+                ) from e
         finally:
             self._engine_task = None
             self._is_stopping = False
