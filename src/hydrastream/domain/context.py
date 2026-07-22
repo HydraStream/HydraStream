@@ -196,6 +196,7 @@ def create_monitor(config: UIConfig) -> MonitorBackend:
         "is_verify": config.is_verify,
         "log_file": config.log_file_dir,
         "is_debug": config.is_debug,
+        "is_dry_run": config.is_dry_run,
     }
 
     if config.json_logs:
@@ -205,5 +206,5 @@ def create_monitor(config: UIConfig) -> MonitorBackend:
     elif config.no_ui:
         ui = PlainMonitor(**base_resolver_kwargs)
     else:
-        ui = RichMonitor(**base_resolver_kwargs, is_dry_run=config.is_dry_run)
+        ui = RichMonitor(**base_resolver_kwargs)
     return ui

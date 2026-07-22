@@ -94,6 +94,10 @@ class MonitorBackend(Protocol):
         """Остановить отрисовку и закрыть ресурсы"""
         ...
 
+    async def refresh_ui(
+        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    ) -> None: ...
+
     def report(self, error: HydraError, **log_extra: Any) -> None: ...
 
 

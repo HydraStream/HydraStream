@@ -192,53 +192,22 @@ async def _stream_download_tasks(
     daemon: HydraDaemon,
     tasks: list[int],
     ui: MonitorBackend,
-    has_checksum: bool,
-    debug: bool,
 ) -> None:
-    assert sys.__stdout__ is not None
-    is_terminal = sys.__stdout__.isatty()
-    if is_terminal and not ON_TEST_HOOK:
-        ui.report(
-            InvalidParameterError(
-                param="stream",
-                reason="Warning: You are running in --stream mode but output is "
-                "not redirected!"
-                "\nThe downloaded binary data will be discarded.",
-            )
-        )
+    loop = asyncio.get_running_loop()
 
-        if not has_checksum:
-            ui.report(
-                ValidationError(
-                    param="stream",
-                    reason="Please use a pipe (e.g., '| zcat') or redirect to a file"
-                    "(e.g., '> file.gz').\nAborting to save bandwidth.",
-                )
-            )
-        else:
-            ui.report(
-                InvalidParameterError(
-                    param="stream",
-                    reason="Proceeding in 'Verification Only' mode "
-                    "since --checksum is provided.",
-                )
-            )
-    else:
-        loop = asyncio.get_running_loop()
+    def _blocking_write(data: bytes) -> None:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
 
-        def _blocking_write(data: bytes) -> None:
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
+    for i in tasks:
+        if file_stream := await daemon.get_stream(i):
+            try:
+                async for chunk in file_stream:
+                    await loop.run_in_executor(None, _blocking_write, chunk)
 
-        for i in tasks:
-            if file_stream := await daemon.get_stream(i):
-                try:
-                    async for chunk in file_stream:
-                        await loop.run_in_executor(None, _blocking_write, chunk)
-
-                except StreamError as e:
-                    ui.report(e)
-                    sys.exit(e.exit_code)
+            except StreamError as e:
+                ui.report(e)
+                sys.exit(e.exit_code)
 
 
 async def async_main(  # noqa
@@ -284,13 +253,14 @@ async def async_main(  # noqa
         browser: Browser TLS fingerprint to impersonate.
         debug: Enable debug mode to propagate full tracebacks on failure.
     """  # noqa: E501
+
     ui_config = UIConfig(
         is_verify=verify,
         is_dry_run=dry_run,
         quiet=quiet,
         no_ui=no_ui,
         json_logs=json_logs,
-        log_file_dir=Path(output_dir) / "downloads",
+        log_file_dir=Path(output_dir),
         is_debug=debug,
     )
     ui = create_monitor(ui_config)
@@ -304,7 +274,7 @@ async def async_main(  # noqa
             min_chunk_size_mb=min_chunk_size_mb,
             max_stream_chunk_size_mb=max_stream_chunk_size_mb,
             speed_limit=speed_limit,
-            output_dir=Path(output_dir) / "downloads",
+            output_dir=Path(output_dir),
             buffer_size_mb=buffer_size_mb,
             client_kwargs=None,
             impersonate=impersonate,
@@ -315,30 +285,57 @@ async def async_main(  # noqa
 
         expected_checksums = _prepare_checksums(active_links, checksum, typehash)
 
-        async with HydraDaemon(config=config, initial_ui=ui) as daemon:
-            tasks: list[int] = []
+        assert sys.__stdout__ is not None
+        is_terminal = sys.__stdout__.isatty()
+        if stream and is_terminal and not dry_run and not ON_TEST_HOOK:
+            ui.report(
+                InvalidParameterError(
+                    param="stream",
+                    reason="Warning: You are running in --stream mode but output is "
+                    "not redirected!"
+                    "\nThe downloaded binary data will be discarded.",
+                )
+            )
 
-            for i in active_links:
-                if (
-                    task := await daemon.add_download(
-                        i,
-                        expected_checksums=checksum,
-                        type_hash=typehash if checksum else None,
+            if not expected_checksums:
+                ui.report(
+                    ValidationError(
+                        param="stream",
+                        reason="Please use a pipe (e.g., '| zcat') or redirect "
+                        "to a file (e.g., '> file.gz').\nAborting to save bandwidth.",
                     )
-                ) is not None:
-                    tasks.append(task)
-
-            if stream and not config.dry_run:
-                await _stream_download_tasks(
-                    daemon,
-                    tasks,
-                    ui,
-                    has_checksum=bool(expected_checksums),
-                    debug=debug,
                 )
             else:
-                for i in tasks:
-                    await daemon.wait_for_file(i)
+                ui.report(
+                    InvalidParameterError(
+                        param="stream",
+                        reason="Proceeding in 'Verification Only' mode "
+                        "since --checksum is provided.",
+                    )
+                )
+        else:
+            async with HydraDaemon(config=config, initial_ui=ui) as daemon:
+                tasks: list[int] = []
+
+                for i in active_links:
+                    if (
+                        task := await daemon.add_download(
+                            i,
+                            expected_checksums=checksum,
+                            type_hash=typehash if checksum else None,
+                        )
+                    ) is not None:
+                        tasks.append(task)
+
+                if stream and not config.dry_run:
+                    await _stream_download_tasks(
+                        daemon,
+                        tasks,
+                        ui,
+                    )
+                else:
+                    for i in tasks:
+                        await daemon.wait_for_file(i)
 
     except (KeyboardInterrupt, asyncio.CancelledError):
         if debug:
@@ -419,12 +416,12 @@ def cli(
         ),
     ],
     output_dir: Annotated[
-        str,
+        str | None,
         typer.Option(
             "-o",
             "--output",
             help="Destination directory for downloaded files.",
-            default_factory=partial(get_cfg, "output", "download"),
+            default_factory=partial(get_cfg, "output", None),
         ),
     ],
     threads: Annotated[
@@ -449,6 +446,7 @@ def cli(
         bool,
         typer.Option(
             "--dry-run",
+            "-dr",
             help="""Simulate the process: fetch metadata, check disk space, and print a
              report without downloading data.""",
             default_factory=partial(get_cfg, "dry-run", False),
@@ -546,6 +544,7 @@ def cli(
 
     if threads is None:
         threads = 128
+    output_dir = output_dir + "/downloads" if output_dir is not None else "downloads"
     if min_chunk_size_mb is None:
         min_chunk_size_mb = 5
     if max_stream_chunk_size_mb is None:

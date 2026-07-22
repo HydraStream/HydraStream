@@ -173,6 +173,7 @@ class HydraDaemon:
 
                     if self._ctx.config.dry_run and reply_future is not None:
                         files = await reply_future
+
                         self._ctx.ui.dry_run(files, self._ctx.config.output_dir)
 
             except* Exception as eg:

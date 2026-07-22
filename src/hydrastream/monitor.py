@@ -45,10 +45,10 @@ from hydrastream.utils import format_size
 
 class BaseMonitorKwargs(TypedDict):
     is_verify: bool
+    is_dry_run: bool
+    is_debug: bool
 
     log_file: Path
-
-    is_debug: bool
 
 
 @hydra_dataclass
@@ -57,6 +57,7 @@ class BaseMonitor(MonitorBackend, ABC):
     _is_cancelled: bool = False
     is_stream: bool = False
     is_verify: bool = True
+    is_dry_run: bool = False
     _console: Console = field(default_factory=lambda: Console(stderr=True))
 
     """Всё, что касается записи логов на жесткий диск."""
@@ -82,19 +83,18 @@ class BaseMonitor(MonitorBackend, ABC):
     is_debug: bool = False
 
     def __post_init__(self) -> None:
-        # if self.is_debug:
-        # self._console = Console(stderr=True, file=sys.__stderr__)
+        if self.is_debug:
+            self._console = Console(stderr=True, file=sys.__stderr__)
 
         self.log_file = Path(self.log_file).expanduser().resolve()
         self.log_file /= "hydra.log"
 
-    @final
     @override
     def log(
         self,
         message: str | Rule | Table,
         *,
-        status: LogStatus | str = LogStatus.INFO,
+        status: LogStatus | str = "",
         progress: bool = False,
         throttle_key: str | None = None,
         throttle_sec: float = 10.0,
@@ -109,13 +109,19 @@ class BaseMonitor(MonitorBackend, ABC):
                 return
             self._log_throttle[throttle_key] = now
 
+        with self._console.capture() as capture:
+            self._console.print(message)
+        rendered_str = capture.get()
+        clean_message_body = Text.from_ansi(rendered_str).plain
+
+        if isinstance(message, Table):
+            clean_message_body = "\n" + clean_message_body
+
         if self.log_file:
             timestamp = datetime.now().strftime("[%H:%M:%S]")
-            final_msg = f"{timestamp} {message}"
-            clean_msg = Text.from_markup(str(final_msg)).plain
-            self._log_queue.put_nowait(clean_msg)
-
-        self._display_log(message, status, progress, **kwargs)
+            final_msg = f"{timestamp} {clean_message_body.rstrip('\n')}"
+            self._log_queue.put_nowait(final_msg)
+        self._display_log(clean_message_body, status, progress, **kwargs)
 
     @final
     @override
@@ -238,43 +244,80 @@ class BaseMonitor(MonitorBackend, ABC):
     @final
     def _handle_exit(self) -> None:
         self._is_running = False
-
-        elapsed = time.monotonic() - self._start_time
-        avg_speed = (
-            f"{format_size(self._download_bytes / elapsed)}/s" if elapsed > 0 else 0
-        )
-
         size_str = (
-            f"{format_size(self._download_bytes)}"
-            + f"/{format_size(self._total_bytes)}"
+            f"{format_size(self._download_bytes)} / {format_size(self._total_bytes)}"
         )
-        mins, secs = divmod(int(elapsed), 60)
-        hours, mins = divmod(mins, 60)
-        time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
 
-        status_word = "CANCELLED" if self._is_cancelled else "SUCCESS"
-        report = (
-            f"\n--- Final Report ({status_word}) ---\n"
-            f"Total files:   {self._files_completed}/{self._total_files}\n"
-            f"Total Data:    {size_str}\n"
-            f"Average Speed: {avg_speed}\n"
-            f"Total Time:    {time_str}\n"
-            f"--------------------------------"
-        )
-        report_dict = {
-            "total_files": self._files_completed,
-            "total_bytes": self._download_bytes,
-            "average_speed": avg_speed,
-            "time_elapsed_sec": elapsed,
-        }
-        self.log(
-            report,
-            status=LogStatus.INFO,
-            progress=False,
-            throttle_key=None,
-            throttle_sec=10.0,
-            **report_dict,
-        )
+        if not self.is_dry_run:
+            elapsed = time.monotonic() - self._start_time
+            avg_speed = (
+                f"{format_size(self._download_bytes / elapsed)}/s"
+                if elapsed > 0
+                else "0 B/s"
+            )
+
+            mins, secs = divmod(int(elapsed), 60)
+            hours, mins = divmod(mins, 60)
+            time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+
+            # Определяем статус и цвет заголовка
+            status_word = "CANCELLED" if self._is_cancelled else "SUCCESS"
+            title_color = "bold red" if self._is_cancelled else "bold green"
+
+            # Создаем таблицу без лишних рамок по бокам для компактности
+            table = Table(
+                title=f"[{title_color}]--- Final Report ({status_word}) ---[/]",
+                padding=(0, 1),
+            )
+
+            # Добавляем две колонки: для названия метрики и для значения
+            table.add_column("Metric", style="cyan", justify="left")
+            table.add_column("Value", style="magenta", justify="center")
+
+            # Наполняем таблицу данными
+            table.add_row(
+                "Total files:", f"{self._files_completed}/{self._total_files}"
+            )
+            table.add_row("Total Data:", size_str)
+            table.add_row("Average Speed:", avg_speed)
+            table.add_row("Total Time:", time_str)
+            report_dict = {
+                "total_files": self._files_completed,
+                "total_bytes": self._download_bytes,
+                "average_speed": avg_speed,
+                "time_elapsed_sec": elapsed,
+            }
+
+            self.log(
+                table,
+                status=LogStatus.INFO,
+                progress=False,
+                throttle_key=None,
+                throttle_sec=10.0,
+                **report_dict,
+            )
+
+        else:
+            size_str = f"{format_size(self._total_bytes)}"
+            table = Table()
+            table.add_column("Metric", style="cyan", justify="left")
+            table.add_column("Value", style="magenta", justify="center")
+
+            table.add_row("[white]Total files:", f"[green3]{self._total_files}[/]")
+            table.add_row("[white]Total Data:", f"[bold cyan]{size_str}[/]")
+            if self.is_verify:
+                table.add_row(
+                    "[white]Hash Found:",
+                    f"[bold yellow]{self._has_hash}/{self._total_files}[/]",
+                )
+            table.add_row(
+                "[white]Ranges:",
+                f"[bold magenta]{self._has_ranges}/{self._total_files}[/]",
+            )
+
+            self.log(
+                table,
+            )
 
     @final
     @override
@@ -296,13 +339,12 @@ class BaseMonitor(MonitorBackend, ABC):
     @override
     def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
         """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
-
         table = Table(
             title="[bold yellow] DRY RUN REPORT (No data will be downloaded)[/]"
         )
-        table.add_column("Filename", style="cyan", no_wrap=True)
-        table.add_column("Size", justify="right")
-        table.add_column("Chunks", justify="right")
+        table.add_column("Filename", style="cyan", justify="left", no_wrap=True)
+        table.add_column("Size", justify="center")
+        table.add_column("Chunks", justify="center")
         if self.is_verify:
             table.add_column("Hash Found", justify="center")
         table.add_column("Ranges", justify="center")
@@ -331,7 +373,8 @@ class BaseMonitor(MonitorBackend, ABC):
                 table.add_row(
                     f.meta.original_filename, str_size, str(len(f.chunks)), ranges
                 )
-        self.log(table)
+
+        self.log(table, progress=True)
         if not self.is_stream:
             self._check_storage_capacity(output_path=output_dir)
 
@@ -347,15 +390,19 @@ class BaseMonitor(MonitorBackend, ABC):
             required = self._total_bytes
 
             if free_space < required:
-                self.log("\n[bold red] DANGER: Insufficient disk space![/]")
+                self.log(
+                    "\n[bold red] DANGER: Insufficient disk space![/]", progress=True
+                )
                 self.log(
                     f"[red]Required: {format_size(required)} | "
                     f"Available: {format_size(free_space)}[/]",
+                    progress=True,
                 )
             else:
                 self.log(
                     f"\nDisk space check passed ({format_size(free_space)} free).\n",
                     status=LogStatus.SUCCESS,
+                    progress=True,
                 )
 
         except OSError as e:
@@ -380,6 +427,19 @@ class BaseMonitor(MonitorBackend, ABC):
         self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     ) -> None:
         pass
+
+    @override
+    async def refresh_ui(
+        self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    ) -> None:
+        deltas = await ask(
+            inbox=state_q,
+            msg_factory=GetUIDeltasCmd.create_request,
+            timeout=5.0,
+            sort_key=(-1,),
+        )
+        for _, bytes_to_advance in deltas.items():
+            self._download_bytes += bytes_to_advance
 
     def _ui_start(self) -> None:
         pass
@@ -413,6 +473,7 @@ class JsonMonitor(BaseMonitor):
 
     @override
     def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
+
         report_data = {
             "total_files": self._total_files,
             "total_bytes": self._total_bytes,
@@ -456,8 +517,9 @@ class PlainMonitor(BaseMonitor):
         **kwargs: object,
     ) -> None:
         timestamp = datetime.now().strftime("[%H:%M:%S]")
+
         final_msg = f"{timestamp} {message}"
-        self._console.print(Text.from_markup(str(final_msg)).plain)
+        self._console.print(final_msg)
 
 
 def get_gradient_color(percentage: float) -> str:
@@ -492,8 +554,6 @@ class GradientPercent(ProgressColumn):
 
 @hydra_dataclass
 class RichMonitor(BaseMonitor):
-    is_dry_run: bool = False
-
     dynamic_title: str = ""
 
     refresh_per_second: int = 10
@@ -544,6 +604,34 @@ class RichMonitor(BaseMonitor):
         )
 
     @override
+    def log(
+        self,
+        message: str | Rule | Table,
+        *,
+        status: LogStatus | str = "",
+        progress: bool = False,
+        throttle_key: str | None = None,
+        throttle_sec: float = 10.0,
+        **kwargs: object,
+    ) -> None:
+        if status == LogStatus.INTERRUPT:
+            self._is_cancelled = True
+        if throttle_key:
+            now = time.monotonic()
+            last_time = self._log_throttle.get(throttle_key, 0.0)
+            if now - last_time < throttle_sec:
+                return
+            self._log_throttle[throttle_key] = now
+
+        if self.log_file:
+            timestamp = datetime.now().strftime("[%H:%M:%S]")
+            final_msg = f"{timestamp} {message}"
+            clean_msg = Text.from_markup(str(final_msg)).plain
+            self._log_queue.put_nowait(clean_msg)
+
+        self._display_log(message, status, progress, **kwargs)
+
+    @override
     def _display_log(
         self,
         message: str | Rule | Table,
@@ -558,6 +646,7 @@ class RichMonitor(BaseMonitor):
             LogStatus.CRITICAL,
             LogStatus.INTERRUPT,
         }:
+            # print(f"display  {renderable}")
             self.rich.console.print(renderable)
 
     @staticmethod
@@ -576,8 +665,7 @@ class RichMonitor(BaseMonitor):
     @staticmethod
     def _formatting_log(
         message: str | Rule | Table,
-        formatted_msg: str,
-        status: str | LogStatus = LogStatus.INFO,
+        status: str | LogStatus,
     ) -> Panel | str | Rule | Table:
         timestamp = datetime.now().strftime("[%H:%M:%S]")
         formatted_msg = f"{timestamp} {message}"
@@ -679,6 +767,49 @@ class RichMonitor(BaseMonitor):
             f"[bold white][green]{self._files_completed}[/]/"
             + f"[blue]{self._total_files}[/] Files | [yellow]{active} Active[/]"
         )
+
+    @override
+    def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
+        """Выводит отчет о том, что БЫЛО БЫ сделано, без фактического скачивания."""
+
+        table = Table(
+            title="[bold yellow] DRY RUN REPORT (No data will be downloaded)[/]"
+        )
+        table.add_column("Filename", style="cyan", no_wrap=True)
+        table.add_column("Size", justify="right")
+        table.add_column("Chunks", justify="right")
+        if self.is_verify:
+            table.add_column("Hash Found", justify="center")
+        table.add_column("Ranges", justify="center")
+
+        for f in files.values():
+            f.create_chunks()
+            str_size = format_size(f.meta.content_length)
+            if self.is_verify and f.meta.expected_checksum:
+                self._has_hash += 1
+
+            if f.meta.supports_ranges:
+                ranges = "✅"
+                self._has_ranges += 1
+            else:
+                ranges = "❌ (Fallback to 1 thread)"
+
+            if self.is_verify:
+                table.add_row(
+                    f.meta.original_filename,
+                    str_size,
+                    str(len(f.chunks)),
+                    "✅" if f.meta.expected_checksum else "❌",
+                    ranges,
+                )
+            else:
+                table.add_row(
+                    f.meta.original_filename, str_size, str(len(f.chunks)), ranges
+                )
+
+        self.log(table, progress=True)
+        if not self.is_stream:
+            self._check_storage_capacity(output_path=output_dir)
 
     @override
     def done(self, file_id: int, filename: str) -> None:
