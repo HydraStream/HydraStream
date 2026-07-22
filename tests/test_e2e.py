@@ -522,7 +522,7 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
     if len(all_paths) == 1 and draw(st.booleans()):
         args.extend(["--checksum", DUMMY_MD5, "--typehash", "md5"])
 
-    args.append("--debug")
+    # args.append("--debug")
 
     return {
         "args_template": args,
@@ -593,7 +593,7 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
         a.replace("http://localhost:SERVER_PORT/", f"{base_url}/")
         for a in data["args_template"]
     ]
-    final_args.extend(["--output", str(tmp_path)])
+    final_args.extend(["--output", str(out_dir)])
 
     if data["file_urls_template"]:
         urls_txt = tmp_path / "urls.txt"
@@ -610,7 +610,7 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
         file=sys.__stderr__,
         flush=True,
     )
-    debug = True
+    debug = False
     if debug:
         global _current_tracer  # noqa: PLW0603
         _current_tracer = VizTracer(
