@@ -71,7 +71,8 @@ class HydraDaemon:
             self._ui.log("Daemon is already running.", status=LogStatus.WARNING)
             return
 
-        self._is_stopping = False
+        if self._ctx.session_killer.is_set():
+            return
         # Запускаем движок стандартным способом в фоне
 
         self._engine_task = asyncio.create_task(
@@ -82,6 +83,8 @@ class HydraDaemon:
         )
 
     async def get_stream(self, id: int) -> AsyncGenerator[bytes, None] | None:
+        if self._ctx.session_killer.is_set():
+            return None
         """
         Блокируется, пока Диспетчер не подготовит следующий файл для стриминга.
         Возвращает Асинхронный Генератор с байтами!
@@ -116,6 +119,8 @@ class HydraDaemon:
         )
 
     async def get_status(self, task_id: int) -> TaskStatus | None:
+        if self._ctx.session_killer.is_set():
+            return None
         """
         Мгновенно возвращает текущий статус задачи.
         Идеально для поллинга (polling) из внешних систем (Web API, Bots).
@@ -131,6 +136,8 @@ class HydraDaemon:
             return None
 
     async def wait_for_file(self, id: int) -> TaskStatus | None:
+        if self._ctx.session_killer.is_set():
+            return None
         """
         Блокируется, пока файл с указанным ID не будет
         полностью скачан на диск (или не упадет).
@@ -245,7 +252,6 @@ class HydraDaemon:
                 ) from e
         finally:
             self._engine_task = None
-            self._is_stopping = False
 
     # ==========================================
     # ПУБЛИЧНОЕ API С ЗАЩИТОЙ
@@ -257,6 +263,8 @@ class HydraDaemon:
         type_hash: TypeHash | None = None,
         expected_checksums: str | None = None,
     ) -> int | None:
+        if self._ctx.session_killer.is_set():
+            return None
 
         if self._engine_task is None or self._is_stopping:
             self._ui.log(

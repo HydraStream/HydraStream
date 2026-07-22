@@ -136,18 +136,19 @@ class ActorPriorityQueue[T](ActorQueue[T]):
         )
 
     @override
-    def send_poison_pills_nowait(self, count: int = 1) -> None:
+    def send_poison_pills_nowait(self, count: int = 1, interrupt: bool = False) -> None:
         loop = asyncio.get_running_loop()
+        priority = -1 if interrupt else sys.maxsize
 
         for i in range(count - 1, 0, -1):
             loop.call_soon(
                 self._raw_queue.put_nowait,
-                _Envelope(sort_key=(sys.maxsize - i,), payload=StandardPill()),
+                _Envelope(sort_key=(priority - i,), payload=StandardPill()),
             )
 
         loop.call_soon(
             self._raw_queue.put_nowait,
-            _Envelope(sort_key=(sys.maxsize,), payload=TerminalPill()),
+            _Envelope(sort_key=(priority,), payload=TerminalPill()),
         )
 
     @override

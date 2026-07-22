@@ -79,7 +79,12 @@ def prepare_runtime(ctx: HydraContext) -> None:
 
         ctx.session_killer.set()
         try:
-            ctx.links_q.send_poison_pills_nowait(count=ctx.resolvers)
+            ctx.links_q.send_poison_pills_nowait(count=ctx.resolvers, interrupt=True)
+            ctx.chunks_q.send_poison_pills_nowait(count=ctx.workers, interrupt=True)
+            ctx.ready_chunks_q.send_poison_pills_nowait(
+                count=ctx.workers, interrupt=True
+            )
+            print("Your debug message here 10", file=sys.__stderr__, flush=True)
         except Exception as e:
             ctx.ui.log(f"Не удалось отправить PoisonPill: {e}", status=LogStatus.ERROR)
 
@@ -264,6 +269,7 @@ def bootstrap_engine(  # noqa
             await ctx.session_killer.wait()
         finally:
             await ctx.net.close()
+            print("Your debug message here 0", file=sys.__stderr__, flush=True)
 
     tg.create_task(session_killer(), name="stage:killer")
 

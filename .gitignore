@@ -25,3 +25,4 @@ musor/
 *.log
 .hypothesis
 typings
+deadlock_report

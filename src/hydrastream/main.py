@@ -417,7 +417,7 @@ def cli(
         ),
     ],
     output_dir: Annotated[
-        str | None,
+        str,
         typer.Option(
             "-o",
             "--output",

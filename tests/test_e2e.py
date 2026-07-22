@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import re
+import shlex
 import shutil
 import sys
 import threading
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any, cast, get_args
 
 from curl_cffi import BrowserTypeLiteral
-from hypothesis import HealthCheck, Phase, given, settings
+from hypothesis import HealthCheck, Phase, Verbosity, given, settings
 from hypothesis import strategies as st
 from pytest_httpserver import HTTPServer
 from typer.testing import CliRunner
@@ -35,6 +36,7 @@ DUMMY_DATA = b"0123456789" * 10000
 DUMMY_MD5 = hashlib.md5(DUMMY_DATA).hexdigest()
 
 hydrastream.main.ON_TEST_HOOK = True
+hydrastream.facade.ON_TEST_HOOK = True
 
 default = {
     "links": None,
@@ -557,7 +559,7 @@ def build_args_list(
     deadline=None,
     phases=[Phase.reuse, Phase.generate],  # Phase.explicit
     suppress_health_check=[HealthCheck.function_scoped_fixture],
-    # verbosity=Verbosity.verbose,
+    verbosity=Verbosity.verbose,
 )
 def test_hypothesis_nuclear_fuzzer(  # noqa
     data: dict[str, Any],
@@ -608,7 +610,7 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
         file=sys.__stderr__,
         flush=True,
     )
-    debug = False
+    debug = True
     if debug:
         global _current_tracer  # noqa: PLW0603
         _current_tracer = VizTracer(
@@ -619,15 +621,15 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
             exclude_files=["site-packages", "_pytest", "hypothesis", "typer", "click"],
         )
     print(f"Running: {data}", file=sys.__stderr__, flush=True)
-    # print(
-    #     f"Running: my-tool {' '.join(shlex.quote(a) for a in final_args)}",
-    #     file=sys.__stderr__,
-    # )
+    print(
+        f"Running: my-tool {' '.join(shlex.quote(a) for a in final_args)}",
+        file=sys.__stderr__,
+    )
     print("Your debug message here 1000", file=sys.__stderr__, flush=True)
     if debug:
         try:
             with actor_system_timeout_monitor(timeout=95, tracer=_current_tracer):
-                result = runner.invoke(app, final_args)
+                result = runner.invoke(app, final_args, catch_exceptions=False)
         finally:
             if _current_tracer:
                 _current_tracer.stop()

@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from collections import defaultdict
 from dataclasses import field
 from typing import assert_never, override
@@ -195,7 +196,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
             for fut in fut_list:
                 if not fut.done():
                     fut.cancel()
-
+        print("444", file=sys.__stderr__, flush=True)
         for fut_list in self._result_waiters.values():
             for fut in fut_list:
                 if not fut.done():

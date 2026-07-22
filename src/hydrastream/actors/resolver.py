@@ -66,6 +66,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
         match msg:
             case LinkData() as data:
                 meta = await self._fetch_metadata(data.url)
+
                 filename, total_size, supports_ranges = meta
 
                 if self.is_verify and not data.checksum:

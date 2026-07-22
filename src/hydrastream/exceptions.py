@@ -261,3 +261,9 @@ class StreamError(HydraError):
             f"Cannot resume stream. Aborting."
         )
         HydraError.__post_init__(self)
+
+
+class ClosedQueueError(Exception):
+    """Исключение при попытке записи в мертвый актор."""
+
+    pass
