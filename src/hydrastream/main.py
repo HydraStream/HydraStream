@@ -422,7 +422,7 @@ def cli(
             "-o",
             "--output",
             help="Destination directory for downloaded files.",
-            default_factory=partial(get_cfg, "output", None),
+            default_factory=partial(get_cfg, "output", "downloads"),
         ),
     ],
     threads: Annotated[
@@ -545,7 +545,6 @@ def cli(
 
     if threads is None:
         threads = 128
-    output_dir = output_dir + "/downloads" if output_dir is not None else "downloads"
     if min_chunk_size_mb is None:
         min_chunk_size_mb = 5
     if max_stream_chunk_size_mb is None:
