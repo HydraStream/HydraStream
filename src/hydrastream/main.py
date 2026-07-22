@@ -333,6 +333,7 @@ async def async_main(  # noqa
                         tasks,
                         ui,
                     )
+
                 else:
                     for i in tasks:
                         await daemon.wait_for_file(i)

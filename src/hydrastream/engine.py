@@ -279,7 +279,7 @@ def bootstrap_engine(  # noqa
             async with asyncio.TaskGroup() as stage_tg:
                 for i, resolver in enumerate(resolvers):
                     stage_tg.create_task(resolver.run(), name=f"resolver_{i}")
-
+            print("Your debug message here 1", file=sys.__stderr__, flush=True)
             if ctx.config.dry_run:
                 await ctx.ui.refresh_ui(ctx.state_q)
         finally:
@@ -353,12 +353,11 @@ def bootstrap_engine(  # noqa
                 async with asyncio.TaskGroup() as stage_tg:
                     if not ctx.config.is_stream:
                         stage_tg.create_task(aggregator.run(), name="aggregator")
-                    else:
-                        await ctx.ui.refresh_ui(ctx.state_q)
                     stage_tg.create_task(analyzer.run(), name="analyzer")
                     stage_tg.create_task(autosaver.run(), name="autosaver")
                     stage_tg.create_task(controller.run(), name="traffic_tontroller")
                     stage_tg.create_task(throttler.run(), name="throttle_controller")
+                await ctx.ui.refresh_ui(ctx.state_q)
 
             finally:
                 if not ctx.config.is_stream:

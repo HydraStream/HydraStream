@@ -27,6 +27,7 @@ from hydrastream.messages.state import (
 )
 
 ON_ENGINE_START_HOOK: Callable[[HydraContext], Any] = lambda x: None  # noqa: E731
+ON_TEST_HOOK: bool = False
 
 
 @hydra_dataclass
@@ -72,6 +73,7 @@ class HydraDaemon:
 
         self._is_stopping = False
         # Запускаем движок стандартным способом в фоне
+
         self._engine_task = asyncio.create_task(
             self._run_engine_in_background(), name="hydra:engine_main"
         )
@@ -213,15 +215,15 @@ class HydraDaemon:
         self._is_stopping = True
         self._ui.log("Initiating graceful shutdown...", status=LogStatus.INFO)
 
+        self._ctx.links_q.send_poison_pills_nowait(count=self._ctx.resolvers)
+        self._ctx.session_killer.set()
         try:
-            async with asyncio.timeout(timeout):
-                # 1. Запускаем каскад смерти через пилюлю фидеру
-
-                self._ctx.links_q.send_poison_pills_nowait(count=self._ctx.resolvers)
-                self._ctx.session_killer.set()
-
-                # 2. Ждем штатного закрытия, но не вечно (защита от зависания)
+            if ON_TEST_HOOK:
                 await asyncio.shield(self._engine_task)
+
+            async with asyncio.timeout(timeout):
+                await asyncio.shield(self._engine_task)
+
             self._ui.log("Daemon stopped gracefully.", status=LogStatus.INFO)
 
         except TimeoutError as e:
