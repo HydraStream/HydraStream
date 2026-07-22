@@ -24,3 +24,5 @@ musor/
 .coverage
 *.log
 .hypothesis
+typings
+deadlock_report

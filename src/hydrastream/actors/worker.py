@@ -2,177 +2,232 @@
 # Licensed under the MIT License.
 
 import asyncio
-import contextlib
 import os
 import random
 import sys
 import traceback
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from typing import assert_never, final, override
 
 from curl_cffi import Response
 from curl_cffi.requests import RequestsError
 
-from hydrastream._curl_shim import aiter_bytes, get_error_response
+from hydrastream.actors.controller import (
+    TrafficSignal,
+)
+from hydrastream.actors.dispatcher import FileCompleted
+from hydrastream.domain.base_actor import BaseActor, BaseActorKwargs, ErrorVerdict
+from hydrastream.domain.entities import Chunk, StreamChunk
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     DownloadFailedError,
+    GracefulShutdownError,
     LogStatus,
     StreamError,
-    WorkerScaleDown,
 )
-from hydrastream.models import Chunk, Envelope, HydraContext, StreamChunk, WriteChunk
-from hydrastream.monitor import done, log, update
-from hydrastream.network import stream_chunk, try_scale_up
+from hydrastream.interfaces import (
+    NetworkBackend,
+    StorageBackend,
+)
+from hydrastream.messages.base import (
+    ActorFifoQueue,
+    ActorPriorityQueue,
+    PoisonPill,
+    StandardPill,
+    TerminalPill,
+    ask,
+)
+from hydrastream.messages.io import WriteChunk
+from hydrastream.messages.state import (
+    FileFinishedCmd,
+    ProgressDeltaCmd,
+    StateKeeperMsg,
+)
+from hydrastream.messages.traffic import (
+    FlushCmd,
+    GoToSleepPill,
+    NetworkCongestionSignal,
+    RegisterStreamCmd,
+    RemoveStreamCmd,
+    ThrottlerMsg,
+    TooManyRequests,
+    WakeUpPill,
+)
+from hydrastream.network import stream_chunk
 
 
-@dataclass
-class DownloadWorker:
-    ctx: HydraContext
-    worker_id: int
+class BaseWorkerKwargs(BaseActorKwargs):
+    throttler_outbox: ActorFifoQueue[ThrottlerMsg | PoisonPill]
+    controller_outbox: ActorFifoQueue[TrafficSignal | PoisonPill]
+    state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    sleep_signals_indox: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill | PoisonPill]
 
-    async def run(self) -> None:
-        while True:
-            if self.worker_id >= self.ctx.dynamic_limit:
-                async with self.ctx.sync.dynamic_limit:
-                    await self.ctx.sync.dynamic_limit.wait_for(
-                        lambda: self.worker_id < self.ctx.dynamic_limit
+    net: NetworkBackend
+
+
+@hydra_dataclass
+class BaseDownloadWorker(BaseActor[Chunk], ABC):
+    throttler_outbox: ActorFifoQueue[ThrottlerMsg | PoisonPill] | None = None
+    controller_outbox: ActorFifoQueue[TrafficSignal | PoisonPill]
+    state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    sleep_signals_indox: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill | PoisonPill]
+
+    net: NetworkBackend
+
+    @final
+    @override
+    async def _handle_msg(self, msg: Chunk) -> None:
+
+        match msg:
+            case Chunk() as chunk:
+                try:
+                    msq_ = self.sleep_signals_indox.get_nowait()
+
+                    await self.inbox.send_data(
+                        sort_key=self._get_sort_key(msg.file.meta.id, msg.current_pos),
+                        data=msg,
                     )
-            envelope, chunk = await self.get_chunk()
-            if envelope is None:
-                break
-            if chunk is None:
-                continue
 
-            try:
-                await self.process_chunk(chunk)
+                    msq_ = await self.wait_in_sleep_inbox.get()
+
+                    if isinstance(msq_, (StandardPill, TerminalPill)):
+                        raise GracefulShutdownError
+
+                    return
+                except asyncio.QueueEmpty:
+                    pass
+
+                file_obj = chunk.file
+                if not file_obj or file_obj.is_failed:
+                    return
+
+                await self._process_chunk(chunk)
 
                 if not chunk.is_finished:
-                    await log(
-                        self.ctx.ui,
-                        f"Truncated read for {chunk.file.meta.filename}. "
+                    self.ui.log(
+                        f"Truncated read for {chunk.file.actual_filename}. "
                         f"Requeuing remaining {chunk.remaining} bytes.",
                         status=LogStatus.WARNING,
                         throttle_key="truncated_read",
                         throttle_sec=2.0,
                     )
-                    await self.requeue_chunk(envelope, chunk, delay_range=(0.1, 1.0))
-                    continue
-                await self.file_done(chunk)
-            except Exception as e:
-                await self.handle_worker_error(envelope, chunk, e)
 
-    async def get_chunk(self) -> tuple[Envelope[Chunk | None] | None, Chunk | None]:
-        envelope = await self.ctx.queues.chunk.get()
+                    await self._requeue_chunk(chunk, delay_range=(0.1, 1.0))
 
-        if envelope.is_poison_pill:
-            if not self.ctx.sync.stop_adaptive_controller.is_set():
-                self.ctx.sync.stop_adaptive_controller.set()
-                self.ctx.ui.speed.controller_checkpoint_event.set()
-                self.ctx.dynamic_limit = sys.maxsize
-                async with self.ctx.sync.dynamic_limit:
-                    self.ctx.sync.dynamic_limit.notify_all()
+                    return
 
-            if envelope.is_last_survivor:
-                if self.ctx.stream:
-                    await self.ctx.queues.file_discovery.put(-1)
+                await self._file_done(chunk)
 
-                self.ctx.sync.all_complete.set()
-                self.ctx.ui.speed.throttler_checkpoint_event.set()
-                await self.ctx.queues.disk.put(
-                    Envelope(
-                        sort_key=(sys.maxsize,),
-                        is_poison_pill=True,
-                        is_last_survivor=True,
-                    )
-                )
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
 
-            return None, None
-
-        if not (chunk := envelope.payload):
-            return envelope, None
-
-        file_obj = chunk.file
-        if not file_obj or file_obj.is_failed:
-            return envelope, None
-
-        if self.ctx.stream:
-            async with self.ctx.sync.chunk_from_future:
-                await self.ctx.sync.chunk_from_future.wait_for(
-                    lambda: (
-                        self.ctx.next_offset + self.ctx.config.BUFFER_SIZE
-                        >= chunk.current_pos
-                    )
-                )
-        return envelope, chunk
-
-    async def handle_worker_error(
-        self, envelope: Envelope[Chunk | None], chunk: Chunk, e: Exception
-    ) -> None:
-        if isinstance(e, WorkerScaleDown):
-            await self.ctx.queues.chunk.put(envelope)
-            return
+    @final
+    @override
+    async def _on_error(
+        self, e: Exception, msg: Chunk | PoisonPill | None = None
+    ) -> ErrorVerdict:
+        if not isinstance(msg, Chunk):
+            return ErrorVerdict.RESUME
 
         if isinstance(e, RequestsError):
-            await self._handle_requests_error(envelope, chunk, e)
-            self.ctx.dynamic_limit = max(self.ctx.dynamic_limit - 1, 1)
-            async with self.ctx.sync.dynamic_limit:
-                self.ctx.sync.dynamic_limit.notify_all()
-            return
+            await self._handle_requests_error(msg, e)
+            return ErrorVerdict.RESUME
 
         if isinstance(e, TimeoutError):
-            await self.requeue_chunk(envelope, chunk)
-            return
+            await self._requeue_chunk(msg)
+            return ErrorVerdict.RESUME
+
+        if isinstance(e, GracefulShutdownError):
+            return ErrorVerdict.STOP
 
         tb_str = traceback.format_exc()
 
-        if self.ctx.config.debug:
-            # В дебаге выводим в консоль/лог всю простыню, чтобы сразу найти баг
-            await log(
-                self.ctx.ui, f"CRITICAL CRASH:\n{tb_str}", status=LogStatus.CRITICAL
-            )
+        if self.is_debug:
+            self.ui.log(f"CRITICAL CRASH:\n{tb_str}", status=LogStatus.CRITICAL)
+            return ErrorVerdict.ESCALATE
 
-        else:
-            await log(
-                self.ctx.ui,
-                f"Worker internal crash: {e!r}",
-                status=LogStatus.CRITICAL,
-                traceback=tb_str,  # Это поле уйдет в файл download.log!
-            )
-        raise e
+        self.ui.log(
+            f"Worker internal crash: {e!r}",
+            status=LogStatus.CRITICAL,
+            traceback=tb_str,
+        )
+        return ErrorVerdict.STOP
 
-    async def _handle_requests_error(
-        self, envelope: Envelope[Chunk | None], chunk: Chunk, e: RequestsError
-    ) -> None:
+    @final
+    async def _handle_requests_error(self, chunk: Chunk, e: RequestsError) -> None:
         """Разбирает сетевые ошибки и решает: убить файл или переповторить чанк."""
-        response = get_error_response(e)
+        response = self.net.get_error_response(e)
         if not isinstance(response, Response):
-            await self.requeue_chunk(envelope, chunk)
+            await self._requeue_chunk(chunk)
             return
 
         status = response.status_code
-
-        # Логика "Фатальных" ошибок
         if status in {400, 401, 403, 404, 410, 416}:
-            await log(
-                self.ctx.ui,
-                f"Chunk for {chunk.file.meta.filename} "
+            self.ui.log(
+                f"Chunk for {chunk.file.actual_filename} "
                 f"failed permanently (HTTP {status}).",
                 status=LogStatus.ERROR,
             )
-            chunk.file.is_failed = True
-            self.ctx.fs.delete_file(chunk.file.meta.filename)
+            await self._handle_critical_requests_error(chunk, response)
+            return
 
-            if self.ctx.stream:
-                raise DownloadFailedError(
-                    url=chunk.file.meta.url,
-                    status_code=status,
-                    reason=response.reason,
-                )
-        else:
-            await self.requeue_chunk(envelope, chunk, delay_range=(0.5, 2.0))
+        if status == 503:
+            await self.controller_outbox.send_data(NetworkCongestionSignal())
 
-    async def requeue_chunk(
+        elif status == 429:
+            await self.controller_outbox.send_data(TooManyRequests())
+
+        await self._requeue_chunk(chunk, delay_range=(0.5, 2.0))
+
+    @abstractmethod
+    async def _handle_critical_requests_error(
+        self, chunk: Chunk, response: Response
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def _requeue_chunk(
         self,
-        envelope: Envelope[Chunk | None],
+        chunk: Chunk,
+        delay_range: tuple[float, float] = (1.0, 3.0),
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def _process_chunk(self, chunk: Chunk) -> None:
+        pass
+
+    @abstractmethod
+    def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
+        """Специфичный ключ сортировки для очередей"""
+        pass
+
+    @abstractmethod
+    async def _file_done(
+        self,
+        chunk: Chunk,
+    ) -> None:
+        pass
+
+
+@hydra_dataclass
+class StreamDownloadWorker(BaseDownloadWorker):
+    @override
+    async def _handle_critical_requests_error(
+        self, chunk: Chunk, response: Response
+    ) -> None:
+        raise DownloadFailedError(
+            url=chunk.file.meta.url,
+            status_code=response.status_code,
+            reason=response.reason,
+        )
+
+    @override
+    async def _requeue_chunk(
+        self,
         chunk: Chunk,
         delay_range: tuple[float, float] = (1.0, 3.0),
     ) -> None:
@@ -180,20 +235,129 @@ class DownloadWorker:
         supports_ranges = file_obj.meta.supports_ranges
 
         if not supports_ranges:
-            if self.ctx.stream:
-                raise StreamError(
-                    url=chunk.file.meta.url, filename=chunk.file.meta.filename
-                )
-            await log(
-                self.ctx.ui,
-                f"Connection dropped for {chunk.file.meta.filename}. "
+            await file_obj.stream_q.send_data(
+                data=StreamError(
+                    url=chunk.file.meta.url, filename=chunk.file.actual_filename
+                ),
+                sort_key=(-1,),
+            )
+        await self.inbox.send_data(
+            sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),
+            data=chunk,
+        )
+        delay = random.uniform(*delay_range)
+        await asyncio.sleep(delay)
+
+    @override
+    async def _process_chunk(self, chunk: Chunk) -> None:
+        if chunk.file.meta.supports_ranges:
+            headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
+        else:
+            headers = None
+        buffer_list: list[bytes] = []
+        current_buffer_size = 0
+
+        async with stream_chunk(
+            net=self.net,
+            ui=self.ui,
+            url=chunk.file.meta.url,
+            headers=headers,
+            max_retries=1,
+        ) as r:
+            try:
+                if self.throttler_outbox is not None:
+                    await self.throttler_outbox.send_data(RegisterStreamCmd(stream=r))
+                bytes_to_read = chunk.end - chunk.current_pos + 1
+
+                async for data in r.aiter_bytes(chunk_size=131072):
+                    if len(data) > bytes_to_read:
+                        data = data[:bytes_to_read]  # noqa: PLW2901
+
+                    buffer_list.append(data)
+                    current_buffer_size += len(data)
+
+                    bytes_to_read -= len(data)
+                    await self.state_outbox.send_data(
+                        ProgressDeltaCmd(
+                            file_id=chunk.file.meta.id, delta_bytes=len(data)
+                        )
+                    )
+
+                    if bytes_to_read <= 0:
+                        break
+
+            finally:
+                if self.throttler_outbox is not None:
+                    await self.throttler_outbox.send_data(RemoveStreamCmd(stream=r))
+
+                if buffer_list:
+                    await chunk.file.stream_q.send_data(
+                        sort_key=(chunk.current_pos,),
+                        data=StreamChunk(start=chunk.current_pos, data=buffer_list),
+                    )
+
+                    chunk.current_pos += current_buffer_size
+
+    @override
+    async def _file_done(
+        self,
+        chunk: Chunk,
+    ) -> None:
+        pass
+
+    @override
+    def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
+        # СТРИМ: Сначала ID файла, потом позиция (Качаем файлы по очереди!)
+        return (file_id, current_pos)
+
+
+@hydra_dataclass
+class DiskDownloadWorker(BaseDownloadWorker):
+    aggregator_outbox: ActorPriorityQueue[WriteChunk | FlushCmd | PoisonPill]
+    file_limit_outbox: ActorFifoQueue[FileCompleted | PoisonPill]
+
+    fs: StorageBackend
+
+    @override
+    async def _handle_critical_requests_error(
+        self, chunk: Chunk, response: Response
+    ) -> None:
+        status = response.status_code
+        chunk.file.is_failed = True
+        await self.state_outbox.send_data(
+            FileFinishedCmd(
+                file_id=chunk.file.meta.id,
+                error=(
+                    f"Chunk for {chunk.file.actual_filename} "
+                    f"failed permanently (HTTP {status})."
+                ),
+            )
+        )
+        self.fs.delete_file(chunk.file.actual_filename)
+
+    @override
+    async def _requeue_chunk(
+        self,
+        chunk: Chunk,
+        delay_range: tuple[float, float] = (1.0, 3.0),
+    ) -> None:
+        file_obj = chunk.file
+        supports_ranges = file_obj.meta.supports_ranges
+
+        if not supports_ranges:
+            self.ui.log(
+                f"Connection dropped for {chunk.file.actual_filename}. "
                 f"Server does not support resume. Restarting download from 0 bytes.",
                 status=LogStatus.WARNING,
             )
 
             downloaded_so_far = chunk.current_pos - chunk.start
             if downloaded_so_far > 0:
-                update(self.ctx.ui, chunk.file.meta.filename, -downloaded_so_far)
+                await self.state_outbox.send_data(
+                    ProgressDeltaCmd(
+                        file_id=chunk.file.meta.id, delta_bytes=-downloaded_so_far
+                    )
+                )
 
             chunk.current_pos = chunk.start
 
@@ -208,46 +372,41 @@ class DownloadWorker:
                     await loop.run_in_executor(
                         None, os.ftruncate, fd, file_obj.meta.content_length
                     )
-        await self.ctx.queues.chunk.put(envelope)
+        await self.inbox.send_data(
+            sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),
+            data=chunk,
+        )
         delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
-    async def process_chunk(self, chunk: Chunk) -> None:
-        if chunk.current_pos > chunk.end:
-            return
+    @override
+    async def _process_chunk(self, chunk: Chunk) -> None:
         if chunk.file.meta.supports_ranges:
             headers = {"Range": f"bytes={chunk.current_pos}-{chunk.end}"}
         else:
             headers = None
 
-        if not self.ctx.stream:
-            await self.disk_process_chunk(chunk, headers)
-        else:
-            await self.stream_process_chunk(chunk, headers)
-
-    async def disk_process_chunk(
-        self,
-        chunk: Chunk,
-        headers: dict[str, str] | None,
-    ) -> None:
         buffer_list: list[bytes] = []
         current_buffer_size = 0
 
         fd = chunk.file.fd
 
         if fd is None:
-            fd = self.ctx.fs.open_file(chunk.file.meta.filename)
+            fd = self.fs.open_file(chunk.file.actual_filename)
         buffer_size = 1_048_576
         async with stream_chunk(
-            self.ctx.net,
-            chunk.file.meta.url,
+            net=self.net,
+            ui=self.ui,
+            url=chunk.file.meta.url,
             headers=headers,
+            max_retries=1,
         ) as r:
             try:
-                self.ctx.active_stream.add(r)
+                if self.throttler_outbox is not None:
+                    await self.throttler_outbox.send_data(RegisterStreamCmd(stream=r))
                 bytes_to_read = chunk.end - chunk.current_pos + 1
 
-                async for data in aiter_bytes(r, chunk_size=131072):
+                async for data in r.aiter_bytes(chunk_size=131072):
                     if len(data) > bytes_to_read:
                         data = data[:bytes_to_read]  # noqa: PLW2901
 
@@ -255,122 +414,85 @@ class DownloadWorker:
                     current_buffer_size += len(data)
 
                     bytes_to_read -= len(data)
-                    update(self.ctx.ui, chunk.file.meta.filename, len(data))
+                    await self.state_outbox.send_data(
+                        ProgressDeltaCmd(
+                            file_id=chunk.file.meta.id, delta_bytes=len(data)
+                        )
+                    )
 
                     if current_buffer_size >= buffer_size:
-                        await self.ctx.queues.disk.put(
-                            Envelope(
-                                sort_key=(fd, chunk.current_pos),
-                                payload=WriteChunk(
-                                    fd=fd,
-                                    offset=chunk.current_pos,
-                                    length=current_buffer_size,
-                                    data=buffer_list,
-                                ),
+                        await self.aggregator_outbox.send_data(
+                            WriteChunk(
+                                fd=fd,
+                                offset=chunk.current_pos,
+                                length=current_buffer_size,
+                                data=buffer_list,
                             )
                         )
                         chunk.current_pos += current_buffer_size
 
-                        buffer_list.clear()
+                        buffer_list = []
                         current_buffer_size = 0
-                        if random.random() < 0.1:
-                            await try_scale_up(self.ctx.net.rate_limiter)
 
-                    if self.ctx.dynamic_limit <= self.worker_id:
-                        raise WorkerScaleDown
                     if bytes_to_read <= 0:
                         break
 
             finally:
-                self.ctx.active_stream.remove(r)
+                if self.throttler_outbox is not None:
+                    await self.throttler_outbox.send_data(RemoveStreamCmd(stream=r))
                 if buffer_list:
-                    with contextlib.suppress(asyncio.QueueFull):
-                        self.ctx.queues.disk.put_nowait(
-                            Envelope(
-                                sort_key=(fd, chunk.current_pos),
-                                payload=WriteChunk(
-                                    fd=fd,
-                                    offset=chunk.current_pos,
-                                    length=current_buffer_size,
-                                    data=buffer_list,
-                                ),
-                            )
-                        )
-
-    async def stream_process_chunk(
-        self,
-        chunk: Chunk,
-        headers: dict[str, str] | None,
-    ) -> None:
-        data = b""
-        async with stream_chunk(
-            self.ctx.net,
-            chunk.file.meta.url,
-            headers=headers,
-        ) as r:
-            try:
-                self.ctx.active_stream.add(r)
-                bytes_to_read = chunk.end - chunk.current_pos + 1
-
-                async for data in aiter_bytes(r, chunk_size=131072):
-                    if len(data) > bytes_to_read:
-                        data = data[:bytes_to_read]  # noqa: PLW2901
-
-                    bytes_to_read -= len(data)
-                    update(self.ctx.ui, chunk.file.meta.filename, len(data))
-
-                    await self.ctx.queues.stream.put(
-                        Envelope(
-                            sort_key=(chunk.current_pos,),
-                            payload=StreamChunk(start=chunk.current_pos, data=data),
+                    await self.aggregator_outbox.send_data(
+                        WriteChunk(
+                            fd=fd,
+                            offset=chunk.current_pos,
+                            length=current_buffer_size,
+                            data=buffer_list,
                         )
                     )
-                    chunk.current_pos = chunk.current_pos + len(data)
+                    chunk.current_pos += current_buffer_size
 
-                    if self.ctx.dynamic_limit <= self.worker_id:
-                        raise WorkerScaleDown
+    @override
+    def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
+        # ДИСК: Сначала позиция, потом ID файла (Round-Robin параллельность!)
+        return (current_pos, file_id)
 
-                    if bytes_to_read <= 0:
-                        break
-
-            finally:
-                self.ctx.active_stream.remove(r)
-
-    async def file_done(
+    @override
+    async def _file_done(
         self,
         chunk: Chunk,
     ) -> None:
-        if self.ctx.stream:
-            return
 
-        filename = chunk.file.meta.filename
+        filename = chunk.file.actual_filename
         file_obj = chunk.file
         if chunk.file.meta.content_length:
             if chunk.file.verified or not chunk.file.is_complete:
                 return
             chunk.file.verified = True
-            if not self.ctx.fs.verify_size(filename, file_obj.meta.content_length):
-                return
+
+        await ask(
+            inbox=self.aggregator_outbox,
+            msg_factory=FlushCmd.create_request,
+            timeout=60.0,
+            sort_key=(sys.maxsize,),
+        )
+
+        self.fs.verify_size(filename, file_obj.meta.content_length)
         if file_obj.meta.expected_checksum:
-            await log(
-                self.ctx.ui,
-                f"Verifying Hash checksum for {chunk.file.meta.filename}...",
+            self.ui.log(
+                f"Verifying Hash checksum for {chunk.file.actual_filename}...",
                 status=LogStatus.INFO,
             )
-            await self.ctx.fs.verify_file_hash(
-                file_obj.meta.filename,
+            await self.fs.verify_file_hash(
+                file_obj.actual_filename,
                 file_obj.meta.expected_checksum.value,
                 file_obj.meta.expected_checksum.algorithm,
             )
-            await log(
-                self.ctx.ui,
-                f"Integrity confirmed: {chunk.file.meta.filename}",
+            self.ui.log(
+                f"Integrity confirmed: {chunk.file.actual_filename}",
                 status=LogStatus.SUCCESS,
             )
-        self.ctx.fs.close_file(fd_or_conn=file_obj.fd)
-        self.ctx.fs.delete_state(filename)
-        await done(self.ctx.ui, filename)
-        del self.ctx.files[chunk.file.meta.id]
-        self.ctx.current_files_id.remove(chunk.file.meta.id)
-        async with self.ctx.sync.current_files:
-            self.ctx.sync.current_files.notify_all()
+        self.fs.close_file(fd_or_conn=file_obj.fd)
+        self.fs.delete_state(filename)
+        self.ui.done(file_obj.meta.id, filename)
+        await self.state_outbox.send_data(FileFinishedCmd(file_id=chunk.file.meta.id))
+        await self.file_limit_outbox.send_data(FileCompleted())

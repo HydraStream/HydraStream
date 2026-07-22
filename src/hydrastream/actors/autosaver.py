@@ -2,35 +2,99 @@
 # Licensed under the MIT License.
 
 import asyncio
+from dataclasses import field
+from typing import assert_never, override
 
+from hydrastream.domain.base_actor import BaseActor
+from hydrastream.domain.entities import File
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import LogStatus
-from hydrastream.models import Envelope, File, HydraContext
-from hydrastream.monitor import log
+from hydrastream.interfaces import StorageBackend
+from hydrastream.messages.base import (
+    ActorFifoQueue,
+    ActorPriorityQueue,
+    PoisonPill,
+    ask,
+)
+from hydrastream.messages.io import WriteChunk
+from hydrastream.messages.state import GetSnapshotCmd, StateKeeperMsg
+from hydrastream.messages.traffic import FlushCmd
 
 
-async def autosaver(ctx: HydraContext, interval: float) -> None:
-    loop = asyncio.get_running_loop()
+@hydra_dataclass
+class FileAutosaver(BaseActor[None]):
+    aggregator_outbox: ActorPriorityQueue[WriteChunk | FlushCmd | PoisonPill]
+    reg_events_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
+    interval: float
+    fs: StorageBackend
+    _ticker_task: asyncio.Task[None] = field(init=False)
 
-    while not ctx.sync.all_complete.is_set():
-        try:
-            async with asyncio.timeout(interval):
-                await ctx.sync.all_complete.wait()
-            break
-        except TimeoutError:
+    @override
+    async def _on_start(self) -> None:
+        self.ui.log("File autosaver worker initiated.", status=LogStatus.INFO)
+        self._ticker_task = asyncio.create_task(self._run_autosave_cron())
+
+    async def _run_autosave_cron(self) -> None:
+        """The clean background ticker loop."""
+        loop = asyncio.get_running_loop()
+
+        while True:
             try:
-                ctx.sync.flush_event.clear()
-                await ctx.queues.disk.put(Envelope(sort_key=(-1,), msg=True))
-                await ctx.sync.flush_event.wait()
-                await loop.run_in_executor(None, save_all_states, ctx, ctx.files)
-            except Exception as e:
-                if ctx.config.debug:
-                    raise
-                await log(
-                    ctx.ui, f"Auto-save operation failed: {e}", status=LogStatus.ERROR
+                await asyncio.sleep(self.interval)
+
+                # --- The Core Trigger Logic ---
+                # 1. Force Disk to write everything down
+                await ask(
+                    inbox=self.aggregator_outbox,
+                    msg_factory=FlushCmd.create_request,
+                    timeout=60.0,
+                    sort_key=(-1,),
                 )
 
+                # 2. Get the state keeper's current snapshot safely
+                files = await ask(
+                    inbox=self.reg_events_q,
+                    msg_factory=GetSnapshotCmd.create_request,
+                    timeout=5.0,
+                    sort_key=(-1,),
+                )
 
-def save_all_states(ctx: HydraContext, files: dict[int, File]) -> None:
-    for file in list(files.values()):
-        if file.chunks and not all(c.current_pos > c.end for c in (file.chunks or [])):
-            ctx.fs.save_state(file)
+                # 3. Offload the heavy blocking file I/O to a thread pool
+                # Note: self._flush_event.wait() is GONE because `ask(FlushCmd)`
+                # already guarantees the disk is completely done!
+                await loop.run_in_executor(None, self._save_all_states, files)
+
+            except asyncio.CancelledError:
+                # Loop was cleanly shut down by on_stop
+                break
+            except Exception as e:
+                if self.is_debug:
+                    raise
+                self.ui.log(
+                    f"Auto-save operation failed: {e}",
+                    status=LogStatus.ERROR,
+                )
+
+    @override
+    async def _handle_msg(self, msg: None) -> None:
+
+        match msg:
+            case None:
+                pass
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
+
+    def _save_all_states(self, files: dict[int, File]) -> None:
+        for file in list(files.values()):
+            if file.chunks and not all(
+                c.current_pos > c.end for c in (file.chunks or [])
+            ):
+                self.fs.save_state(file)
+
+    @override
+    async def _on_stop(self) -> None:
+        # Cleanly stop the background cron task when the actor dies
+        self._ticker_task.cancel()
+        await asyncio.gather(self._ticker_task, return_exceptions=True)
+        self.ui.log("File autosaver worker stopped safely.", status=LogStatus.INFO)

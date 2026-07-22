@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import field
 from enum import IntEnum, StrEnum
 from pathlib import Path
 from typing import Any
 
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.utils import format_size, redact_url
 
 
@@ -27,7 +28,12 @@ class LogStatus(StrEnum):
     INTERRUPT = "INTERRUPT"
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
+class GracefulShutdownError(Exception):
+    pass
+
+
+@hydra_dataclass
 class HydraError(Exception):
     exit_code: ExitCode = ExitCode.GENERAL_ERROR
     log_status: LogStatus = LogStatus.ERROR
@@ -42,10 +48,10 @@ class HydraError(Exception):
         except (KeyError, IndexError):
             self.formatted_msg = self.message_tpl
 
-        super().__init__(f"[{self.error_id}] {self.formatted_msg}")
+        Exception.__init__(self, f"[{self.error_id}] {self.formatted_msg}")
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class HashMismatchError(HydraError):
     filename: str
     algorithm: str
@@ -59,10 +65,10 @@ class HashMismatchError(HydraError):
             f"Hash mismatch for {self.filename}! ({self.algorithm}) "
             f"Expected {self.expected}, got {self.actual}"
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class InsufficientSpaceError(HydraError):
     path: str | Path
     required: int
@@ -73,10 +79,10 @@ class InsufficientSpaceError(HydraError):
             f"Insufficient space on {self.path}. "
             f"Need {format_size(self.required)}, have {format_size(self.free)}."
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class DownloadFailedError(HydraError):
     url: str
     status_code: int | None = None
@@ -95,16 +101,10 @@ class DownloadFailedError(HydraError):
             parts.append(f": {self.reason}")
 
         self.message_tpl = " ".join(parts)
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-class WorkerScaleDown(Exception):  # noqa: N818
-    """Сигнал для воркера уйти в спячку при сужении лимита AIMD."""
-
-    pass
-
-
-@dataclass(kw_only=True)
+@hydra_dataclass
 class FileSizeMismatchError(HydraError):
     filename: str
     expected: int
@@ -117,10 +117,10 @@ class FileSizeMismatchError(HydraError):
             f"Size mismatch for {self.filename}: "
             f"Expected {format_size(self.expected)}, got {format_size(self.actual)}."
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class HydraFileNotFoundError(HydraError):
     filename: str
     path: str
@@ -129,10 +129,10 @@ class HydraFileNotFoundError(HydraError):
 
     def __post_init__(self) -> None:
         self.message_tpl = f"File not found: {self.filename} (Expected at: {self.path})"
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class StateSaveError(HydraError):
     filename: str
     target_path: str
@@ -145,10 +145,10 @@ class StateSaveError(HydraError):
             f"Failed to save state for {self.filename} "
             f"at {self.target_path}. Reason: {self.reason}"
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class OrphanedChunkError(HydraError):
     # В DOD нам важно знать, какой именно кусок данных "осиротел"
     start_pos: int
@@ -161,10 +161,10 @@ class OrphanedChunkError(HydraError):
             f"Orphaned Chunk: Reference to File object lost! "
             f"Chunk range: {self.start_pos}-{self.end_pos}"
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class InvalidChecksumError(HydraError):
     algorithm: str
     value: str
@@ -177,10 +177,10 @@ class InvalidChecksumError(HydraError):
             f"Invalid checksum for {self.algorithm}: {self.reason} "
             f"(Value: {self.value})"
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class LogFileError(HydraError):
     path: str
     original_err: str
@@ -191,10 +191,10 @@ class LogFileError(HydraError):
     )
 
     def __post_init__(self) -> None:
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class SystemContextError(HydraError):
     operation: str  # Что мы пытались сделать (например, "initializing tasks")
     original_error: str  # Текст ошибки из OSError или Exception
@@ -210,10 +210,10 @@ class SystemContextError(HydraError):
             msg += f" (Path: {self.path})"
 
         self.message_tpl = msg
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class ValidationError(HydraError):
     # Универсальный класс для всех проблем с аргументами
     param: str
@@ -224,10 +224,10 @@ class ValidationError(HydraError):
 
     def __post_init__(self) -> None:
         self.message_tpl = f"Invalid --{self.param} [{self.value}]: {self.reason}"
-        super().__post_init__()
+        HydraError.__post_init__(self)
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class FileReadError(HydraError):
     path: str
     reason: str
@@ -235,16 +235,16 @@ class FileReadError(HydraError):
     log_status: LogStatus = LogStatus.ERROR
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class InvalidParameterError(HydraError):
     param: str
     value: str | None = None
     reason: str
     exit_code: ExitCode = ExitCode.USAGE_ERROR
-    log_status: LogStatus = LogStatus.WARNING  # Для ссылок можно WARNING,
+    log_status: LogStatus = LogStatus.WARNING
 
 
-@dataclass(kw_only=True)
+@hydra_dataclass
 class StreamError(HydraError):
     url: str
     filename: str
@@ -260,4 +260,10 @@ class StreamError(HydraError):
             f"(Range requests) for {self.url}. "
             f"Cannot resume stream. Aborting."
         )
-        super().__post_init__()
+        HydraError.__post_init__(self)
+
+
+class ClosedQueueError(Exception):
+    """Исключение при попытке записи в мертвый актор."""
+
+    pass

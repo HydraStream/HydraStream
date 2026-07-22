@@ -1,104 +1,71 @@
 import asyncio
 import errno
 import os
+from typing import assert_never, override
 
-from hydrastream.exceptions import LogStatus
-from hydrastream.models import HydraContext, WriteChunk
-from hydrastream.monitor import log
-
-
-async def disk_writer(ctx: HydraContext) -> None:
-    batch_bytes: list[WriteChunk] = []
-    current_batch_size = 0
-
-    while True:
-        envelope = await ctx.queues.disk.get()
-
-        if envelope.payload:
-            batch_bytes.append(envelope.payload)
-            current_batch_size += envelope.payload.length
-
-        if batch_bytes and (
-            current_batch_size >= ctx.config.BUFFER_SIZE or envelope.payload is None
-        ):
-            try:
-                await flush_to_disk(ctx, batch_bytes)
-
-                batch_bytes.clear()
-                current_batch_size = 0
-
-            except Exception as e:
-                msg = handle_disk_error(e)
-                await log(
-                    ctx.ui,
-                    f"Disk Write Failure: {e}",
-                    status=LogStatus.CRITICAL,
-                )
-                raise RuntimeError(msg) from e
-
-        if envelope:
-            ctx.sync.flush_event.set()
-
-        if envelope.is_poison_pill:
-            break
+from hydrastream.domain.base_actor import BaseActor, ErrorVerdict
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
+from hydrastream.exceptions import GracefulShutdownError, LogStatus
+from hydrastream.interfaces import StorageBackend
+from hydrastream.messages.base import (
+    ActorFifoQueue,
+    PoisonPill,
+)
+from hydrastream.messages.io import WriteChunk
+from hydrastream.messages.traffic import WriteCompleted
 
 
-def handle_disk_error(e: Exception) -> str:
-    reason = "Unknown"
-    if isinstance(e, OSError):
-        sys_msg = os.strerror(e.errno) if e.errno else "Unknown"
-        reasons = {
-            errno.ENOSPC: f"STORAGE FULL: {sys_msg}. Action: Clean up disk space.",
-            errno.EDQUOT: f"STORAGE FULL: {sys_msg}. Action: Clean up disk space.",
-            errno.EIO: (
-                f"HARDWARE FAILURE: {sys_msg}. Action: Check drive SMART status."
-            ),
-            errno.EBADF: (
-                f"RUNTIME ERROR: {sys_msg}. Action: Check for file closing races."
-            ),
-        }
-        if e.errno is not None:
-            reason = reasons.get(e.errno, f"OS ERROR: {sys_msg} (code {e.errno})")
+@hydra_dataclass
+class DiskWriter(BaseActor[list[WriteChunk]]):
+    ack_outbox: ActorFifoQueue[WriteCompleted | PoisonPill]
 
-    return reason
+    fs: StorageBackend
 
+    @override
+    async def _handle_msg(self, msg: list[WriteChunk]) -> None:
+        match msg:
+            case list() as batch:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._write_all_sync, batch)
+                await self.ack_outbox.send_data(WriteCompleted())
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
 
-async def flush_to_disk(ctx: HydraContext, batch_bytes: list[WriteChunk]) -> None:
-    if not batch_bytes:
-        return
+    @override
+    async def _on_error(
+        self, e: Exception, msg: list[WriteChunk] | PoisonPill | None = None
+    ) -> ErrorVerdict:
+        if isinstance(e, GracefulShutdownError):
+            return ErrorVerdict.STOP
 
-    batch_bytes.sort()
+        msg_ = self._handle_disk_error(e)
+        self.ui.log(
+            f"Disk Write Failure: {msg_}",
+            status=LogStatus.CRITICAL,
+        )
+        raise RuntimeError(msg_) from e
 
-    coalesced: list[WriteChunk] = []
-    curr = batch_bytes[0]
-    acc_data = list(curr.data)
-    acc_len = curr.length
+    def _write_all_sync(self, coalesced: list[WriteChunk]) -> None:
+        for chunk in coalesced:
+            self.fs.write_chunk_data(chunk.fd, chunk.data, chunk.length, chunk.offset)
 
-    for next_chunk in batch_bytes[1:]:
-        # Проверяем, можно ли приклеить следующий чанк к текущему
-        if curr.fd == next_chunk.fd and (curr.offset + acc_len) == next_chunk.offset:
-            acc_data.extend(next_chunk.data)
-            acc_len += next_chunk.length
-        else:
-            # Сохраняем накопленный результат и переходим к новому
-            coalesced.append(
-                WriteChunk(
-                    fd=curr.fd, offset=curr.offset, length=acc_len, data=acc_data
-                )
-            )
-            curr = next_chunk
-            acc_data = list(curr.data)
-            acc_len = curr.length
+    @staticmethod
+    def _handle_disk_error(e: Exception) -> str:
+        reason = "Unknown"
+        if isinstance(e, OSError):
+            sys_msg = os.strerror(e.errno) if e.errno else "Unknown"
+            reasons = {
+                errno.ENOSPC: f"STORAGE FULL: {sys_msg}. Action: Clean up disk space.",
+                errno.EDQUOT: f"STORAGE FULL: {sys_msg}. Action: Clean up disk space.",
+                errno.EIO: (
+                    f"HARDWARE FAILURE: {sys_msg}. Action: Check drive SMART status."
+                ),
+                errno.EBADF: (
+                    f"RUNTIME ERROR: {sys_msg}. Action: Check for file closing races."
+                ),
+            }
+            if e.errno is not None:
+                reason = reasons.get(e.errno, f"OS ERROR: {sys_msg} (code {e.errno})")
 
-    # Не забываем добавить последний накопленный чанк
-    coalesced.append(
-        WriteChunk(fd=curr.fd, offset=curr.offset, length=acc_len, data=acc_data)
-    )
-
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _write_all_sync, ctx, coalesced)
-
-
-def _write_all_sync(ctx: HydraContext, coalesced: list[WriteChunk]) -> None:
-    for chunk in coalesced:
-        ctx.fs.write_chunk_data(chunk.fd, chunk.data, chunk.length, chunk.offset)
+        return reason

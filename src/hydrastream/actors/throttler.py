@@ -3,61 +3,115 @@
 
 import asyncio
 import time
+from dataclasses import field
+from typing import assert_never, override
 
-from curl_cffi import CurlOpt
-
+from hydrastream.domain.base_actor import BaseActor, ErrorVerdict
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
+    GracefulShutdownError,
     LogStatus,
 )
-from hydrastream.models import HydraContext
-from hydrastream.monitor import log
+from hydrastream.interfaces import NetworkStream
+from hydrastream.messages.base import PoisonPill
+from hydrastream.messages.traffic import (
+    CheckpointReachedCmd,
+    DiskBufferClearedSignal,
+    DiskBufferFullSignal,
+    RegisterStreamCmd,
+    RemoveStreamCmd,
+    ThrottlerMsg,
+)
 
 
-async def throttle_controller(ctx: HydraContext) -> None:
-    ctx.ui.speed.last_checkpoint_time = time.monotonic()
+@hydra_dataclass
+class ThrottleController(BaseActor[ThrottlerMsg]):
+    active_stream: set[NetworkStream] = field(default_factory=set[NetworkStream])
 
-    while not ctx.sync.all_complete.is_set():
-        try:
-            await ctx.ui.speed.throttler_checkpoint_event.wait()
-            if ctx.sync.all_complete.is_set():
-                break
-            ctx.ui.speed.throttler_checkpoint_event.clear()
+    speed_limit: float | None
+    bytes_to_check: int
+    _prev_bytes: int = 0
+    _last_checkpoint_time: float = 0.0
 
-            # Вся логика теперь в отдельной функции
-            await enforce_throttling(ctx)
+    is_disk_choked: bool = False
 
-            ctx.ui.speed.last_checkpoint_time = time.monotonic()
+    def __post_init__(self) -> None:
+        if self.speed_limit:
+            self.speed_limit *= 1024**2
 
-        except Exception as e:
-            if ctx.config.debug:
-                raise
-            await log(
-                ctx.ui, f"Throttle controller failed: {e}", status=LogStatus.ERROR
-            )
+    @override
+    async def _on_start(self) -> None:
+        self._last_checkpoint_time = time.monotonic()
 
+    @override
+    async def _handle_msg(self, msg: ThrottlerMsg) -> None:
+        match msg:
+            case RegisterStreamCmd(stream=s):
+                self.active_stream.add(s)
+                # Если диск УЖЕ тупит, сразу режем скорость новичку!
+                if self.is_disk_choked:
+                    s.set_speed_limit(1)
 
-async def enforce_throttling(ctx: HydraContext) -> None:
-    """Вычисляет задержку и временно ограничивает поток данных."""
-    now = time.monotonic()
-    elapsed = min(1, now - ctx.ui.speed.last_checkpoint_time)
+            case RemoveStreamCmd(stream=s):
+                self.active_stream.discard(s)
 
-    if elapsed <= 0 or not ctx.ui.speed.speed_limit:
-        return
+            case DiskBufferFullSignal():
+                # Авария на диске! Режем скорость ВСЕМ.
+                self.is_disk_choked = True
+                self._set_curl_speed_limit(limit=1)
 
-    target_time = ctx.ui.speed.bytes_to_check / ctx.ui.speed.speed_limit
+            case DiskBufferClearedSignal():
+                # Диск разгреб завалы!
+                self.is_disk_choked = False
+                self._set_curl_speed_limit(limit=0)
 
-    if elapsed < target_time:
-        sleep_duration = target_time - elapsed
+            case CheckpointReachedCmd(new_btc=btc):
+                self.bytes_to_check = btc
+                await self._enforce_throttling()
 
-        # Ставим на паузу (через curl)
-        _set_curl_speed_limit(ctx, limit=1)
-        await asyncio.sleep(sleep_duration)
-        # Снимаем паузу
-        _set_curl_speed_limit(ctx, limit=0)
+            case _ as unreachable:
+                await super()._handle_msg(unreachable)
+                assert_never(unreachable)
 
+    @override
+    async def _on_error(
+        self, e: Exception, msg: ThrottlerMsg | PoisonPill | None = None
+    ) -> ErrorVerdict:
 
-def _set_curl_speed_limit(ctx: HydraContext, limit: int) -> None:
-    """Вспомогательная функция для прохода по активным потокам."""
-    for r in ctx.active_stream:
-        if r.curl is not None:
-            r.curl.setopt(CurlOpt.MAX_RECV_SPEED_LARGE, limit)
+        if isinstance(e, GracefulShutdownError):
+            return ErrorVerdict.STOP
+
+        self.ui.log(f"Throttle controller failed: {e}", status=LogStatus.ERROR)
+
+        if self.is_debug:
+            return ErrorVerdict.ESCALATE
+        return ErrorVerdict.STOP
+
+    async def _enforce_throttling(self) -> None:
+        now = time.monotonic()
+        elapsed = min(1, now - self._last_checkpoint_time)
+
+        if elapsed <= 0 or not self.speed_limit:
+            return
+
+        target_time = self.bytes_to_check / self.speed_limit
+
+        if elapsed < target_time:
+            sleep_duration = target_time - elapsed
+
+            # Ставим на паузу
+            self._set_curl_speed_limit(limit=1)
+
+            await asyncio.sleep(sleep_duration)
+
+            # СНИМАЕМ ПАУЗУ ТОЛЬКО ЕСЛИ ДИСК СВОБОДЕН!
+            if not self.is_disk_choked:
+                self._set_curl_speed_limit(limit=0)
+
+        # Обновляем время после паузы!
+        self._last_checkpoint_time = time.monotonic()
+
+    def _set_curl_speed_limit(self, limit: int) -> None:
+        """Вспомогательная функция для прохода по активным потокам."""
+        for r in self.active_stream:
+            r.set_speed_limit(limit)

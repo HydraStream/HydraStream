@@ -9,8 +9,12 @@ import re
 import shutil
 import tempfile
 import time
+from dataclasses import field
 from pathlib import Path
+from typing import override
 
+from hydrastream.domain.entities import File, TypeHash
+from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.exceptions import (
     FileSizeMismatchError,
     HashMismatchError,
@@ -18,46 +22,71 @@ from hydrastream.exceptions import (
     InsufficientSpaceError,
     StateSaveError,
 )
-from hydrastream.models import File, TypeHash
+from hydrastream.interfaces import StorageBackend
 
 
-class LocalStorageManager:
-    def __init__(self, output_dir: Path, debug: bool = False) -> None:
-        self.output_dir = Path(output_dir).expanduser().resolve()
+@hydra_dataclass
+class LocalStorageManager(StorageBackend):
+    output_dir: Path
+    debug: bool = False
+
+    state_dir: Path = field(init=False)
+    _active_fds: set[int] = field(init=False, default_factory=set[int])
+
+    def __post_init__(self) -> None:
+        self.output_dir = Path(self.output_dir).expanduser().resolve()
+
         self.state_dir = self.output_dir / ".states"
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.debug = debug
 
-    def allocate_space(self, filename: str, size: int) -> str | None:
+    @override
+    def allocate_space(self, filename: str, size: int) -> tuple[int, str | None]:
+
         free_space = shutil.disk_usage(self.output_dir).free
         if free_space < size:
             raise InsufficientSpaceError(
                 path=self.output_dir, required=size, free=free_space
             )
 
-        filepath = self.output_dir / filename
+        stem = Path(filename).stem
+        suffix = Path(filename).suffix
+        counter = 0
 
-        if filepath.is_file():
-            filepath = self.get_unique_path(filepath)
+        while True:
+            # Формируем имя: при counter=0 берем оригинал, далее добавляем (1), (2)...
+            current_name = filename if counter == 0 else f"{stem} ({counter}){suffix}"
+            filepath = self.output_dir / current_name
 
-        fd = os.open(filepath, os.O_RDWR | os.O_CREAT)
-        try:
-            if hasattr(os, "posix_fallocate") and size > 0:
-                os.posix_fallocate(fd, 0, size)
-            else:
-                os.ftruncate(fd, size)
-        finally:
-            os.close(fd)
+            fd = None
+            try:
+                # os.O_EXCL гарантирует, что если файл уже создается другим потоком,
+                # мы упадем в FileExistsError на уровне ОС, исключая race condition.
+                fd = os.open(filepath, os.O_RDWR | os.O_CREAT | os.O_EXCL)
 
-        if filepath.name != filename:
-            return filepath.name
-        return None
+                if hasattr(os, "posix_fallocate") and size > 0:
+                    os.posix_fallocate(fd, 0, size)
+                else:
+                    os.ftruncate(fd, size)
 
+                # Если успешно создали файл, выходим из цикла
+                if current_name != filename:
+                    return fd, current_name
+                return fd, None
+
+            except FileExistsError:
+                counter += 1
+                continue
+
+    @override
     def open_file(self, filename: str) -> int:
         filepath = self.output_dir / filename
-        return os.open(filepath, os.O_RDWR)
+        fd = os.open(filepath, os.O_RDWR)
+        self._active_fds.add(fd)
+        return fd
 
+    @override
     def write_chunk_data(
         self, fd_or_conn: int, data_bytes: list[bytes], len_data: int, offset: int
     ) -> None:
@@ -68,6 +97,7 @@ class LocalStorageManager:
             # Сброс кэша (только для POSIX)
             if hasattr(os, "posix_fadvise"):
                 with contextlib.suppress(Exception):
+                    os.fdatasync(fd_or_conn)
                     os.posix_fadvise(
                         fd_or_conn, offset, len_data, os.POSIX_FADV_DONTNEED
                     )
@@ -78,55 +108,71 @@ class LocalStorageManager:
         self, fd: int, data_bytes: list[bytes], len_data: int, offset: int
     ) -> None:
         """Сложная векторная запись (Zero-Copy) для
-        Linux/macOS с обработкой частичной записи."""
-        views = [memoryview(b) for b in data_bytes]
-        written = 0
-        retries = 0
+        Linux/macOS с обходом лимита IOV_MAX и точной обработкой частичной записи."""
 
-        # Флаг RWF_DSYNC есть только в новых версиях Python/Linux
-        flags = os.RWF_DSYNC if hasattr(os, "RWF_DSYNC") else 0
+        IOV_MAX = getattr(os, "UIO_MAXIOV", 1024)  # noqa: N806
 
-        while written < len_data:
-            try:
-                if flags:
-                    n = os.pwritev(fd, views, offset + written, flags)
-                else:
-                    n = os.pwritev(fd, views, offset + written)
+        current_offset = offset
 
-                if n <= 0:
-                    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        # Внешний цикл: двигаемся по списку data_bytes строгими пачками
+        for i in range(0, len(data_bytes), IOV_MAX):
+            batch_bytes = data_bytes[i : i + IOV_MAX]
+            views = [memoryview(b) for b in batch_bytes]
 
-                written += n
+            # Считаем точную длину только текущей пачки
+            batch_len = sum(len(v) for v in views)
 
-                # Если ядро не смогло записать всё за один раз, перестраиваем векторы
-                if written < len_data:
-                    views = self._rebuild_memoryviews(views, n)
+            written = 0
+            retries = 0
 
-            except OSError as e:
-                self._handle_io_retry(e, retries)
-                retries += 1
+            while written < batch_len:
+                try:
+                    # Теперь мы передаем ВЕСЬ массив views текущей пачки,
+                    # так как он гарантированно меньше или равен IOV_MAX
+                    n = os.pwritev(fd, views, current_offset)
+
+                    if n <= 0:
+                        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+                    written += n
+                    # Сдвигаем смещение для следующего вызова pwritev
+                    current_offset += n
+
+                    if written < batch_len:
+                        views = self._rebuild_memoryviews(views, n)
+
+                except OSError as e:
+                    self._handle_io_retry(e, retries)
+                    retries += 1
 
     def _write_windows_merged(
         self, fd: int, data_bytes: list[bytes], len_data: int, offset: int
     ) -> None:
-        """Классическая запись склеенным куском для Windows."""
-        merged_data = b"".join(data_bytes)
-        view = memoryview(merged_data)
-        written = 0
-        retries = 0
+        current_offset = offset
 
-        while written < len_data:
-            try:
-                n = os.pwrite(fd, view[written:], offset + written)
-                if n <= 0:
-                    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
-                written += n
-            except OSError as e:
-                self._handle_io_retry(e, retries)
-                retries += 1
+        for chunk in data_bytes:
+            view = memoryview(chunk)
+            chunk_len = len(view)
+            written = 0
+            retries = 0
 
+            while written < chunk_len:
+                try:
+                    # Пишем строго по текущему смещению текущего чанка
+                    n = os.pwrite(fd, view[written:], current_offset)
+                    if n <= 0:
+                        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+                    written += n
+                    current_offset += n
+
+                except OSError as e:
+                    self._handle_io_retry(e, retries)
+                    retries += 1
+
+    @staticmethod
     def _rebuild_memoryviews(
-        self, views: list[memoryview], bytes_skipped: int
+        views: list[memoryview], bytes_skipped: int
     ) -> list[memoryview]:
         """Утилита для обрезки записанных кусков из массива векторов."""
         new_views: list[memoryview] = []
@@ -139,25 +185,40 @@ class LocalStorageManager:
                 skip = 0
         return new_views
 
-    def _handle_io_retry(self, e: OSError, retries: int) -> None:
+    @staticmethod
+    def _handle_io_retry(e: OSError, retries: int) -> None:
         """Обрабатывает системные прерывания (EAGAIN, EINTR)."""
-        if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+        if e.errno in {errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR}:
             if retries > 5:
                 raise RuntimeError(f"Too many retries on EAGAIN/EINTR: {e}") from e
             time.sleep(0.01 * (2**retries))  # Exponential backoff
         else:
             raise e
 
+    @override
     def close_file(self, fd_or_conn: int) -> None:
-        with contextlib.suppress(OSError):
-            os.close(fd_or_conn)
+        if fd_or_conn in self._active_fds:
+            try:
+                os.close(fd_or_conn)
+            except OSError:
+                pass
+            finally:
+                self._active_fds.discard(fd_or_conn)
 
+    @override
+    def force_close_all(self) -> None:
+        for fd in list(self._active_fds):
+            with contextlib.suppress(OSError):
+                self.close_file(fd)
+
+    @override
     def delete_file(self, filename: str) -> None:
         filepath = self.output_dir / filename
         filepath.unlink(missing_ok=True)
 
+    @override
     def save_state(self, file_obj: File) -> None:
-        filename = file_obj.meta.filename
+        filename = file_obj.actual_filename
         path = Path(self.get_state_path(filename))
         temp_dir = path.parent
         temp_dir.mkdir(parents=True, exist_ok=True)
@@ -169,22 +230,23 @@ class LocalStorageManager:
                 temp_path = Path(tf.name)
 
             try:
-                Path.replace(temp_path, path)
+                temp_path.replace(path)
                 if os.name != "nt":
                     dir_fd = os.open(str(temp_dir), os.O_RDONLY)
                     try:
                         os.fsync(dir_fd)
                     finally:
                         os.close(dir_fd)
-            except Exception as e:
-                if Path.exists(temp_path):
-                    Path.unlink(temp_path)
-                raise e
+            except OSError:
+                if temp_path.exists():
+                    temp_path.unlink()
+                raise
         except OSError as e:
             raise StateSaveError(
                 filename=filename, target_path=str(path), reason=str(e)
             ) from e
 
+    @override
     def load_state(self, filename: str) -> tuple[File | None, int]:
         p = Path(filename)
         main_name = p.stem  # "GCF_..._genomic.fna"
@@ -224,13 +286,15 @@ class LocalStorageManager:
         if not file:
             return None, len(found_states)
 
-        if (self.output_dir / file.meta.filename).is_file():
+        if (self.output_dir / file.meta.original_filename).is_file():
             return file, len(found_states)
         return None, len(found_states)
 
+    @override
     def delete_state(self, filename: str) -> None:
         self.get_state_path(filename).unlink(missing_ok=True)
 
+    @override
     def verify_size(self, filename: str, expected_size: int) -> bool:
         file_path = self.output_dir / filename
 
@@ -246,6 +310,7 @@ class LocalStorageManager:
 
         return True
 
+    @override
     async def verify_file_hash(
         self, filename: str, expected_checksum: str, algorithm: TypeHash
     ) -> None:
@@ -264,8 +329,9 @@ class LocalStorageManager:
         calculated = await loop.run_in_executor(None, _compute_hash, algorithm)
 
         if calculated != expected_checksum:
-            filepath = self.output_dir / filename
-            filepath.unlink(missing_ok=True)
+            # filepath = self.output_dir / filename
+            # filepath.unlink(missing_ok=True)
+            self.delete_state(filename)
             raise HashMismatchError(
                 filename=filename,
                 algorithm=algorithm,
@@ -273,21 +339,6 @@ class LocalStorageManager:
                 actual=calculated,
             )
 
-    def get_unique_path(self, file_path: Path) -> Path:
-        stem = file_path.stem
-        suffix = file_path.suffix
-        directory = file_path.parent
-
-        counter = 1
-
-        while True:
-            new_name = f"{stem} ({counter}){suffix}"
-            new_path = directory / new_name
-
-            if not new_path.is_file():
-                return new_path
-
-            counter += 1
-
+    @override
     def get_state_path(self, filename: str) -> Path:
         return self.state_dir / f"{filename}.state.json"

@@ -4,38 +4,39 @@
 import asyncio
 import sys
 import tomllib
+from collections.abc import Generator
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, TypeVar
+from typing import Annotated, Any, TextIO
+from urllib.parse import urlparse
 
 import typer
 from curl_cffi import BrowserTypeLiteral
 
 from hydrastream.__init__ import __version__
+from hydrastream.domain.config import HydraConfig, UIConfig
+from hydrastream.domain.context import create_monitor
+from hydrastream.domain.entities import Checksum, TypeHash
 from hydrastream.exceptions import (
     ExitCode,
+    FileReadError,
     HydraError,
     InvalidParameterError,
     LogStatus,
+    StreamError,
     ValidationError,
 )
-from hydrastream.facade import HydraClient
-from hydrastream.models import (
-    Checksum,
-    DisplayConfig,
-    HydraConfig,
-    LogState,
-    SpeedLimiterState,
-    TypeHash,
-    UIState,
-)
-from hydrastream.monitor import log, log_start, log_stop, report
+from hydrastream.facade import HydraDaemon
+from hydrastream.interfaces import MonitorBackend
+
+ON_TEST_HOOK: bool = False
 
 if sys.platform != "win32":
     try:
         import uvloop
 
-        uvloop.install()
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     except ImportError:
         pass
 
@@ -69,7 +70,147 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-async def async_main(  # noqa: C901, PLR0912
+def validate(
+    ui: MonitorBackend,
+    links: list[str] | str | None,
+    input_file: str | None,
+) -> list[str]:
+    if not links and not input_file:
+        raise ValidationError(
+            param="links",
+            reason="You must provide either[LINKS] or an --input file.",
+        )
+    validate_input_file(input_file)
+    if links is not None:
+        links = [links] if isinstance(links, str) else list(links)
+    valid_links = parse_urls(ui, links, input_file)
+    if not valid_links:
+        raise ValidationError(param="links", reason="No valid URLs found to process!")
+
+    return valid_links
+
+
+def validate_input_file(value: str | None) -> None:
+    if value is None or value == "-":
+        return
+
+    path = Path(value)
+    if not path.exists():
+        raise ValidationError(param="input", value=value, reason="File does not exist")
+    if not path.is_file():
+        raise ValidationError(param="input", value=value, reason="Target is not a file")
+
+
+def is_valid_url(url: str) -> bool:
+    """Checks if a given string is a structurally valid HTTP/HTTPS URL."""
+    try:
+        result = urlparse(url)
+        return result.scheme in {"http", "https"} and bool(result.netloc)
+    except ValueError:
+        return False
+
+
+@contextmanager
+def get_input_stream(filepath: str) -> Generator[TextIO, None, None]:
+    if filepath == "-":
+        yield sys.stdin
+        return
+
+    path = Path(filepath).expanduser().resolve()
+
+    if not path.exists():
+        raise FileReadError(path=str(path), reason="Path does not exist")
+    if not path.is_file():
+        raise FileReadError(path=str(path), reason="Target is a directory, not a file")
+
+    try:
+        with path.open(encoding="utf-8") as f:
+            yield f
+    except PermissionError as e:
+        raise FileReadError(path=str(path), reason="Permission denied") from e
+    except OSError as e:
+        raise FileReadError(path=str(path), reason=str(e)) from e
+
+
+def parse_urls(
+    ui: MonitorBackend, links_from_args: list[str] | None, filepath: str | None
+) -> list[str]:
+    all_links: list[str] = []
+
+    # Обработка аргументов
+    if links_from_args:
+        for url in links_from_args:
+            if is_valid_url(url):
+                all_links.append(url)
+            else:
+                ui.report(
+                    InvalidParameterError(
+                        param="url", value=url, reason="Invalid HTTP/HTTPS format"
+                    ),
+                )
+
+    if filepath:
+        with get_input_stream(filepath) as stream:
+            for line in stream:
+                clean_line = line.strip()
+                if not clean_line or clean_line.startswith("#"):
+                    continue
+
+                url = clean_line.split()[0]
+                if is_valid_url(url):
+                    all_links.append(url)
+                else:
+                    ui.report(
+                        InvalidParameterError(
+                            param="file_link",
+                            value=url,
+                            reason="Invalid URL in input file",
+                        ),
+                    )
+
+    return list(dict.fromkeys(all_links))
+
+
+def _prepare_checksums(
+    links: list[str], checksum: str | None, typehash: TypeHash
+) -> dict[str, Checksum]:
+    if not checksum or not links:
+        return {}
+
+    if len(links) == 1:
+        return {links[0]: Checksum(algorithm=typehash, value=checksum)}
+
+    raise ValidationError(
+        param="checksum",
+        reason=(
+            "Warning: The --checksum flag is ignored when multiple URLs are provided."
+        ),
+    )
+
+
+async def _stream_download_tasks(
+    daemon: HydraDaemon,
+    tasks: list[int],
+    ui: MonitorBackend,
+) -> None:
+    loop = asyncio.get_running_loop()
+
+    def _blocking_write(data: bytes) -> None:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+
+    for i in tasks:
+        if file_stream := await daemon.get_stream(i):
+            try:
+                async for chunk in file_stream:
+                    await loop.run_in_executor(None, _blocking_write, chunk)
+
+            except StreamError as e:
+                ui.report(e)
+                sys.exit(e.exit_code)
+
+
+async def async_main(  # noqa
     links: list[str] | None,
     input_file: str | None,
     stream: bool,
@@ -112,106 +253,90 @@ async def async_main(  # noqa: C901, PLR0912
         browser: Browser TLS fingerprint to impersonate.
         debug: Enable debug mode to propagate full tracebacks on failure.
     """  # noqa: E501
-    ui = UIState(
-        display=DisplayConfig(
-            no_ui=no_ui,
-            quiet=quiet,
-            dry_run=dry_run,
-            json_logs=json_logs,
-            verify=verify,
-        ),
-        log=LogState(log_file=Path(output_dir).expanduser().resolve() / "download.log"),
-        speed=SpeedLimiterState(speed_limit=speed_limit),
+
+    ui_config = UIConfig(
+        is_verify=verify,
+        is_dry_run=dry_run,
+        quiet=quiet,
+        no_ui=no_ui,
+        json_logs=json_logs,
+        log_file_dir=Path(output_dir),
+        is_debug=debug,
     )
+    ui = create_monitor(ui_config)
+    ui.start()
+
     try:
-        await log_start(ui)
-
-        expected_checksums: dict[str, tuple[TypeHash, str] | Checksum] = {}
-
-        # Hash logic: only map the checksum if a single URL is provided
-        if checksum and links and len(links) == 1:
-            expected_checksums[links[0]] = Checksum(algorithm=typehash, value=checksum)
-        elif checksum and links and len(links) > 1:
-            raise ValidationError(
-                param="checksum",
-                reason=(
-                    "Warning: The --checksum flag is ignored when "
-                    "multiple URLs are provided."
-                ),
-            )
-
         config = HydraConfig(
+            is_stream=stream,
             threads=threads,
             dry_run=dry_run,
             min_chunk_size_mb=min_chunk_size_mb,
             max_stream_chunk_size_mb=max_stream_chunk_size_mb,
             speed_limit=speed_limit,
-            no_ui=no_ui,
-            quiet=quiet,
-            output_dir=output_dir,
+            output_dir=Path(output_dir),
             buffer_size_mb=buffer_size_mb,
-            json_logs=json_logs,
-            verify=verify,
             client_kwargs=None,
             impersonate=impersonate,
-            debug=debug,
+            debug=True,
         )
 
-        async with HydraClient(config=config, ui=ui) as loader:
-            if stream and not config.dry_run:
-                assert sys.__stdout__ is not None
-                is_terminal = sys.__stdout__.isatty()
+        active_links = validate(links=links, input_file=input_file, ui=ui)
 
-                if is_terminal:
-                    await report(
+        expected_checksums = _prepare_checksums(active_links, checksum, typehash)
+
+        assert sys.__stdout__ is not None
+        is_terminal = sys.__stdout__.isatty()
+        if stream and is_terminal and not dry_run and not ON_TEST_HOOK:
+            ui.report(
+                InvalidParameterError(
+                    param="stream",
+                    reason="Warning: You are running in --stream mode but output is "
+                    "not redirected!"
+                    "\nThe downloaded binary data will be discarded.",
+                )
+            )
+
+            if not expected_checksums:
+                ui.report(
+                    ValidationError(
+                        param="stream",
+                        reason="Please use a pipe (e.g., '| zcat') or redirect "
+                        "to a file (e.g., '> file.gz').\nAborting to save bandwidth.",
+                    )
+                )
+            else:
+                ui.report(
+                    InvalidParameterError(
+                        param="stream",
+                        reason="Proceeding in 'Verification Only' mode "
+                        "since --checksum is provided.",
+                    )
+                )
+        else:
+            async with HydraDaemon(config=config, initial_ui=ui) as daemon:
+                tasks: list[int] = []
+
+                for i in active_links:
+                    if (
+                        task := await daemon.add_download(
+                            i,
+                            expected_checksums=checksum,
+                            type_hash=typehash if checksum else None,
+                        )
+                    ) is not None:
+                        tasks.append(task)
+
+                if stream and not config.dry_run:
+                    await _stream_download_tasks(
+                        daemon,
+                        tasks,
                         ui,
-                        InvalidParameterError(
-                            param="stream",
-                            reason=(
-                                "Warning: You are running in --stream mode but output "
-                                "is not redirected!\n"
-                                "The downloaded binary data will be discarded."
-                            ),
-                        ),
                     )
 
-                    if not expected_checksums:
-                        await report(
-                            ui,
-                            ValidationError(
-                                param="stream",
-                                reason=(
-                                    "Please use a pipe (e.g., '| zcat') or redirect to "
-                                    "a file (e.g., '> file.gz').\n"
-                                    "Aborting to save bandwidth."
-                                ),
-                            ),
-                        )
-
-                        await report(
-                            ui,
-                            InvalidParameterError(
-                                param="stream",
-                                reason=(
-                                    "Proceeding in 'Verification Only' mode "
-                                    "since --checksum is provided."
-                                ),
-                            ),
-                        )
-
-                async for _, file_gen in await loader.stream(
-                    links, input_file, expected_checksums
-                ):
-                    async for chunk in file_gen:
-                        if not is_terminal:
-                            sys.stdout.buffer.write(chunk)
-                        else:
-                            pass
-
-                    if not is_terminal:
-                        sys.stdout.buffer.flush()
-            else:
-                await loader.run(links, input_file, expected_checksums)
+                else:
+                    for i in tasks:
+                        await daemon.wait_for_file(i)
 
     except (KeyboardInterrupt, asyncio.CancelledError):
         if debug:
@@ -227,8 +352,8 @@ async def async_main(  # noqa: C901, PLR0912
         codes: list[int] = []
         for err in all_errors:
             if isinstance(err, HydraError):
-                await report(ui, err)
-                await log(ui, f"FATAL: {err!r}", status=LogStatus.CRITICAL)
+                ui.report(err)
+                ui.log(f"FATAL: {err!r}", status=LogStatus.CRITICAL)
                 codes.append(err.exit_code)
 
         exit_code = max(codes) if codes else ExitCode.GENERAL_ERROR
@@ -236,10 +361,7 @@ async def async_main(  # noqa: C901, PLR0912
         sys.exit(exit_code)
 
     finally:
-        await log_stop(ui)
-
-
-T = TypeVar("T", bound=BaseException)
+        await ui.stop()
 
 
 def flatten_exceptions(e: BaseException) -> list[BaseException]:
@@ -260,6 +382,7 @@ def get_cfg(key: str, default: Any = None) -> Any:  # noqa: ANN401
 
 @app.command()
 def cli(
+    *,
     links: Annotated[
         list[str] | None,
         typer.Argument(
@@ -299,7 +422,7 @@ def cli(
             "-o",
             "--output",
             help="Destination directory for downloaded files.",
-            default_factory=partial(get_cfg, "output", "download"),
+            default_factory=partial(get_cfg, "output", "downloads"),
         ),
     ],
     threads: Annotated[
@@ -324,6 +447,7 @@ def cli(
         bool,
         typer.Option(
             "--dry-run",
+            "-dr",
             help="""Simulate the process: fetch metadata, check disk space, and print a
              report without downloading data.""",
             default_factory=partial(get_cfg, "dry-run", False),

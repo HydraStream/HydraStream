@@ -1,87 +1,110 @@
 import hashlib
-import heapq
 from collections.abc import AsyncGenerator
 
-from hydrastream.exceptions import FileSizeMismatchError, HashMismatchError, LogStatus
-from hydrastream.interfaces import Hasher
-from hydrastream.models import Checksum, HydraContext
-from hydrastream.monitor import done, log
+from hydrastream.actors.dispatcher import FileCompleted
+from hydrastream.actors.stater import FileFinishedCmd, StateKeeperMsg
+from hydrastream.domain.entities import Checksum, File
+from hydrastream.exceptions import (
+    FileSizeMismatchError,
+    HashMismatchError,
+    LogStatus,
+    StreamError,
+)
+from hydrastream.interfaces import Hasher, MonitorBackend
+from hydrastream.messages.base import (
+    ActorFifoQueue,
+    PoisonPill,
+    StandardPill,
+    TerminalPill,
+)
 
 
-async def streamer(ctx: HydraContext, file_id: int) -> AsyncGenerator[bytes]:
-    file_obj = ctx.files[file_id]
+async def file_streamer(  # noqa
+    file_obj: File,
+    credit_outbox: ActorFifoQueue[int | PoisonPill],
+    reg_events_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill],
+    file_limit_outbox: ActorFifoQueue[FileCompleted | PoisonPill],
+    ui: MonitorBackend,
+    is_debug: bool,
+) -> AsyncGenerator[bytes, None]:
+
     total_size = file_obj.meta.content_length
-
     checksum = file_obj.meta.expected_checksum
     hasher: Hasher | None = hashlib.new(checksum.algorithm) if checksum else None
 
-    ctx.next_offset = 0
-    await log(ctx.ui, f"Streaming: {file_obj.meta.filename}", status=LogStatus.INFO)
+    buffer: dict[int, list[bytes]] = {}
+    expected_offset = 0
+
+    ui.log(f"Streaming: {file_obj.actual_filename}", status=LogStatus.INFO)
+
+    async def process_and_yield_chunk(
+        chunk_data: list[bytes],
+    ) -> AsyncGenerator[bytes, None]:
+
+        nonlocal expected_offset
+
+        for data in chunk_data:
+            if hasher:
+                hasher.update(data)
+
+            yield data
+            expected_offset += len(data)
+
+            await credit_outbox.send_data(len(data))
+
     try:
-        while ctx.next_offset < total_size:
-            if ctx.heap and ctx.heap[0].start == ctx.next_offset:
-                chunk = heapq.heappop(ctx.heap)
+        while expected_offset < total_size:
+            msg = await file_obj.stream_q.get()
 
-                if hasher:
-                    hasher.update(chunk.data)
-
-                yield chunk.data
-
-                ctx.next_offset += len(chunk.data)
-
-                async with ctx.sync.chunk_from_future:
-                    ctx.sync.chunk_from_future.notify_all()
-
-                continue
-
-            envelope = await ctx.queues.stream.get()
-
-            if envelope.is_poison_pill:
+            if isinstance(msg, StreamError):
+                raise msg
+            # 1. Избавляемся от глубокого match/case с помощью Guard Clauses
+            if isinstance(msg, (StandardPill, TerminalPill)):
                 break
-            if not (chunk := envelope.payload):
+
+            # 2. Обрабатываем целевой StreamChunk (код стал плоским!)
+            offset, chunk_data = msg.start, msg.data
+
+            if offset != expected_offset:
+                buffer[offset] = chunk_data
                 continue
 
-            if chunk.start == ctx.next_offset:
-                if hasher:
-                    hasher.update(chunk.data)
+            # Обрабатываем текущий чанк, который пришел вовремя
+            async for data in process_and_yield_chunk(chunk_data):
+                yield data
 
-                yield chunk.data
+            # Разбираем накопившийся буфер (код больше не дублируется)
+            while expected_offset in buffer:
+                next_data = buffer.pop(expected_offset)
+                async for data in process_and_yield_chunk(next_data):
+                    yield data
 
-                ctx.next_offset += len(chunk.data)
-
-                async with ctx.sync.chunk_from_future:
-                    ctx.sync.chunk_from_future.notify_all()
-
-            else:
-                heapq.heappush(ctx.heap, chunk)
         else:
-            await done(ctx.ui, file_obj.meta.filename)
-
             if hasher and checksum:
                 try:
-                    verify_stream(
+                    _verify_stream(
                         hasher,
-                        file_obj.meta.filename,
+                        file_obj.actual_filename,
                         checksum,
-                        ctx.next_offset,
+                        expected_offset,
                         total_size,
                     )
-                    await log(
-                        ctx.ui, "Hash Verified", status=LogStatus.SUCCESS, progress=True
-                    )
+                    ui.log("Hash Verified", status=LogStatus.SUCCESS, progress=True)
                 except Exception as e:
-                    await log(ctx.ui, str(e), status=LogStatus.ERROR)
+                    ui.log(str(e), status=LogStatus.ERROR)
                     raise
 
+            ui.done(file_obj.meta.id, file_obj.actual_filename)
+
     finally:
-        ctx.heap.clear()
-        del ctx.files[file_id]
-        ctx.current_files_id.remove(file_id)
-        async with ctx.sync.current_files:
-            ctx.sync.current_files.notify()
+        buffer.clear()
+
+        await reg_events_outbox.send_data(FileFinishedCmd(file_id=file_obj.meta.id))
+
+        await file_limit_outbox.send_data(FileCompleted())
 
 
-def verify_stream(
+def _verify_stream(
     hasher: Hasher,
     filename: str,
     expected_checksum: Checksum,

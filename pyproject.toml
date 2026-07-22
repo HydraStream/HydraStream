@@ -33,7 +33,6 @@ classifiers =[
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -44,11 +43,11 @@ readme = "README.md"
 
 # Минимальная версия Python.
 # Крайне важно для нас, так как архитектура завязана на DOD и оптимизированные dataclasses из 3.11+
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 
 # Продовые зависимости (то, что скачается у пользователя при установке).
 dependencies =[
-    "aiolimiter>=1.2.1",                 # Для алгоритма AIMD и rate-лимитов
+    # Для алгоритма AIMD и rate-лимитов
     "curl-cffi>=0.15.0",              # Асинхронный HTTP-клиент с поддержкой HTTP/2 (>=0.15.0 fixes CVE-2026-33752 SSRF via redirects)
     "hypothesis-jsonschema>=0.23.1",
     "orjson>=3.11.7",                    # Ультра-быстрый парсер JSON (написан на Rust)
@@ -56,6 +55,7 @@ dependencies =[
     "pydantic-settings>=2.14.0",
     "pygments>=2.20.0",                  # Transitive via rich; pinned to avoid CVE-2026-4539 (ReDoS in AdlLexer)
     "rich>=14.3.2",                      # Отрисовка красивых прогресс-баров в консоли
+    "snakeviz>=2.2.2",
     "typer>=0.24.1",                     # Для создания CLI-интерфейса (парсинг аргументов)
     "uvloop>=0.22.1 ; sys_platform != 'win32'", # Сверхбыстрый event-loop для asyncio (не ставим на Windows)
 ]
@@ -87,6 +87,7 @@ dev =[
     "pytest-mock>=3.15.1",
     "pytest-timeout>=2.4.0",
     "ruff>=0.15.1",        # Ультра-быстрый линтер и форматтер на Rust (заменяет flake8, black, isort)
+    "viztracer>=1.1.1",
 ]
 
 # ==============================================================================
@@ -121,7 +122,8 @@ hydrastream = { workspace = true }
 [tool.ruff]
 src = ["src"]
 line-length = 88         # Максимальная длина строки (стандарт Black)
-target-version = "py311" # Оптимизируем код под фичи Python 3.11+
+target-version = "py312" # Оптимизируем код под фичи Python 3.12+
+preview = true
 
 [tool.ruff.lint]
 # Включаем жесткие наборы правил проверок:
@@ -139,7 +141,10 @@ select =[
     "RUF",       # Собственные жесткие правила Ruff
     "N",         # Проверка имен переменных/классов (pep8-naming)
     "C90",       # mccabe сложность
-    "PL"         # Pylint (очень строгий анализатор)
+    "PL",        # Pylint (очень строгий анализатор)
+    "ASYNC",
+    "RUF029"
+
 ]
 
 # Разрешаем ruff автоматически исправлять найденные косяки при запуске --fix
@@ -151,7 +156,9 @@ ignore = [
     "RUF001", # String contains ambiguous unicode character (cyrillic)
     "RUF002", # Docstring contains ambiguous unicode character
     "RUF003", # Comment contains ambiguous unicode character
+    "ASYNC109", # Разрешаем аргумент timeout в асинхронных функциях
 ]
+
 [tool.ruff.format]
 quote-style = "double"           # Всегда используем двойные кавычки " "
 indent-style = "space"           # Отступы пробелами
