@@ -26,3 +26,4 @@ musor/
 .hypothesis
 typings
 deadlock_report.json
+pyrightconfig.json

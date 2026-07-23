@@ -1,7 +1,8 @@
 import asyncio
 import errno
 import os
-from typing import assert_never, override
+import sys
+from typing import TYPE_CHECKING, assert_never, override
 
 from hydrastream.domain.base_actor import BaseActor, ErrorVerdict
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
@@ -13,6 +14,19 @@ from hydrastream.messages.base import (
 )
 from hydrastream.messages.io import WriteChunk
 from hydrastream.messages.traffic import WriteCompleted
+
+ERROR_DISK_FULL = 112
+ERROR_HANDLE_DISK_FULL = 39
+ERROR_IO_DEVICE = 1117
+ERROR_INVALID_HANDLE = 6
+
+if sys.platform == "win32":
+    import pywintypes
+elif TYPE_CHECKING:
+    # Заглушка исключительно для анализатора в VS Code на Linux
+    import pywintypes  # type: ignore
+else:
+    pywintypes = None
 
 
 @hydra_dataclass
@@ -67,5 +81,21 @@ class DiskWriter(BaseActor[list[WriteChunk]]):
             }
             if e.errno is not None:
                 reason = reasons.get(e.errno, f"OS ERROR: {sys_msg} (code {e.errno})")
+        elif pywintypes and isinstance(e, pywintypes.error):
+            # e.args содержит: (win_error_code, function_name, error_message)
+            win_code, func_name, win_msg = e.args
+
+            if win_code in {ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL}:
+                reason = f"STORAGE FULL: {win_msg}. Action: Clean up disk space."
+            elif win_code == ERROR_IO_DEVICE:
+                reason = (
+                    f"HARDWARE FAILURE: {win_msg}. Action: Check drive SMART status."
+                )
+            elif win_code == ERROR_INVALID_HANDLE:
+                reason = (
+                    f"RUNTIME ERROR: {win_msg}. Action: Check for file closing races."
+                )
+            else:
+                reason = f"WIN32 ERROR: {win_msg} (code {win_code} in {func_name})"
 
         return reason

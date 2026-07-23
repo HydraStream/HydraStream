@@ -7,11 +7,22 @@ import hashlib
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 from dataclasses import field
 from pathlib import Path
-from typing import override
+from typing import TYPE_CHECKING, override
+
+if sys.platform == "win32":
+    import msvcrt
+
+    import win32file
+elif TYPE_CHECKING:
+    # Эти импорты увидит ТОЛЬКО линтер в VS Code, они не упадут при запуске на Linux
+    import msvcrt
+
+    import win32file  # type: ignore
 
 from hydrastream.domain.entities import File, TypeHash
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
@@ -90,7 +101,9 @@ class LocalStorageManager(StorageBackend):
         self, fd_or_conn: int, data_bytes: list[bytes], len_data: int, offset: int
     ) -> None:
         """Главный диспетчер записи."""
-        if hasattr(os, "pwritev"):
+        if sys.platform == "win32":
+            self._sync_win32_pwrite(fd_or_conn, data_bytes, offset)
+        elif hasattr(os, "pwritev"):
             self._write_posix_vectored(fd_or_conn, data_bytes, len_data, offset)
 
             # Сброс кэша (только для POSIX)
@@ -101,7 +114,7 @@ class LocalStorageManager(StorageBackend):
                         fd_or_conn, offset, len_data, os.POSIX_FADV_DONTNEED
                     )
         else:
-            self._write_windows_merged(fd_or_conn, data_bytes, len_data, offset)
+            self._write_windows_merged(fd_or_conn, data_bytes, offset)
 
     def _write_posix_vectored(
         self, fd: int, data_bytes: list[bytes], len_data: int, offset: int
@@ -145,7 +158,7 @@ class LocalStorageManager(StorageBackend):
                     retries += 1
 
     def _write_windows_merged(
-        self, fd: int, data_bytes: list[bytes], len_data: int, offset: int
+        self, fd: int, data_bytes: list[bytes], offset: int
     ) -> None:
         current_offset = offset
 
@@ -193,6 +206,18 @@ class LocalStorageManager(StorageBackend):
             time.sleep(0.01 * (2**retries))  # Exponential backoff
         else:
             raise e
+
+    @staticmethod
+    def _sync_win32_pwrite(fd: int, data_bytes: list[bytes], offset: int) -> None:
+        """Синхронная атомарная запись для Windows через Win32 API."""
+        merged_data = b"".join(data_bytes)
+
+        handle = msvcrt.get_osfhandle(fd)  # type: ignore
+        overlapped = win32file.OVERLAPPED()
+        overlapped.Offset = offset & 0xFFFFFFFF
+        overlapped.OffsetHigh = (offset >> 32) & 0xFFFFFFFF
+
+        win32file.WriteFile(handle, merged_data, overlapped)  # type: ignore
 
     @override
     def close_file(self, fd_or_conn: int) -> None:
