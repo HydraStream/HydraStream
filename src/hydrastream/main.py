@@ -32,11 +32,13 @@ from hydrastream.interfaces import MonitorBackend
 
 ON_TEST_HOOK: bool = False
 
+loop_factory = None
+
 if sys.platform != "win32":
     try:
         import uvloop
 
-        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+        loop_factory = uvloop.new_event_loop
     except ImportError:
         pass
 
@@ -573,7 +575,8 @@ def cli(
             verify=verify,
             impersonate=browser,
             debug=debug,
-        )
+        ),
+        loop_factory=loop_factory,
     )
 
 

@@ -22,7 +22,7 @@ from hypothesis import HealthCheck, Phase, Verbosity, given, settings
 from hypothesis import strategies as st
 from pytest_httpserver import HTTPServer
 from typer.testing import CliRunner
-from viztracer import VizTracer
+from viztracer import VizTracer  # type: ignore
 from werkzeug import Request, Response
 
 import hydrastream.facade
@@ -555,7 +555,7 @@ def build_args_list(
 
 @given(data=cli_fuzz_strategy())
 @settings(
-    max_examples=20,
+    max_examples=500,
     deadline=None,
     phases=[Phase.reuse, Phase.generate],  # Phase.explicit
     suppress_health_check=[HealthCheck.function_scoped_fixture],

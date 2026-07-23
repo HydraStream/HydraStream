@@ -222,9 +222,16 @@ class HydraDaemon:
 
         self._is_stopping = True
         self._ui.log("Initiating graceful shutdown...", status=LogStatus.INFO)
-
-        self._ctx.links_q.send_poison_pills_nowait(count=self._ctx.resolvers)
         self._ctx.session_killer.set()
+        self._ctx.links_q.send_poison_pills_nowait(
+            count=self._ctx.resolvers, interrupt=True
+        )
+        self._ctx.chunks_q.send_poison_pills_nowait(
+            count=self._ctx.workers, interrupt=True
+        )
+        self._ctx.ready_chunks_q.send_poison_pills_nowait(
+            count=self._ctx.workers, interrupt=True
+        )
         try:
             if ON_TEST_HOOK:
                 await asyncio.shield(self._engine_task)

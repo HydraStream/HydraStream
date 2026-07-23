@@ -6,7 +6,7 @@ import contextlib
 import email.utils
 import random
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Unpack
 
 from curl_cffi import CurlError, Response
@@ -117,7 +117,7 @@ async def stream_chunk(
     url: str,
     headers: dict[str, str] | None = None,
     max_retries: int = 1,
-) -> AsyncIterator[NetworkStream]:
+) -> AsyncGenerator[NetworkStream]:
     for attempt in range(1, max_retries + 1):
         response = None
         yielded = False
