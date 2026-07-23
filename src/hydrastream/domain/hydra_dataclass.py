@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar, dataclass_transform, overload
@@ -5,7 +8,6 @@ from typing import Any, TypeVar, dataclass_transform, overload
 _T = TypeVar("_T")
 
 
-# 2. Возвращаем декоратор-функцию, чтобы @dataclass_transform снова заработал в IDE!
 @dataclass_transform(kw_only_default=True, order_default=False)
 @overload
 def hydra_dataclass(cls: type[_T], /) -> type[_T]: ...  # noqa: UP047

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 from abc import ABC, abstractmethod
 from enum import StrEnum
 from typing import TypedDict, TypeVar, final

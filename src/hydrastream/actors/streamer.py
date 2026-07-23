@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 import hashlib
 from collections.abc import AsyncGenerator
 

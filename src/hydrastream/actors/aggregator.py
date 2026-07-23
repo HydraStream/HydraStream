@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 import asyncio
 from dataclasses import field
 from typing import assert_never, override

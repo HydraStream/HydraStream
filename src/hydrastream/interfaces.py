@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Buffer

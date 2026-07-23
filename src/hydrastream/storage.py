@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +22,6 @@ if sys.platform == "win32":
 
     import win32file
 elif TYPE_CHECKING:
-    # Эти импорты увидит ТОЛЬКО линтер в VS Code, они не упадут при запуске на Linux
     import msvcrt
 
     import win32file  # type: ignore

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 import asyncio
 from collections import defaultdict
 from dataclasses import field
