@@ -89,7 +89,6 @@ class HydraContext:
     resolvers: int = 10
 
     def __post_init__(self) -> None:
-
         if self.config.custom_providers:
             for domain, provider in self.config.custom_providers.items():
                 self.provider.register(domain, provider)
@@ -141,7 +140,6 @@ class AppQueuesSchema(TypedDict):
 
 
 def _create_channels() -> AppQueuesSchema:
-
     channels = {}
 
     actor_p_queues = {
@@ -175,7 +173,6 @@ def _create_channels() -> AppQueuesSchema:
 
 
 def _create_network(config: HydraConfig) -> NetworkBackend:
-
     if config.custom_network is None:
         return CurlNetworkAdapter(
             threads=config.threads,

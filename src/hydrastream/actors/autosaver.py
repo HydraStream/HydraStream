@@ -77,7 +77,6 @@ class FileAutosaver(BaseActor[None]):
 
     @override
     async def _handle_msg(self, msg: None) -> None:
-
         match msg:
             case None:
                 pass

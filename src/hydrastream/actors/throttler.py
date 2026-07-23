@@ -77,7 +77,6 @@ class ThrottleController(BaseActor[ThrottlerMsg]):
     async def _on_error(
         self, e: Exception, msg: ThrottlerMsg | PoisonPill | None = None
     ) -> ErrorVerdict:
-
         if isinstance(e, GracefulShutdownError):
             return ErrorVerdict.STOP
 

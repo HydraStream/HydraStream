@@ -90,10 +90,9 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
 
     @final
     @override
-    async def _on_error(  # ruff:ignore[too-many-return-statements]
+    async def _on_error(  # noqa: PLR0911
         self, e: Exception, msg: LinkData | PoisonPill | None = None
     ) -> ErrorVerdict:
-
         if not isinstance(msg, LinkData):
             return ErrorVerdict.RESUME
 
@@ -162,7 +161,6 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
         data: LinkData,
         delay_range: tuple[float, float] = (1.0, 3.0),
     ) -> None:
-
         await self.inbox.send_data(data)
         delay = random.uniform(*delay_range)
 

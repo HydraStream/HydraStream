@@ -3,7 +3,7 @@
 [![PyPI version](https://badge.fury.io/py/hydrastream.svg)](https://pypi.org/project/hydrastream/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Coverage: 90%](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)](https://github.com/Zhukovetski/HydraStream)
+[![Coverage: 75%](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)](https://github.com/Zhukovetski/HydraStream)
 [![Tests](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml/badge.svg)](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/HydraStream/HydraStream)
 
@@ -84,16 +84,22 @@ min-chunk-mb = 5
 
 ```python
 import asyncio
-from hydrastream import HydraClient, HydraConfig
+from hydrastream import HydraDaemon, HydraConfig, UIConfig
 
 
 async def main():
-    config = HydraConfig(threads=20, quiet=True)
-    urls = ["https://example.com/file1.gz"]
+    config = HydraConfig(threads=20)
+    ui_config = UIConfig(quiet=True)
+    url = ["https://example.com/file1.gz"]
 
-    async with HydraClient(config=config) as client:
-        # Returns an async generator yielding (filename, chunk_generator)
-        async for filename, file_stream in await client.stream(urls):
+    async with HydraDaemon(config=config, ui_config=ui_config) as daemon:
+        task_id = await daemon.add_download(url)
+
+        if task_id is not None:
+            file_stream = await daemon.get_stream(task_id)
+
+        if file_stream is not None:
+            # Returns an async generator yielding chunk_generator
             async for chunk in file_stream:
                 sys.stdout.buffer.write(chunk)
 
@@ -111,13 +117,13 @@ HydraStream supports layered configuration. Options can be passed as CLI argumen
 | `LINKS` | - | `None` | One or multiple target URLs to download (positional argument). |
 | `--input` | `-i` | `None` | Read URLs from a text file or `-` for stdin. |
 | `--typehash` | `-th` | `md5` | Hash algorithm type (e.g., `md5`, `sha256`). |
-| `--checksum` | - | `None` | Expected hash checksum (applicable only for a single URL). |
-| `--output` | `-o` | `download/` | Destination directory for downloaded files. |
+| `--checksum` | `-c` | `None` | Expected hash checksum (applicable only for a single URL). |
+| `--output` | `-o` | `downloads/` | Destination directory for downloaded files. |
 | `--threads` | `-t` | `Auto` | Number of concurrent download connections (scales up to 128). |
 | `--stream` | `-s` | `False` | Enable streaming mode (redirects binary data to `stdout`). |
-| `--dry-run` | - | `False` | Simulate the process (fetch metadata, check disk space) without downloading. |
-| `--min-chunk-mb` | - | `1` | Minimum chunk size in Megabytes for standard disk downloads. |
-| `--stream-chunk-mb` | - | `5` | Target chunk size in Megabytes for streaming mode. |
+| `--dry-run` | `-dr` | `False` | Simulate the process (fetch metadata, check disk space) without downloading. |
+| `--min-chunk-mb` | `-mcm` | `1` | Minimum chunk size in Megabytes for standard disk downloads. |
+| `--stream-chunk-mb` | `-scm` | `5` | Target chunk size in Megabytes for streaming mode. |
 | `--buffer` | `-b` | `None` | Maximum stream buffer size in Megabytes to prevent OOM. |
 | `--limit` | `-l` | `None` | Global download bandwidth throttle limit in MB/s. |
 | `--no-ui` | `-nu` | `False` | Disable GUI (progress bars). Leaves plain text logs. |
@@ -137,5 +143,3 @@ Port the core engine to Rust (`tokio`/`reqwest`) with a `PyO3` wrapper to bypass
 ## License
 
 MIT License. See the [LICENSE](LICENSE) file for details.
-
-

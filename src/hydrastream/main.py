@@ -412,6 +412,7 @@ def cli(
         str | None,
         typer.Option(
             "--checksum",
+            "-c",
             help="Expected checksum checksum (applicable only for a single URL).",
             default_factory=partial(get_cfg, "checksum"),
         ),
@@ -457,6 +458,7 @@ def cli(
         int | None,
         typer.Option(
             "--min-chunk-mb",
+            "-mcm",
             help="Minimum chunk size in Megabytes for standard disk downloads.",
             default_factory=partial(get_cfg, "min-chunk-mb", 1),
         ),
@@ -465,6 +467,7 @@ def cli(
         int | None,
         typer.Option(
             "--stream-chunk-mb",
+            "-scm",
             help="Target chunk size in Megabytes for streaming mode.",
             default_factory=partial(get_cfg, "stream-chunk-mb", 5),
         ),

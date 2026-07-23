@@ -27,7 +27,7 @@ class MemoryThrottler(BaseActor[Chunk]):
             case Chunk() as pending_chunk:
                 while pending_chunk.size > self.budget:
                     credit = await self.credit_inbox.get()
-                    if isinstance(credit, (StandardPill, TerminalPill)):
+                    if isinstance(credit, StandardPill | TerminalPill):
                         raise GracefulShutdownError
                     self.budget += credit
 

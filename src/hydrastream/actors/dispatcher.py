@@ -48,7 +48,7 @@ class BaseFileDispatcher(BaseActor[File], ABC):
             case File() as file_obj:
                 if self._current_files >= self.limit:
                     msg_ = await self.file_limit_inbox.get()
-                    if isinstance(msg_, (StandardPill, TerminalPill)):
+                    if isinstance(msg_, StandardPill | TerminalPill):
                         raise GracefulShutdownError
                     self._current_files -= 1
 
@@ -102,7 +102,6 @@ class DiskFileDispatcher(BaseFileDispatcher):
 
     @override
     async def _prepare_file(self, file_obj: File) -> None:
-
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._prepare_file_on_disk, file_obj)
 

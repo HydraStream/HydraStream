@@ -77,7 +77,6 @@ class DiskAggregator(BaseActor[WriteChunk | FlushCmd]):
                 )
 
     async def _persist_buffer(self) -> None:
-
         if self._is_writing_now:
             await self.throttler_outbox.send_data(DiskBufferFullSignal())
 
@@ -103,7 +102,6 @@ class DiskAggregator(BaseActor[WriteChunk | FlushCmd]):
 
     @staticmethod
     async def _coalesce(batch_bytes: list[WriteChunk]) -> list[WriteChunk]:
-
         batch_bytes.sort()
 
         coalesced: list[WriteChunk] = []

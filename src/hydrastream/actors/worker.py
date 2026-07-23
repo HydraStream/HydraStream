@@ -79,7 +79,6 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
     @final
     @override
     async def _handle_msg(self, msg: Chunk) -> None:
-
         match msg:
             case Chunk() as chunk:
                 try:
@@ -92,7 +91,7 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
 
                     msq_ = await self.wait_in_sleep_inbox.get()
 
-                    if isinstance(msq_, (StandardPill, TerminalPill)):
+                    if isinstance(msq_, StandardPill | TerminalPill):
                         raise GracefulShutdownError
 
                     return
@@ -461,7 +460,6 @@ class DiskDownloadWorker(BaseDownloadWorker):
         self,
         chunk: Chunk,
     ) -> None:
-
         filename = chunk.file.actual_filename
         file_obj = chunk.file
         if chunk.file.meta.content_length:

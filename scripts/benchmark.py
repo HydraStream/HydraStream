@@ -28,7 +28,7 @@ COMMANDS = {
 }
 
 
-def run_benchmark() -> None:
+def run_benchmark() -> None:  # noqa: PLR0914
     print(f"Starting benchmark: {ITERATIONS} iterations per tool.\nTarget: {URL}\n")
 
     results = {}

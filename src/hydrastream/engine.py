@@ -35,7 +35,6 @@ from hydrastream.exceptions import ExitCode, LogStatus
 
 
 async def teardown_engine(ctx: HydraContext) -> None:
-
     ctx.fs.force_close_all()
 
     await ctx.ui.stop()
@@ -274,7 +273,6 @@ def bootstrap_engine(  # noqa
     tg.create_task(session_killer(), name="stage:killer")
 
     async def stage_0_stating() -> None:
-
         async with asyncio.TaskGroup() as stage_tg:
             stage_tg.create_task(stater.run(), name="stater")
 

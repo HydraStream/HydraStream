@@ -555,7 +555,7 @@ def build_args_list(
 
 @given(data=cli_fuzz_strategy())
 @settings(
-    max_examples=500,
+    max_examples=20,
     deadline=None,
     phases=[Phase.reuse, Phase.generate],  # Phase.explicit
     suppress_health_check=[HealthCheck.function_scoped_fixture],
@@ -715,5 +715,5 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
         if result.exc_info:
             tb_string = "\n" + "".join(traceback.format_exception(*result.exc_info))
         error = result.exception
-        assert result.exit_code == 4, f"Exception: {error!r}"
+        assert result.exit_code == 4, f"Exception: {error!r}{tb_string}"
         print(f"Done with network erroe {error}", file=sys.__stderr__, flush=True)

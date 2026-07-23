@@ -77,7 +77,6 @@ class ActorFifoQueue[T](ActorQueue[T]):
 
     @override
     async def send_data(self, data: T, sort_key: tuple[int, ...] = (0,)) -> None:
-
         await self._raw_queue.put(data)
 
     @override
@@ -126,7 +125,6 @@ class ActorPriorityQueue[T](ActorQueue[T]):
 
     @override
     async def send_poison_pills(self, count: int = 1) -> None:
-
         for i in range(count - 1, 0, -1):
             await self._raw_queue.put(
                 _Envelope(sort_key=(sys.maxsize - i,), payload=StandardPill())
@@ -191,7 +189,9 @@ async def ask[T_Res, T_Msg, *Ts](
             f"Ask request timed out after {timeout}s. "
             "Target actor is dead or overloaded."
         ) from e
-
+    except asyncio.CancelledError:
+        reply_future.cancel()
+        raise
     except Exception:
         reply_future.cancel()
         raise

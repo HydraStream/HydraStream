@@ -50,7 +50,6 @@ class TrafficController(BaseActor[TrafficSignal]):
             await self._update_lights()
 
     async def _update_lights(self) -> None:
-
         if self.dynamic_limit > self.prev_dynamic_limit:
             for _ in range(self.dynamic_limit - self.prev_dynamic_limit):
                 await self.wait_in_sleep_outbox.send_data(WakeUpPill())

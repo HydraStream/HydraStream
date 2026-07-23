@@ -43,7 +43,6 @@ class LocalStorageManager(StorageBackend):
 
     @override
     def allocate_space(self, filename: str, size: int) -> tuple[int, str | None]:
-
         free_space = shutil.disk_usage(self.output_dir).free
         if free_space < size:
             raise InsufficientSpaceError(

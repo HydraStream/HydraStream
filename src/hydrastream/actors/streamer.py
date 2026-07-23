@@ -27,7 +27,6 @@ async def file_streamer(  # noqa
     ui: MonitorBackend,
     is_debug: bool,
 ) -> AsyncGenerator[bytes, None]:
-
     total_size = file_obj.meta.content_length
     checksum = file_obj.meta.expected_checksum
     hasher: Hasher | None = hashlib.new(checksum.algorithm) if checksum else None
@@ -40,7 +39,6 @@ async def file_streamer(  # noqa
     async def process_and_yield_chunk(
         chunk_data: list[bytes],
     ) -> AsyncGenerator[bytes, None]:
-
         nonlocal expected_offset
 
         for data in chunk_data:
@@ -59,7 +57,7 @@ async def file_streamer(  # noqa
             if isinstance(msg, StreamError):
                 raise msg
             # 1. Избавляемся от глубокого match/case с помощью Guard Clauses
-            if isinstance(msg, (StandardPill, TerminalPill)):
+            if isinstance(msg, StandardPill | TerminalPill):
                 break
 
             # 2. Обрабатываем целевой StreamChunk (код стал плоским!)

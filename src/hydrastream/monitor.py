@@ -194,7 +194,6 @@ class BaseMonitor(MonitorBackend, ABC):
 
     @override
     def done(self, file_id: int, filename: str) -> None:
-
         if self._files_size.get(file_id, 0):
             self._files_completed += 1
             self.log(f"Done: {filename}", status=LogStatus.SUCCESS, progress=True)
@@ -473,7 +472,6 @@ class JsonMonitor(BaseMonitor):
 
     @override
     def dry_run(self, files: dict[int, File], output_dir: str | Path) -> None:
-
         report_data = {
             "total_files": self._total_files,
             "total_bytes": self._total_bytes,
@@ -727,7 +725,6 @@ class RichMonitor(BaseMonitor):
     async def _ui_refresh_actor(
         self, state_keeper_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     ) -> None:
-
         while self._is_running:
             try:
                 # 1. Засыпаем до следующего "кадра" (например, на 0.1 сек)
@@ -932,5 +929,4 @@ class RichMonitor(BaseMonitor):
     def bind_to_state_keeper(
         self, state_q: ActorFifoQueue[StateKeeperMsg | PoisonPill]
     ) -> None:
-
         self.refresh = asyncio.create_task(self._ui_refresh_actor(state_q))

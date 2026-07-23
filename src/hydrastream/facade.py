@@ -62,7 +62,6 @@ class HydraDaemon:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-
         await self.stop(timeout=5)
 
     def start(self) -> None:
@@ -132,6 +131,8 @@ class HydraDaemon:
                 msg_factory=GetStatusCmd.create_request,
                 timeout=2.0,
             )
+        except asyncio.CancelledError:
+            return None
         except Exception:
             return None
 
