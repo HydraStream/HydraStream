@@ -83,7 +83,7 @@ def prepare_runtime(ctx: HydraContext) -> None:
             ctx.ready_chunks_q.send_poison_pills_nowait(
                 count=ctx.workers, interrupt=True
             )
-            print("Your debug message here 10", file=sys.__stderr__, flush=True)
+
         except Exception as e:
             ctx.ui.log(f"Не удалось отправить PoisonPill: {e}", status=LogStatus.ERROR)
 
@@ -268,7 +268,6 @@ def bootstrap_engine(  # noqa
             await ctx.session_killer.wait()
         finally:
             await ctx.net.close()
-            print("Your debug message here 0", file=sys.__stderr__, flush=True)
 
     tg.create_task(session_killer(), name="stage:killer")
 
@@ -283,7 +282,6 @@ def bootstrap_engine(  # noqa
             async with asyncio.TaskGroup() as stage_tg:
                 for i, resolver in enumerate(resolvers):
                     stage_tg.create_task(resolver.run(), name=f"resolver_{i}")
-            print("Your debug message here 1", file=sys.__stderr__, flush=True)
             if ctx.config.dry_run:
                 await ctx.ui.refresh_ui(ctx.state_q)
         finally:

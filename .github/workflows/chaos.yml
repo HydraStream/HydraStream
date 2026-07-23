@@ -97,7 +97,7 @@ jobs:
           hs "$TEST_URL" --stream -q > /dev/null &
           PID=$!
 
-          sleep 1
+          sleep 0.5
 
           echo "FREEZING PROCESS (SIGSTOP)..."
           # Сигнал STOP - это то, что делает ОС, когда ты закрываешь крышку ноутбука.
