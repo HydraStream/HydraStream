@@ -60,7 +60,7 @@ class BaseWorkerKwargs(BaseActorKwargs):
     throttler_outbox: ActorFifoQueue[ThrottlerMsg | PoisonPill]
     controller_outbox: ActorFifoQueue[TrafficSignal | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
-    sleep_signals_indox: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    sleep_signals_inbox: ActorFifoQueue[GoToSleepPill | PoisonPill]
     wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill | PoisonPill]
 
     net: NetworkBackend
@@ -71,7 +71,7 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
     throttler_outbox: ActorFifoQueue[ThrottlerMsg | PoisonPill] | None = None
     controller_outbox: ActorFifoQueue[TrafficSignal | PoisonPill]
     state_outbox: ActorFifoQueue[StateKeeperMsg | PoisonPill]
-    sleep_signals_indox: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    sleep_signals_inbox: ActorFifoQueue[GoToSleepPill | PoisonPill]
     wait_in_sleep_inbox: ActorFifoQueue[WakeUpPill | PoisonPill]
 
     net: NetworkBackend
@@ -82,7 +82,7 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
         match msg:
             case Chunk() as chunk:
                 try:
-                    msq_ = self.sleep_signals_indox.get_nowait()
+                    msq_ = self.sleep_signals_inbox.get_nowait()
 
                     await self.inbox.send_data(
                         sort_key=self._get_sort_key(msg.file.meta.id, msg.current_pos),

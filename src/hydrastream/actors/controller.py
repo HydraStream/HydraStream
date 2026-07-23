@@ -19,7 +19,7 @@ from hydrastream.messages.traffic import (
 
 @hydra_dataclass
 class TrafficController(BaseActor[TrafficSignal]):
-    sleep_signals_outdox: ActorFifoQueue[GoToSleepPill | PoisonPill]
+    sleep_signals_outbox: ActorFifoQueue[GoToSleepPill | PoisonPill]
     wait_in_sleep_outbox: ActorFifoQueue[WakeUpPill | PoisonPill]
     workers: int
     dynamic_limit: int
@@ -28,7 +28,7 @@ class TrafficController(BaseActor[TrafficSignal]):
     @override
     async def _on_start(self) -> None:
         for _ in range(self.workers - self.dynamic_limit):
-            await self.sleep_signals_outdox.send_data(GoToSleepPill())
+            await self.sleep_signals_outbox.send_data(GoToSleepPill())
 
     @override
     async def _handle_msg(self, msg: TrafficSignal) -> None:
@@ -56,7 +56,7 @@ class TrafficController(BaseActor[TrafficSignal]):
 
         else:
             for _ in range(self.prev_dynamic_limit - self.dynamic_limit):
-                await self.sleep_signals_outdox.send_data(GoToSleepPill())
+                await self.sleep_signals_outbox.send_data(GoToSleepPill())
 
         self.prev_dynamic_limit = self.dynamic_limit
 

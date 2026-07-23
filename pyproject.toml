@@ -49,16 +49,14 @@ requires-python = ">=3.12"
 dependencies =[
     # Для алгоритма AIMD и rate-лимитов
     "curl-cffi>=0.15.0",              # Асинхронный HTTP-клиент с поддержкой HTTP/2 (>=0.15.0 fixes CVE-2026-33752 SSRF via redirects)
-    "hypothesis-jsonschema>=0.23.1",
     "orjson>=3.11.7",                    # Ультра-быстрый парсер JSON (написан на Rust)
     "pydantic>=2.13.3",
     "pydantic-settings>=2.14.0",
     "pygments>=2.20.0",                  # Transitive via rich; pinned to avoid CVE-2026-4539 (ReDoS in AdlLexer)
     "rich>=14.3.2",                      # Отрисовка красивых прогресс-баров в консоли
-    "snakeviz>=2.2.2",
     "typer>=0.24.1",                     # Для создания CLI-интерфейса (парсинг аргументов)
     "uvloop>=0.22.1 ; sys_platform != 'win32'", # Сверхбыстрый event-loop для asyncio (не ставим на Windows)
-    "pywin32 ; sys_platform == 'win32'"
+    "pywin32 ; sys_platform == 'win32'",
 ]
 
 # ==============================================================================
