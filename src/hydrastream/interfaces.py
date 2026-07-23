@@ -107,7 +107,7 @@ class MonitorBackend(Protocol):
 @runtime_checkable
 @hydra_dataclass(frozen=True)
 class NetworkStream(Protocol):
-    """Абстракция над потоком (response от curl_cffi или httpx)"""
+    """Абстракция над потоком (response от curl_cffi)"""
 
     @property
     def response(self) -> Any: ...
