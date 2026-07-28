@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 import asyncio
 from collections import defaultdict
 from dataclasses import field
@@ -34,7 +37,7 @@ from hydrastream.messages.traffic import CheckpointReachedCmd, ThrottlerMsg
 @hydra_dataclass
 class StateKeeperActor(BaseActor[StateKeeperMsg]):
     is_stream: bool
-    is_dru_run: bool
+    is_dry_run: bool
 
     throttler_output: ActorFifoQueue[ThrottlerMsg | PoisonPill]
 
@@ -77,7 +80,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                         if not fut.cancelled():
                             fut.set_result(fobj)
 
-                if self.is_dru_run:
+                if self.is_dry_run:
                     trace = self._traces[fid]
                     result = trace.create_task_status
                     self._finished_results[fid] = result
@@ -135,7 +138,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                     fut.set_exception(ValueError(f"Unknown file_id: {fid}"))
 
             case GetSnapshotCmd(reply_to=reply_future):
-                if self.is_dru_run:
+                if self.is_dry_run:
                     self._waited_dru_run = reply_future
                     return
                 if not reply_future.cancelled():
@@ -200,7 +203,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                 if not fut.done():
                     fut.cancel()
 
-        if self.is_dru_run and not self._waited_dru_run.cancelled():
+        if self.is_dry_run and not self._waited_dru_run.cancelled():
             snaphot: dict[int, File] = {}
             for k, v in self._traces.items():
                 if isinstance(v.file_obj, File):

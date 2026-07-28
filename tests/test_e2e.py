@@ -1,5 +1,6 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
+
 import asyncio
 import contextlib
 import hashlib
@@ -69,15 +70,12 @@ def register_loop_in_monitor(ctx: HydraContext) -> None:
     _context_holder = ctx  # type: ignore
 
     with contextlib.suppress(RuntimeError):
-        # Перехватываем петлю из контекста главного потока,
-        # когда запустился asyncio.run() движка
         _loop_holder = asyncio.get_running_loop()
 
     if _current_tracer is not None:
         _current_tracer.start()
 
 
-# Подменяем пустышку в коде приложения на нашу функцию из теста
 hydrastream.facade.ON_ENGINE_START_HOOK = register_loop_in_monitor
 
 
@@ -89,7 +87,6 @@ def collapse_worker_names(names: list[str]) -> str:  # noqa: PLR0912
     if not names:
         return ""
 
-    # Регулярка для поиска базового имени и номера на конце (например, worker_87)
     pattern = re.compile(r"^(.*?)(_|-)?(\d+)$")
     groups: defaultdict[tuple[str, str], list[int]] = defaultdict(list)
     standalone: list[str] = []
@@ -105,7 +102,6 @@ def collapse_worker_names(names: list[str]) -> str:  # noqa: PLR0912
 
     result_parts: list[str] = []
 
-    # Сжимаем последовательности чисел для каждой группы
     for (base, sep), nums in groups.items():
         nums_ = sorted(list(set(nums)))
         ranges: list[str] = []
@@ -130,7 +126,6 @@ def collapse_worker_names(names: list[str]) -> str:  # noqa: PLR0912
         else:
             ranges.append(f"{start}-{prev}")
 
-        # Собираем обратно: worker_1-100 или worker_1,3,5-10
         joined_ranges = ",".join(ranges)
         if "," in joined_ranges or "-" in joined_ranges:
             result_parts.append(f"{base}{sep}[{joined_ranges}]")
@@ -148,13 +143,12 @@ def actor_system_timeout_monitor(  # noqa: PLR0915
     stop_event = threading.Event()
     main_thread_id = threading.get_ident()
 
-    # Сбрасываем старый контейнер перед началом итерации Hypothesis
     global _loop_holder, _context_holder  # noqa
     _loop_holder = None
 
     def watchdog() -> None:  # noqa
         if stop_event.wait(timeout=timeout):
-            return  # Тест прошел успешно
+            return
 
         assert sys.__stderr__
         out = sys.__stderr__

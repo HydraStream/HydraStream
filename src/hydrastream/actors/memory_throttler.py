@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 from typing import assert_never, override
 
 from hydrastream.domain.base_actor import BaseActor

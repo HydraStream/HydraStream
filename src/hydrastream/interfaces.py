@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Buffer
@@ -104,7 +107,7 @@ class MonitorBackend(Protocol):
 @runtime_checkable
 @hydra_dataclass(frozen=True)
 class NetworkStream(Protocol):
-    """Абстракция над потоком (response от curl_cffi или httpx)"""
+    """Абстракция над потоком (response от curl_cffi)"""
 
     @property
     def response(self) -> Any: ...

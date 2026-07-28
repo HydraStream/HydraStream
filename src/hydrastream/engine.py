@@ -138,7 +138,7 @@ def bootstrap_engine(  # noqa
         ui=ctx.ui,
         fs=ctx.fs,
         is_stream=ctx.config.is_stream,
-        is_dru_run=ctx.config.dry_run,
+        is_dry_run=ctx.config.dry_run,
         is_debug=ctx.config.debug,
     )
 
@@ -188,7 +188,7 @@ def bootstrap_engine(  # noqa
             "throttler_outbox": ctx.throttler_q,
             "controller_outbox": ctx.controller_q,
             "state_outbox": ctx.state_q,
-            "sleep_signals_indox": ctx.sleep_signals_q,
+            "sleep_signals_inbox": ctx.sleep_signals_q,
             "wait_in_sleep_inbox": ctx.wait_in_sleep_q,
             "net": ctx.net,
         }
@@ -249,7 +249,7 @@ def bootstrap_engine(  # noqa
         controller = TrafficController(
             **base_actor_kwargs,
             inbox=ctx.controller_q,
-            sleep_signals_outdox=ctx.sleep_signals_q,
+            sleep_signals_outbox=ctx.sleep_signals_q,
             wait_in_sleep_outbox=ctx.wait_in_sleep_q,
             dynamic_limit=ctx.start_works,
             prev_dynamic_limit=ctx.start_works,

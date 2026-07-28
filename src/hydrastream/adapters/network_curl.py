@@ -1,5 +1,7 @@
-# adapters/network_curl.py
-from collections.abc import AsyncGenerator, AsyncIterator
+# Copyright (c) 2026 Valentin Zhukovetski
+# Licensed under the MIT License.
+
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, override
 
@@ -67,7 +69,7 @@ class CurlNetworkAdapter(NetworkBackend):
     @asynccontextmanager
     async def stream(
         self, url: str, headers: dict[str, str] | None = None
-    ) -> AsyncIterator[NetworkStream]:
+    ) -> AsyncGenerator[NetworkStream]:
         async with self.client.stream("GET", url, headers=headers) as r:
             yield CurlStreamAdapter(_response=r)
 
