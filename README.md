@@ -3,7 +3,7 @@
 [![PyPI version](https://badge.fury.io/py/hydrastream.svg)](https://pypi.org/project/hydrastream/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Coverage: 75%](https://img.shields.io/badge/coverage-75%25-brightgreen.svg)](https://github.com/Zhukovetski/HydraStream)
+[![Coverage: 78%](https://img.shields.io/badge/coverage-78%25-brightgreen.svg)](https://github.com/Zhukovetski/HydraStream)
 [![Tests](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml/badge.svg)](https://github.com/Zhukovetski/HydraStream/actions/workflows/tests.yml)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/HydraStream/HydraStream)
 
@@ -11,22 +11,29 @@
   <img src="https://raw.githubusercontent.com/Zhukovetski/HydraStream/main/assets/Demo.gif" alt="HydraStream Demo" width="800">
 </p>
 
-HydraStream is a concurrent HTTP downloader written in Python. It fetches file chunks concurrently using HTTP Range requests and utilizes an internal min-heap to reorder out-of-sequence chunks in memory. This enables the piping of large remote files directly to `stdout` without requiring intermediate disk storage.
+HydraStream downloads a file over many parallel HTTP connections and reassembles the chunks in memory, in order — so you can pipe huge files straight into another program, at full parallel speed, without touching the disk.
 
-## Core Characteristics
+```bash
+hs "https://ftp.ncbi.nlm.nih.gov/.../genome.fna.gz" --stream -q | zcat | wc -l
+```
 
-* **Chaos-Tested Resilience & "Laptop-Lid" Recovery**: Hardened against severe network and OS anomalies using continuous CI fault injection (`tc qdisc` and `iptables`). HydraStream guarantees deterministic recovery from total internet outages, massive packet loss, and OS-level process suspensions (e.g., closing your laptop lid). If a socket dies, the affected worker seamlessly requeues the chunk and resumes via HTTP `Range` requests without losing a single verified byte.
-* **In-Memory Assembly & On-the-Fly Hashing**: Converts concurrent, out-of-order HTTP chunks into a sequential byte stream using a min-heap. Enables direct piping to `stdout`. Computes cryptographic hashes (MD5, SHA-256, BLAKE2, etc.) incrementally as the stream is yielded, ensuring integrity without buffering the full file.
-* **POSIX-Compliant Telemetry**: Strictly adheres to the Unix philosophy by routing all diagnostic outputs, progress bars, and warnings to `stderr`. This guarantees a completely pure `stdout` for binary data pipes. Supports structured JSON Lines logging for CI/CD integration.
-* **Network Resilience & Chaos-Tested Reliability**: Hardened against adversarial network conditions using Property-Based Testing (Hypothesis) and fault injection. Guarantees deadlock-free recovery, pipeline termination, and data integrity during `429`/`503` cascades, connection drops, and missing `Range` headers.
-* **Strict Data Verification**: Enforces multi-layered integrity checks. Automatically validates payload size against remote metadata and performs strict post-download checksum validation to eliminate silent data corruption.
-* **Auto-Scaling Concurrency & Throttling**: Implements an AIMD (Additive Increase/Multiplicative Decrease) algorithm to dynamically adjust active workers based on network health. Supports hard bandwidth throttling (`--limit`) for controlled environment execution.
-* **Actor-Based Architecture & Lock-Free Synchronization**: Pipeline components (feeders, resolvers, dispatchers, workers) operate as isolated asynchronous actors (CSP pattern). Solves Fan-In/Fan-Out race conditions using prioritized sentinel values (poison pills) instead of shared-memory mutexes.
-* **Zero-Lock Disk I/O**: Leverages `os.pwrite` within a dedicated thread pool to write scattered chunks concurrently. Completely bypasses GIL contention and traditional file locking mechanisms during disk operations.
-* **Dry-Run Protocol**: Provides a safe simulation mode (`--dry-run`) to preemptively fetch remote metadata, verify available local disk space, and resolve target hashes without allocating space or initiating data transfer.
-* **TLS Fingerprint Spoofing**: Integrates `curl_cffi` to mimic real browser TLS signatures (e.g., Chrome 120), bypassing strict WAFs (Web Application Firewalls) and Deep Packet Inspection (DPI) heuristics.
-* **Layered Configuration & Domain-Driven Design**: Features a strict boundary between the core engine and CLI. Seamlessly merges CLI arguments and global TOML configurations (`~/.config/hydrastream/config.toml`) via a late-binding validation layer.
+Classic downloaders (`aria2c`, `axel`, `wget2`) parallelize downloads by writing to a file, and `curl` can pipe but only over a single connection. HydraStream does both at once: chunks arrive out of order over parallel connections, an internal min-heap restores their order in memory, and `stdout` receives a clean sequential byte stream. This matters when the files are huge (genomics datasets, ML model weights, database dumps), the source is slow, and you don't want — or don't have room for — an intermediate copy on disk.
 
+It also works as a regular downloader: fast, resumable, and verified.
+
+## Features
+
+* **Stream to stdout**: chunks are downloaded in parallel and re-ordered in memory, so `stdout` receives clean sequential data. No temp files, bounded memory (`--buffer`).
+* **Pipe-friendly by design**: all progress bars, logs, and warnings go to `stderr`; `stdout` carries nothing but your data. Structured JSON Lines logging (`--json`) for CI/CD.
+* **Survives bad networks**: dropped connections, total outages, even OS suspend (close your laptop lid, open it later) — downloads resume from the exact byte via HTTP Range requests. Hardened with continuous chaos testing in CI (`tc qdisc`, `iptables` fault injection) and property-based testing (Hypothesis).
+* **On-the-fly hashing**: MD5 / SHA-256 / BLAKE2 checksums are computed while the data streams through — the file is never buffered in full. Size and checksum mismatches fail loudly, never silently.
+* **Adaptive concurrency**: worker count scales up and down automatically (AIMD, the same idea as TCP congestion control) based on server responses like `429`/`503`. Optional hard bandwidth cap (`--limit`).
+* **Fast disk writes**: scattered chunks are written with native positional I/O (`pwrite` on Linux/macOS, Win32 API on Windows) from a dedicated thread pool, outside the GIL and without file locks.
+* **Browser TLS fingerprint**: uses `curl_cffi` to present a real browser TLS signature (e.g., Chrome 120) for servers that reject generic HTTP clients.
+* **Dry-run mode**: `--dry-run` fetches remote metadata, checks available disk space, and resolves target hashes without downloading anything.
+* **Embeddable**: a daemon-style async Python API (`HydraDaemon`) for use inside data pipelines, schedulers, and services — no external RPC process required.
+
+Under the hood, the pipeline is built as isolated asynchronous actors (resolvers, dispatchers, workers, writers) communicating through prioritized message queues — no shared-memory locks. See the [DeepWiki](https://deepwiki.com/HydraStream/HydraStream) for architecture details.
 
 ## Installation
 
@@ -43,7 +50,7 @@ pipx install hydrastream
 ## Usage
 
 ### 1. Download to Disk
-Downloads the specified file to the output directory using dynamically scaled threads.:
+Downloads the specified file to the output directory using dynamically scaled connections:
 ```bash
 hs "https://ftp.ncbi.nlm.nih.gov/.../genome.fna.gz" -t 20 --output ./data
 ```
@@ -52,7 +59,7 @@ hs "https://ftp.ncbi.nlm.nih.gov/.../genome.fna.gz" -t 20 --output ./data
 </p>
 
 ### 2. Stream to stdout (Pipe)
-Downloads the file in memory and streams binary data to `stdout`. The `--quiet` (`-q`) flag is used to suppress logging output to `stderr`.:
+Downloads the file in memory and streams binary data to `stdout`. The `--quiet` (`-q`) flag suppresses logging output to `stderr`:
 ```bash
 hs "https://ftp.ncbi.nlm.nih.gov/.../genome.fna.gz" -t 20 --stream -q | zcat | wc -l
 ```
@@ -84,22 +91,26 @@ min-chunk-mb = 5
 
 ```python
 import asyncio
+import sys
+
 from hydrastream import HydraDaemon, HydraConfig, UIConfig
 
 
 async def main():
     config = HydraConfig(threads=20)
     ui_config = UIConfig(quiet=True)
-    url = ["https://example.com/file1.gz"]
+    url = "https://example.com/file1.gz"
 
     async with HydraDaemon(config=config, ui_config=ui_config) as daemon:
         task_id = await daemon.add_download(url)
 
-        if task_id is not None:
-            file_stream = await daemon.get_stream(task_id)
+        if task_id is None:
+            return
+
+        file_stream = await daemon.get_stream(task_id)
 
         if file_stream is not None:
-            # Returns an async generator yielding chunk_generator
+            # An async generator yielding ordered chunks of bytes
             async for chunk in file_stream:
                 sys.stdout.buffer.write(chunk)
 
