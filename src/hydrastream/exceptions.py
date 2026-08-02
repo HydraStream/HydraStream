@@ -6,8 +6,10 @@ from __future__ import annotations
 import uuid
 from dataclasses import field
 from enum import IntEnum, StrEnum
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
 from hydrastream.utils import format_size, redact_url
@@ -268,5 +270,3 @@ class StreamError(HydraError):
 
 class ClosedQueueError(Exception):
     """Исключение при попытке записи в мертвый актор."""
-
-    pass

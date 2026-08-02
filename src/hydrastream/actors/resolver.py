@@ -110,7 +110,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
                     )
 
                 # Временные ошибки сервера (5xx, 429) — в очередь
-                await self._requeue_chunk(msg, delay_range=(0.5, 2.0))
+                await self._requeue_chunk(msg, delay=1.0)
                 return ErrorVerdict.RESUME
             # Сетевая ошибка без ответа
             await self._requeue_chunk(msg)
@@ -144,6 +144,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
     @abstractmethod
     async def _prepare_file_object(
         self,
+        *,
         data: LinkData,
         filename: str,
         total_size: int,
@@ -159,10 +160,10 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
     async def _requeue_chunk(
         self,
         data: LinkData,
-        delay_range: tuple[float, float] = (1.0, 3.0),
+        delay: float = 2.0,
     ) -> None:
         await self.inbox.send_data(data)
-        delay = random.uniform(*delay_range)
+        delay = random.lognormvariate(delay, 0.25)
 
         await asyncio.sleep(delay)
 
@@ -199,20 +200,20 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
     @final
     async def _resolve_hash(
         self,
-        id: int,
+        id_: int,
         url: str,
         filename: str,
         checksum_tuple: tuple[TypeHash, str] | None,
     ) -> Checksum | None:
         if checksum_tuple:
             return Checksum(algorithm=checksum_tuple[0], value=checksum_tuple[1])
-        self.ui.add_file(id, filename)
+        self.ui.add_file(id_, filename)
         try:
             checksum = await self.provider.resolve_hash(
                 self.net, self.ui, url, filename
             )
         finally:
-            self.ui.done(id, filename)
+            self.ui.done(id_, filename)
 
         if checksum is None:
             self.ui.log(
@@ -231,6 +232,7 @@ class StreamMetadataResolver(BaseMetadataResolver):
     @override
     async def _prepare_file_object(
         self,
+        *,
         data: LinkData,
         filename: str,
         total_size: int,
@@ -267,6 +269,7 @@ class DiskMetadataResolver(BaseMetadataResolver):
     @override
     async def _prepare_file_object(
         self,
+        *,
         data: LinkData,
         filename: str,
         total_size: int,

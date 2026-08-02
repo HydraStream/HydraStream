@@ -28,7 +28,7 @@ COMMANDS = {
 }
 
 
-def run_benchmark() -> None:  # noqa: PLR0914
+def run_benchmark() -> None:  # ruff: ignore[too-many-locals]
     print(f"Starting benchmark: {ITERATIONS} iterations per tool.\nTarget: {URL}\n")
 
     results = {}

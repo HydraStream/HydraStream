@@ -127,37 +127,46 @@ preview = true
 
 [tool.ruff.lint]
 # Включаем жесткие наборы правил проверок:
-select =[
-    "E", "W",    # Базовые ошибки и предупреждения (pycodestyle)
-    "F",         # Логические ошибки (Pyflakes), напр. неиспользуемые импорты
-    "I",         # Сортировка импортов (isort)
-    "UP",        # Апгрейд синтаксиса (pyupgrade) - заставляет юзать новые фичи языка
-    "B",         # Поиск частых багов (flake8-bugbear)
-    "SIM",       # Упрощение кода (flake8-simplify) - подсказывает как написать короче
-    "C901",      # Проверка на цикломатическую сложность
-    "ANN",       # Проверка наличия аннотаций типов
-    "PTH",       # Заставляет использовать pathlib вместо старого os.path
-    "RET",       # Проверки return (flake8-return)
-    "RUF",       # Собственные жесткие правила Ruff
-    "N",         # Проверка имен переменных/классов (pep8-naming)
-    "C90",       # mccabe сложность
-    "PL",        # Pylint (очень строгий анализатор)
-    "ASYNC",
-    "RUF029"
-
-]
+select =["ALL"]
 
 # Разрешаем ruff автоматически исправлять найденные косяки при запуске --fix
 fixable =["ALL"]
 
 # PLR2004 - игнорим предупреждения про "магические числа" (иногда цифры в коде это нормально)
 ignore = [
-    "PLR2004",
-    "RUF001", # String contains ambiguous unicode character (cyrillic)
-    "RUF002", # Docstring contains ambiguous unicode character
-    "RUF003", # Comment contains ambiguous unicode character
-    "ASYNC109", # Разрешаем аргумент timeout в асинхронных функциях
+    # --- Документация (Выключена полностью) ---
+    "RUF",  # (Или "RUF022") — запрещает линтеру требовать замену кодов на текстовые имена
+    "D",       # pydocstyle: требует docstring у каждой функции и класса
+    "DOC",     # pydoclint: полностью отключает новые проверки аргументов в docstrings (DOC201, DOC501 и др.)
+
+    # --- Подавление типов ---
+    "PGH003",  # blanket-type-ignore: разрешает использовать чистый '# type: ignore'
+
+    # --- Исключения и блоки Try-Except (Отключаем ВСЕ лимиты на try-блоки) ---
+    "TRY",     # tryceratops: полностью отключает всю избыточную бюрократию вокруг try-except
+    "PLW",     # pylint-warning: полностью отключает лимиты на количество строк (10 > 5) и ветвления
+
+    # --- Конфликты с автоматическим форматировщиком (`ruff format`) ---
+    "COM812",  # (ВМЕСТО "missing-trailing-comma") — мешает автоматической расстановке запятых
+    "ISC001",  # (ВМЕСТО "single-line-implicit-string-concatenation") — мешает склеиванию строк форматтером
+
+    # --- Избыточная строгость и бюрократия ---
+    "PLR2004", # (ВМЕСТО "magic-value-comparison") — разрешает использовать "магические числа" напрямую
+    "CPY",     # flake8-copyright: требует наличие копирайтов в начале каждого файла
+    "INP",     # flake8-no-pep420: требует __init__.py в каждой папке (namespace пакеты разрешены)
+    "FIX",     # flake8-fixme: запрещает оставлять TODO, FIXME, XXX в коде
+    "TD",      # flake8-todos: запрещает слишком простые TODO (требует указывать автора и ссылки)
+    "EM",      # flake8-errmsg: требует выносить строки ошибок в отдельные строковые константы
+
+    # --- Поддержка кириллицы ---
+    "RUF001",  # (ВМЕСТО "ambiguous-unicode-character-string") — неоднозначные символы в строках
+    "RUF002",  # (ВМЕСТО "ambiguous-unicode-character-docstring") — неоднозначные символы в docstrings
+    "RUF003",  # (ВМЕСТО "ambiguous-unicode-character-comment") — неоднозначные символы в комментариях
+
+    # --- Асинхронность ---
+    "ASYNC109", # (ВМЕСТО "async-function-with-timeout") — разрешает аргумент timeout в асинхронных функциях
 ]
+
 
 [tool.ruff.format]
 quote-style = "double"           # Всегда используем двойные кавычки " "
@@ -175,11 +184,12 @@ max-complexity = 10              # Макс. количество ветвлен
 [tool.ruff.lint.pylint]
 max-args = 6                     # Не больше 6 аргументов у функции
 max-statements = 50              # Не больше 50 строк кода в одной функции
-max-branches = 12                # Чуть более мягкий лимит на ветвления для pylint
+max-branches = 12
 
 [tool.ruff.lint.per-file-ignores]
 # Исключения для конкретных файлов
-"tests/*" = ["S101", "D", "PLR2004", "C901", "E501"]
+"tests/*" = ["ALL"]
+"scripts/*" = ["ALL"]
 "src/hydrastream/interfaces.py" = ["ANN401"]
 # Игнорим лимит на кол-во аргументов (PLR0913) в main.py и facade.py,
 # так как там собираются параметры из CLI, их всегда много.

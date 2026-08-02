@@ -30,8 +30,6 @@ class TerminalPill:
 class StandardPill:
     """Обычная пилюля. Останавливает любой свободный воркер."""
 
-    pass
-
 
 type PoisonPill = StandardPill | TerminalPill
 
@@ -53,7 +51,6 @@ class ActorQueue[T](ABC):
     @abstractmethod
     def send_poison_pills_nowait(self, count: int = 1) -> None:
         """Экстренная неблокирующая отправка пилюль (безопасная к переполнению)."""
-        pass
 
     @abstractmethod
     async def get(self) -> T | PoisonPill:

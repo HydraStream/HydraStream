@@ -59,10 +59,6 @@ class CloudProvider(HashProvider):
             if len(clean_etag) == 32:
                 return Checksum(algorithm="md5", value=clean_etag)
 
-        # Если найдешь облако, отдающее SHA256:
-        # sha256_header = headers.get("x-amz-meta-sha256")
-        # if sha256_header: return Checksum("sha256", sha256_header)
-
         return None
 
 

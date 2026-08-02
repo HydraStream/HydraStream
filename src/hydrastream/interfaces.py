@@ -3,20 +3,21 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Buffer
-from contextlib import AbstractAsyncContextManager
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from typing_extensions import runtime_checkable
 
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.exceptions import HydraError, LogStatus
-from hydrastream.messages.base import ActorFifoQueue, PoisonPill
-from hydrastream.messages.state import StateKeeperMsg
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Buffer
+    from contextlib import AbstractAsyncContextManager
+    from pathlib import Path
+
     from hydrastream.domain.entities import Checksum, File, TypeHash
+    from hydrastream.exceptions import HydraError, LogStatus
+    from hydrastream.messages.base import ActorFifoQueue, PoisonPill
+    from hydrastream.messages.state import StateKeeperMsg
 
 
 @runtime_checkable

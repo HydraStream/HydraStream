@@ -6,33 +6,14 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import field
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
-from hydrastream.actors.analyzer import CheckpointEvent
 from hydrastream.adapters.network_curl import CurlNetworkAdapter
-from hydrastream.domain.config import HydraConfig, UIConfig
-from hydrastream.domain.entities import Chunk, File
 from hydrastream.domain.hydra_dataclass import hydra_dataclass
-from hydrastream.interfaces import (
-    MonitorBackend,
-    NetworkBackend,
-    StorageBackend,
-)
 from hydrastream.messages.base import (
     ActorFifoQueue,
     ActorPriorityQueue,
     PoisonPill,
-)
-from hydrastream.messages.io import LinkData, WriteChunk
-from hydrastream.messages.state import StateKeeperMsg
-from hydrastream.messages.traffic import (
-    DiskMsg,
-    FileCompleted,
-    GoToSleepPill,
-    ThrottlerMsg,
-    TrafficSignal,
-    WakeUpPill,
-    WriteCompleted,
 )
 from hydrastream.monitor import (
     BaseMonitorKwargs,
@@ -43,6 +24,27 @@ from hydrastream.monitor import (
 )
 from hydrastream.providers import ProviderRouter
 from hydrastream.storage import LocalStorageManager
+
+if TYPE_CHECKING:
+    from hydrastream.actors.analyzer import CheckpointEvent
+    from hydrastream.domain.config import HydraConfig, UIConfig
+    from hydrastream.domain.entities import Chunk, File
+    from hydrastream.interfaces import (
+        MonitorBackend,
+        NetworkBackend,
+        StorageBackend,
+    )
+    from hydrastream.messages.io import LinkData, WriteChunk
+    from hydrastream.messages.state import StateKeeperMsg
+    from hydrastream.messages.traffic import (
+        DiskMsg,
+        FileCompleted,
+        GoToSleepPill,
+        ThrottlerMsg,
+        TrafficSignal,
+        WakeUpPill,
+        WriteCompleted,
+    )
 
 
 @hydra_dataclass
@@ -93,9 +95,6 @@ class HydraContext:
             for domain, provider in self.config.custom_providers.items():
                 self.provider.register(domain, provider)
 
-        # self.resolvers = math.ceil(len(links) ** 0.4) if len(links) > 1 else 1
-        # self.resolvers = min(self.resolvers, 20)
-
         if self.config.is_stream:
             self.workers = self.config.threads
         else:
@@ -105,7 +104,7 @@ class HydraContext:
                 else self.config.threads
             )
 
-        self.start_works = 5 if self.workers >= 5 else self.workers
+        self.start_works = min(5, self.workers)
 
 
 def build_context(config: HydraConfig, ui: MonitorBackend) -> HydraContext:

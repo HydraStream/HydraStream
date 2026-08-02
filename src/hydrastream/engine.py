@@ -5,6 +5,7 @@ import asyncio
 import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 from hydrastream.actors.aggregator import DiskAggregator
 from hydrastream.actors.analyzer import TelemetryAnalyzer
@@ -29,9 +30,11 @@ from hydrastream.actors.worker import (
     StreamDownloadWorker,
 )
 from hydrastream.actors.writer import DiskWriter
-from hydrastream.domain.base_actor import BaseActorKwargs
 from hydrastream.domain.context import HydraContext
 from hydrastream.exceptions import ExitCode, LogStatus
+
+if TYPE_CHECKING:
+    from hydrastream.domain.base_actor import BaseActorKwargs
 
 
 async def teardown_engine(ctx: HydraContext) -> None:
@@ -84,7 +87,7 @@ def prepare_runtime(ctx: HydraContext) -> None:
                 count=ctx.workers, interrupt=True
             )
 
-        except Exception as e:
+        except asyncio.QueueFull as e:
             ctx.ui.log(f"Не удалось отправить PoisonPill: {e}", status=LogStatus.ERROR)
 
     # 1. ЗАЩИТА: Отключаем дефолтный KeyboardInterrupt в Python.
@@ -93,10 +96,10 @@ def prepare_runtime(ctx: HydraContext) -> None:
             loop.add_signal_handler(sig, handle_signal)
     else:
         # Костыль для Windows, так как там add_signal_handler не поддерживается
-        signal.signal(signal.SIGINT, lambda sig, frame: handle_signal())
+        signal.signal(signal.SIGINT, lambda *_: handle_signal())
 
 
-def bootstrap_engine(  # noqa
+def bootstrap_engine(  # noqa: PLR0915, C901
     ctx: HydraContext,
     tg: asyncio.TaskGroup,
 ) -> None:

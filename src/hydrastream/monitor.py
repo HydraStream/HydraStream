@@ -102,6 +102,8 @@ class BaseMonitor(MonitorBackend, ABC):
     ) -> None:
         if status == LogStatus.INTERRUPT:
             self._is_cancelled = True
+
+        # 1. Троттлинг логов
         if throttle_key:
             now = time.monotonic()
             last_time = self._log_throttle.get(throttle_key, 0.0)
@@ -109,19 +111,27 @@ class BaseMonitor(MonitorBackend, ABC):
                 return
             self._log_throttle[throttle_key] = now
 
-        with self._console.capture() as capture:
-            self._console.print(message)
-        rendered_str = capture.get()
-        clean_message_body = Text.from_ansi(rendered_str).plain
-
-        if isinstance(message, Table):
-            clean_message_body = "\n" + clean_message_body
-
+        # 2. Логирование в файл (Делаем capture ТОЛЬКО здесь, если файл включен)
         if self.log_file:
-            timestamp = datetime.now().strftime("[%H:%M:%S]")
-            final_msg = f"{timestamp} {clean_message_body.rstrip('\n')}"
+            if isinstance(message, Table | Rule):
+                with self._console.capture() as capture:
+                    self._console.print(message)
+                rendered_str = capture.get()
+                clean_message_body = Text.from_ansi(rendered_str).plain
+            else:
+                clean_message_body = message
+
+            clean_message_body = clean_message_body.strip("\n")
+
+            if isinstance(message, Table):
+                clean_message_body = "\n" + clean_message_body
+
+            timestamp = datetime.now(UTC).strftime("[%H:%M:%S UTC]")
+            final_msg = f"{timestamp} {clean_message_body}"
             self._log_queue.put_nowait(final_msg)
-        self._display_log(clean_message_body, status, progress, **kwargs)
+
+        # 3. Вывод на экран (Передаем ОРИГИНАЛЬНЫЙ message для сохранения цветов Rich)
+        self._display_log(message, status, progress=progress, **kwargs)
 
     @final
     @override
@@ -143,7 +153,7 @@ class BaseMonitor(MonitorBackend, ABC):
         )
 
     def _date_print(self) -> None:
-        current_date = datetime.now().strftime("%Y-%m-%d")
+        current_date = datetime.now(UTC).strftime("%Y-%m-%d UTC")
         self.log(f"--- {current_date} ---")
 
     @final
@@ -416,6 +426,7 @@ class BaseMonitor(MonitorBackend, ABC):
         self,
         message: str | Rule | Table,
         status: LogStatus | str,
+        *,
         progress: bool = False,
         **kwargs: object,
     ) -> None:
@@ -437,7 +448,7 @@ class BaseMonitor(MonitorBackend, ABC):
             timeout=5.0,
             sort_key=(-1,),
         )
-        for _, bytes_to_advance in deltas.items():
+        for bytes_to_advance in deltas.values():
             self._download_bytes += bytes_to_advance
 
     def _ui_start(self) -> None:
@@ -461,11 +472,24 @@ class JsonMonitor(BaseMonitor):
         progress: bool = False,
         **kwargs: object,
     ) -> None:
+        if isinstance(message, Table | Rule):
+            with self._console.capture() as capture:
+                self._console.print(message)
+            rendered_str = capture.get()
+            clean_message_body = Text.from_ansi(rendered_str).plain
+        else:
+            clean_message_body = message
+
+        clean_message_body = clean_message_body.strip("\n")
+
+        if isinstance(message, Table):
+            clean_message_body = "\n" + clean_message_body
+
         log_record = {
             "timestamp": datetime.now(UTC),
             "level": status.upper(),
-            "message": message,
-            **kwargs,  # Распаковываем дополнительные данные!
+            "message": clean_message_body,
+            **kwargs,
         }
         # Сериализуем в байты, потом в строку
         sys.stderr.buffer.write(orjson.dumps(log_record) + b"\n")
@@ -514,10 +538,17 @@ class PlainMonitor(BaseMonitor):
         progress: bool = False,
         **kwargs: object,
     ) -> None:
-        timestamp = datetime.now().strftime("[%H:%M:%S]")
+        timestamp = datetime.now(UTC).strftime("[%H:%M:%S UTC]")
 
-        final_msg = f"{timestamp} {message}"
-        self._console.print(final_msg)
+        # Если пришла обычная строка, убираем у нее скрытые \n на конце
+        if isinstance(message, str):
+            message = message.rstrip("\n")
+            final_msg = f"{timestamp} {message}"
+            self._console.print(final_msg)
+        else:
+            # Если пришла таблица или линия, печатаем таймстамп, а под ним — объект Rich
+            self._console.print(f"{timestamp}")
+            self._console.print(message)
 
 
 def get_gradient_color(percentage: float) -> str:
@@ -622,7 +653,7 @@ class RichMonitor(BaseMonitor):
             self._log_throttle[throttle_key] = now
 
         if self.log_file:
-            timestamp = datetime.now().strftime("[%H:%M:%S]")
+            timestamp = datetime.now(UTC).strftime("[%H:%M:%S UTC]")
             final_msg = f"{timestamp} {message}"
             clean_msg = Text.from_markup(str(final_msg)).plain
             self._log_queue.put_nowait(clean_msg)
@@ -644,7 +675,6 @@ class RichMonitor(BaseMonitor):
             LogStatus.CRITICAL,
             LogStatus.INTERRUPT,
         }:
-            # print(f"display  {renderable}")
             self.rich.console.print(renderable)
 
     @staticmethod
@@ -654,7 +684,7 @@ class RichMonitor(BaseMonitor):
         )
 
     def _date_print(self) -> None:
-        current_date = datetime.now().strftime("%Y-%m-%d")
+        current_date = datetime.now(UTC).strftime("%Y-%m-%d UTC")
         date_header = f"[bold cyan] Date: {current_date}[/]"
 
         self.rich.console.print(Rule(date_header))
@@ -665,7 +695,7 @@ class RichMonitor(BaseMonitor):
         message: str | Rule | Table,
         status: str | LogStatus,
     ) -> Panel | str | Rule | Table:
-        timestamp = datetime.now().strftime("[%H:%M:%S]")
+        timestamp = datetime.now(UTC).strftime("[%H:%M:%S UTC]")
         formatted_msg = f"{timestamp} {message}"
 
         match status.upper():
@@ -762,7 +792,7 @@ class RichMonitor(BaseMonitor):
 
         self.dynamic_title = (
             f"[bold white][green]{self._files_completed}[/]/"
-            + f"[blue]{self._total_files}[/] Files | [yellow]{active} Active[/]"
+            f"[blue]{self._total_files}[/] Files | [yellow]{active} Active[/]"
         )
 
     @override
@@ -855,8 +885,7 @@ class RichMonitor(BaseMonitor):
         remain_time_str = f"{r_hours:02d}:{r_mins:02d}:{r_secs:02d}"
 
         size_str = (
-            f"{format_size(self._download_bytes)}"
-            + f"/{format_size(self._total_bytes)}"
+            f"{format_size(self._download_bytes)}/{format_size(self._total_bytes)}"
         )
         if (not self._is_running or self._is_cancelled) and not self.is_dry_run:
             grid = Table.grid(expand=True)

@@ -57,7 +57,7 @@ class BaseActor[T_Payload](ABC):
                     if verdict is ErrorVerdict.STOP:
                         break
                     if verdict is ErrorVerdict.ESCALATE:
-                        raise e
+                        raise
 
         finally:
             await self._on_stop()
@@ -90,7 +90,9 @@ class BaseActor[T_Payload](ABC):
         return  # Что делать, если ты Последний Выживший?
 
     async def _on_error(  # noqa: PLR6301
-        self, e: Exception, msg: T_Payload | PoisonPill | None = None
+        self,
+        e: Exception,
+        msg: T_Payload | PoisonPill | None = None,  # noqa: ARG002
     ) -> ErrorVerdict:
         """Дефолтная обработка ошибок (можно переопределить для логов)"""
         if isinstance(e, GracefulShutdownError):

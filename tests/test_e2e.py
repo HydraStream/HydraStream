@@ -66,7 +66,7 @@ _loop_holder: asyncio.AbstractEventLoop | None = None
 
 # Оставляем функцию регистрации в файле тестов
 def register_loop_in_monitor(ctx: HydraContext) -> None:
-    global _loop_holder, _current_tracer, _context_holder  # noqa
+    global _loop_holder, _current_tracer, _context_holder  # ruff: ignore[global-variable-not-assigned, global-statement]
     _context_holder = ctx  # type: ignore
 
     with contextlib.suppress(RuntimeError):
@@ -79,7 +79,7 @@ def register_loop_in_monitor(ctx: HydraContext) -> None:
 hydrastream.facade.ON_ENGINE_START_HOOK = register_loop_in_monitor
 
 
-def collapse_worker_names(names: list[str]) -> str:  # noqa: PLR0912
+def collapse_worker_names(names: list[str]) -> str:  # ruff: ignore[too-many-branches]
     """
     Превращает ['worker_1', 'worker_2', 'worker_3', 'other_actor']
     в 'worker_1-3, other_actor'
@@ -137,16 +137,16 @@ def collapse_worker_names(names: list[str]) -> str:  # noqa: PLR0912
 
 
 @contextlib.contextmanager
-def actor_system_timeout_monitor(  # noqa: PLR0915
+def actor_system_timeout_monitor(  # ruff: ignore[too-many-statements]
     timeout: float = 3.0, tracer: VizTracer | None = None
 ) -> Generator[None, None, None]:
     stop_event = threading.Event()
     main_thread_id = threading.get_ident()
 
-    global _loop_holder, _context_holder  # noqa
+    global _loop_holder, _context_holder  # ruff: ignore[global-variable-not-assigned, global-statement]
     _loop_holder = None
 
-    def watchdog() -> None:  # noqa
+    def watchdog() -> None:  # ruff: ignore[too-many-branches, too-many-locals, too-many-statements]
         if stop_event.wait(timeout=timeout):
             return
 
@@ -166,7 +166,7 @@ def actor_system_timeout_monitor(  # noqa: PLR0915
 
         # Проверяем наличие тасок напрямую через объект цикла, игнорируя проверку .is_running()
         # (в момент дедлока флаг запущенности в Си рантайме может вести себя непредсказуемо)
-        if active_loop:  # noqa: PLR1702
+        if active_loop:  # ruff: ignore[too-many-nested-blocks]
             try:
                 tasks = list(asyncio.all_tasks(active_loop))
                 out.write(
@@ -348,7 +348,7 @@ def make_chaos_handler(
     request_counts: defaultdict[str, int] = defaultdict(int)
     lock = threading.Lock()
 
-    def handler(request: Request) -> Response | None:  # noqa
+    def handler(request: Request) -> Response | None:  # ruff: ignore[too-many-return-statements, too-many-locals]
         # 1. Уникальная подпись запроса (Учитываем Range, чтобы чанки отличались)
         sig = f"{request.path}|{request.method}|{request.headers.get('Range', '')}"
 
@@ -446,7 +446,7 @@ def make_chaos_handler(
     return handler
 
 
-runner = CliRunner(catch_exceptions=False)
+runner = CliRunner()
 
 
 @st.composite
@@ -531,12 +531,12 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
 def build_args_list(
     params: dict[str, dict[str, bool] | Any], urls: list[str]
 ) -> list[str]:
-    args = urls[:]
+    args = urls.copy()
 
     # Флаги
     for name, value in params.items():
         if isinstance(value, dict):
-            for flag, enabled in cast(dict[str, bool], value).items():
+            for flag, enabled in cast("dict[str, bool]", value).items():
                 if enabled:
                     args.append(f"--{flag}")
             continue
@@ -555,7 +555,7 @@ def build_args_list(
     suppress_health_check=[HealthCheck.function_scoped_fixture],
     verbosity=Verbosity.verbose,
 )
-def test_hypothesis_nuclear_fuzzer(  # noqa
+def test_hypothesis_nuclear_fuzzer(  # ruff: ignore[too-many-branches, too-many-locals, too-many-statements]
     data: dict[str, Any],
     httpserver: HTTPServer,
     tmp_path: Path,
@@ -606,7 +606,7 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
     )
     debug = False
     if debug:
-        global _current_tracer  # noqa: PLW0603
+        global _current_tracer  # ruff: ignore[global-statement]
         _current_tracer = VizTracer(
             log_async=True,
             # Заставляем трекер игнорировать стандартный шум библиотек
@@ -619,7 +619,7 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
         f"Running: my-tool {' '.join(shlex.quote(a) for a in final_args)}",
         file=sys.__stderr__,
     )
-    print("Your debug message here 1000", file=sys.__stderr__, flush=True)
+
     if debug:
         try:
             with actor_system_timeout_monitor(timeout=95, tracer=_current_tracer):
@@ -630,7 +630,6 @@ def test_hypothesis_nuclear_fuzzer(  # noqa
             _current_tracer = None
     else:
         result = runner.invoke(app, final_args)
-    print("Your debug message here 2", file=sys.__stderr__, flush=True)
 
     # 4. ПРОВЕРКА ИНВАРИАНТОВ (ГЛАВНАЯ МАГИЯ PBT)
 

@@ -170,7 +170,6 @@ type StateKeeperMsg = (
     | UpdateStatusDownloading
     | GetReadyFileCmd
     | FileFinishedCmd
-    | FileFinishedCmd
     | GetSnapshotCmd
     | ProgressDeltaCmd
     | UpdateBytesToCheckCmd

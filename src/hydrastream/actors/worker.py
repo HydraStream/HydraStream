@@ -113,7 +113,7 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
                         throttle_sec=2.0,
                     )
 
-                    await self._requeue_chunk(chunk, delay_range=(0.1, 1.0))
+                    await self._requeue_chunk(chunk, delay=0.5)
 
                     return
 
@@ -179,7 +179,7 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
         elif status == 429:
             await self.controller_outbox.send_data(TooManyRequests())
 
-        await self._requeue_chunk(chunk, delay_range=(0.5, 2.0))
+        await self._requeue_chunk(chunk, delay=1.0)
 
     @abstractmethod
     async def _handle_critical_requests_error(
@@ -191,7 +191,7 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
     async def _requeue_chunk(
         self,
         chunk: Chunk,
-        delay_range: tuple[float, float] = (1.0, 3.0),
+        delay: float = 2.0,
     ) -> None:
         pass
 
@@ -202,7 +202,6 @@ class BaseDownloadWorker(BaseActor[Chunk], ABC):
     @abstractmethod
     def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
         """Специфичный ключ сортировки для очередей"""
-        pass
 
     @abstractmethod
     async def _file_done(
@@ -228,7 +227,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
     async def _requeue_chunk(
         self,
         chunk: Chunk,
-        delay_range: tuple[float, float] = (1.0, 3.0),
+        delay: float = 2.0,
     ) -> None:
         file_obj = chunk.file
         supports_ranges = file_obj.meta.supports_ranges
@@ -244,7 +243,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
             sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),
             data=chunk,
         )
-        delay = random.uniform(*delay_range)
+        delay = random.lognormvariate(delay, 0.25)
         await asyncio.sleep(delay)
 
     @override
@@ -270,7 +269,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
 
                 async for data in r.aiter_bytes(chunk_size=131072):
                     if len(data) > bytes_to_read:
-                        data = data[:bytes_to_read]  # noqa: PLW2901
+                        data = data[:bytes_to_read]
 
                     buffer_list.append(data)
                     current_buffer_size += len(data)
@@ -338,7 +337,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
     async def _requeue_chunk(
         self,
         chunk: Chunk,
-        delay_range: tuple[float, float] = (1.0, 3.0),
+        delay: float = 2.0,
     ) -> None:
         file_obj = chunk.file
         supports_ranges = file_obj.meta.supports_ranges
@@ -375,7 +374,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
             sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),
             data=chunk,
         )
-        delay = random.uniform(*delay_range)
+        delay = random.lognormvariate(delay, 0.25)
         await asyncio.sleep(delay)
 
     @override
@@ -407,7 +406,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
 
                 async for data in r.aiter_bytes(chunk_size=131072):
                     if len(data) > bytes_to_read:
-                        data = data[:bytes_to_read]  # noqa: PLW2901
+                        data = data[:bytes_to_read]
 
                     buffer_list.append(data)
                     current_buffer_size += len(data)

@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import errno
 import hashlib
+import operator
 import os
 import re
 import shutil
@@ -106,7 +107,7 @@ class LocalStorageManager(StorageBackend):
         if sys.platform == "win32":
             self._sync_win32_pwrite(fd_or_conn, data_bytes, offset)
         elif hasattr(os, "pwritev"):
-            self._write_posix_vectored(fd_or_conn, data_bytes, len_data, offset)
+            self._write_posix_vectored(fd_or_conn, data_bytes, offset)
 
             # Сброс кэша (только для POSIX)
             if hasattr(os, "posix_fadvise"):
@@ -119,18 +120,18 @@ class LocalStorageManager(StorageBackend):
             self._write_windows_merged(fd_or_conn, data_bytes, offset)
 
     def _write_posix_vectored(
-        self, fd: int, data_bytes: list[bytes], len_data: int, offset: int
+        self, fd: int, data_bytes: list[bytes], offset: int
     ) -> None:
         """Сложная векторная запись (Zero-Copy) для
-        Linux/macOS с обходом лимита IOV_MAX и точной обработкой частичной записи."""
-
-        IOV_MAX = getattr(os, "UIO_MAXIOV", 1024)  # noqa: N806
+        Linux/macOS с обходом лимита IOV_MAX и точной обработкой частичной записи.
+        """
+        iov_max = getattr(os, "UIO_MAXIOV", 1024)
 
         current_offset = offset
 
         # Внешний цикл: двигаемся по списку data_bytes строгими пачками
-        for i in range(0, len(data_bytes), IOV_MAX):
-            batch_bytes = data_bytes[i : i + IOV_MAX]
+        for i in range(0, len(data_bytes), iov_max):
+            batch_bytes = data_bytes[i : i + iov_max]
             views = [memoryview(b) for b in batch_bytes]
 
             # Считаем точную длину только текущей пачки
@@ -298,7 +299,7 @@ class LocalStorageManager(StorageBackend):
             return None, 0
 
         # Сортируем по числу (второй элемент кортежа) и берем самый большой
-        state_path, _ = max(found_states, key=lambda x: x[1])
+        state_path, _ = max(found_states, key=operator.itemgetter(1))
 
         try:
             with state_path.open("rb") as f:
@@ -355,8 +356,6 @@ class LocalStorageManager(StorageBackend):
         calculated = await loop.run_in_executor(None, _compute_hash, algorithm)
 
         if calculated != expected_checksum:
-            # filepath = self.output_dir / filename
-            # filepath.unlink(missing_ok=True)
             self.delete_state(filename)
             raise HashMismatchError(
                 filename=filename,

@@ -227,7 +227,7 @@ class File:
         # 3. Единственное, что Pydantic не сделает сам —
         # не проставит обратную ссылку _file в каждый чанк (т.к. это цикл)
         for chunk in file_obj.chunks:
-            chunk._file = file_obj  # pyright: ignore[reportPrivateUsage]
+            chunk._file = file_obj  # pyright: ignore[reportPrivateUsage] # noqa: SLF001, N802
 
         return file_obj
 

@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
+# ruff: noqa :TC001, TC002
 from __future__ import annotations
 
 import os

@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator, Callable, Iterator
 from dataclasses import InitVar, field
 from itertools import count
 from types import TracebackType
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urlparse
 
 from hydrastream.actors.streamer import file_streamer
@@ -29,7 +29,7 @@ from hydrastream.messages.state import (
     TaskStatus,
 )
 
-ON_ENGINE_START_HOOK: Callable[[HydraContext], Any] = lambda x: None  # noqa: E731
+ON_ENGINE_START_HOOK: Callable[[HydraContext], Any] = lambda x: None  # noqa: ARG005, E731
 ON_TEST_HOOK: bool = False
 
 
@@ -55,7 +55,7 @@ class HydraDaemon:
 
         self._ctx = build_context(self.config, ui=self._ui)
 
-    async def __aenter__(self) -> "HydraDaemon":
+    async def __aenter__(self) -> Self:
         self.start()
         return self
 
@@ -84,7 +84,7 @@ class HydraDaemon:
             "HydraEngine successfully started in background.", status=LogStatus.INFO
         )
 
-    async def get_stream(self, id: int) -> AsyncGenerator[bytes, None] | None:
+    async def get_stream(self, id_: int) -> AsyncGenerator[bytes, None] | None:
         if self._ctx.session_killer.is_set():
             return None
         """
@@ -95,7 +95,7 @@ class HydraDaemon:
         reply_future = loop.create_future()
 
         await self._ctx.state_q.send_data(
-            GetReadyFileCmd(file_id=id, reply_to=reply_future)
+            GetReadyFileCmd(file_id=id_, reply_to=reply_future)
         )
 
         try:
@@ -109,11 +109,10 @@ class HydraDaemon:
 
             return None
 
-        await self._ctx.files_q.send_data(file_obj, sort_key=(id,))
+        await self._ctx.files_q.send_data(file_obj, sort_key=(id_,))
 
         return file_streamer(
             ui=self._ctx.ui,
-            is_debug=self._ctx.config.debug,
             file_obj=file_obj,
             credit_outbox=self._ctx.credit_q,
             reg_events_outbox=self._ctx.state_q,
@@ -136,10 +135,8 @@ class HydraDaemon:
             )
         except asyncio.CancelledError:
             return None
-        except Exception:
-            return None
 
-    async def wait_for_file(self, id: int) -> TaskStatus | None:
+    async def wait_for_file(self, id_: int) -> TaskStatus | None:
         if self._ctx.session_killer.is_set():
             return None
         """
@@ -150,7 +147,7 @@ class HydraDaemon:
         reply_future = loop.create_future()
 
         await self._ctx.state_q.send_data(
-            AwaitFileCmd(file_id=id, reply_to=reply_future)
+            AwaitFileCmd(file_id=id_, reply_to=reply_future)
         )
 
         try:
@@ -160,7 +157,7 @@ class HydraDaemon:
 
         except Exception as e:
             self._ui.log(
-                f"Failed to get result for task {id}: {e}", status=LogStatus.ERROR
+                f"Failed to get result for task {id_}: {e}", status=LogStatus.ERROR
             )
             if self.config.debug:
                 raise
@@ -267,7 +264,7 @@ class HydraDaemon:
     # ==========================================
     # ПУБЛИЧНОЕ API С ЗАЩИТОЙ
     # ==========================================
-    async def add_download(  # noqa
+    async def add_download(  # noqa: PLR0911, C901
         self,
         url: str,
         priority: int = 0,
@@ -286,7 +283,7 @@ class HydraDaemon:
         try:
             result = urlparse(url)
             if not (result.scheme in {"http", "https"} and result.netloc):
-                raise ValueError()
+                raise ValueError
 
         except ValueError:
             self._ui.log(
@@ -322,13 +319,13 @@ class HydraDaemon:
             )
             return None
 
-        id = next(self._counter)
+        id_ = next(self._counter)
         try:
-            link_data = LinkData(id=id, url=url, checksum=checksum)
-            await self._ctx.links_q.send_data(link_data, sort_key=(priority, id))
+            link_data = LinkData(id=id_, url=url, checksum=checksum)
+            await self._ctx.links_q.send_data(link_data, sort_key=(priority, id_))
             await self._ctx.state_q.send_data(LinkAddedCmd(link_data=link_data))
 
-            return id
+            return id_
 
         except Exception as e:
             self._ui.log(f"Failed to push link to queue: {e}", status=LogStatus.ERROR)

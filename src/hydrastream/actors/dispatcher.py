@@ -76,12 +76,10 @@ class BaseFileDispatcher(BaseActor[File], ABC):
     @abstractmethod
     async def _prepare_file(self, file_obj: File) -> None:
         """Специфичная логика подготовки файла"""
-        pass
 
     @abstractmethod
     def _get_sort_key(self, file_id: int, current_pos: int) -> tuple[int, ...]:
         """Специфичный ключ сортировки для очередей"""
-        pass
 
 
 @hydra_dataclass

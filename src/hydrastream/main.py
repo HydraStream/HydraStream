@@ -52,7 +52,7 @@ def load_user_config() -> dict[str, Any]:
     try:
         with config_path.open("rb") as f:
             return tomllib.load(f)
-    except Exception:
+    except OSError:
         return {}
 
 
@@ -66,10 +66,10 @@ app = typer.Typer(
 )
 
 
-def version_callback(value: bool) -> None:
+def version_callback(value: bool) -> None:  # noqa: FBT001
     if value:
         typer.echo(f"HydraStream v{__version__}")
-        raise typer.Exit()
+        raise typer.Exit
 
 
 def validate(
@@ -212,7 +212,8 @@ async def _stream_download_tasks(
                 sys.exit(e.exit_code)
 
 
-async def async_main(  # noqa
+async def async_main(  # noqa: PLR0912, C901
+    *,
     links: list[str] | None,
     input_file: str | None,
     stream: bool,
@@ -240,7 +241,8 @@ async def async_main(  # noqa
         input_file: Path to a text file containing URLs, or '-' for stdin.
         stream: Whether to stream data to stdout instead of writing to disk.
         typehash: Hash algorithm type (e.g., md5, sha256).
-        checksum: Expected checksum checksum (only evaluated if a single valid link is provided).
+        checksum: Expected checksum checksum (only evaluated
+        if a single valid link is provided).
         output_dir: Destination directory for downloaded files.
         dry_run: Simulate the download process (metadata fetch only).
         no_ui: Disable GUI (plain text logs only) if set to True.
@@ -254,7 +256,7 @@ async def async_main(  # noqa
         speed_limit: Global bandwidth throttle limit in MB/s.
         browser: Browser TLS fingerprint to impersonate.
         debug: Enable debug mode to propagate full tracebacks on failure.
-    """  # noqa: E501
+    """  # ruff: ignore[line-too-long]
 
     ui_config = UIConfig(
         is_verify=verify,
@@ -287,8 +289,8 @@ async def async_main(  # noqa
 
         expected_checksums = _prepare_checksums(active_links, checksum, typehash)
 
-        assert sys.__stdout__ is not None
-        is_terminal = sys.__stdout__.isatty()
+        is_terminal = sys.__stdout__.isatty() if sys.__stdout__ is not None else False
+
         if stream and is_terminal and not dry_run and not ON_TEST_HOOK:
             ui.report(
                 InvalidParameterError(
@@ -317,17 +319,18 @@ async def async_main(  # noqa
                 )
         else:
             async with HydraDaemon(config=config, initial_ui=ui) as daemon:
-                tasks: list[int] = []
-
-                for i in active_links:
+                tasks: list[int] = [
+                    task
+                    for i in active_links
                     if (
                         task := await daemon.add_download(
                             i,
                             expected_checksums=checksum,
                             type_hash=typehash if checksum else None,
                         )
-                    ) is not None:
-                        tasks.append(task)
+                    )
+                    is not None
+                ]
 
                 if stream and not config.dry_run:
                     await _stream_download_tasks(
@@ -378,7 +381,7 @@ def flatten_exceptions(e: BaseException) -> list[BaseException]:
     return [e]
 
 
-def get_cfg(key: str, default: Any = None) -> Any:  # noqa: ANN401
+def get_cfg(key: str, *, default: Any = None) -> Any:  # noqa: ANN401
     return USER_CONFIG.get(key, default)
 
 
@@ -407,7 +410,7 @@ def cli(
             "--typehash",
             "-th",
             help="Hash algorithm type (e.g., md5, sha256).",
-            default_factory=partial(get_cfg, "typehash", "md5"),
+            default_factory=partial(get_cfg, "typehash", default="md5"),
         ),
     ],
     checksum: Annotated[
@@ -425,7 +428,7 @@ def cli(
             "-o",
             "--output",
             help="Destination directory for downloaded files.",
-            default_factory=partial(get_cfg, "output", "downloads"),
+            default_factory=partial(get_cfg, "output", default="downloads"),
         ),
     ],
     threads: Annotated[
@@ -443,7 +446,7 @@ def cli(
             "-s",
             "--stream",
             help="Enable streaming mode (outputs to stdout without saving to disk).",
-            default_factory=partial(get_cfg, "stream", False),
+            default_factory=partial(get_cfg, "stream", default=False),
         ),
     ],
     dry_run: Annotated[
@@ -453,7 +456,7 @@ def cli(
             "-dr",
             help="""Simulate the process: fetch metadata, check disk space, and print a
              report without downloading data.""",
-            default_factory=partial(get_cfg, "dry-run", False),
+            default_factory=partial(get_cfg, "dry-run", default=False),
         ),
     ],
     min_chunk_size_mb: Annotated[
@@ -462,7 +465,7 @@ def cli(
             "--min-chunk-mb",
             "-mcm",
             help="Minimum chunk size in Megabytes for standard disk downloads.",
-            default_factory=partial(get_cfg, "min-chunk-mb", 1),
+            default_factory=partial(get_cfg, "min-chunk-mb", default=1),
         ),
     ],
     max_stream_chunk_size_mb: Annotated[
@@ -471,7 +474,7 @@ def cli(
             "--stream-chunk-mb",
             "-scm",
             help="Target chunk size in Megabytes for streaming mode.",
-            default_factory=partial(get_cfg, "stream-chunk-mb", 5),
+            default_factory=partial(get_cfg, "stream-chunk-mb", default=5),
         ),
     ],
     buffer_size_mb: Annotated[
@@ -498,7 +501,7 @@ def cli(
             "--no-ui",
             "-nu",
             help="Disable GUI (plain text logs only) if set to True.",
-            default_factory=partial(get_cfg, "no-ui", False),
+            default_factory=partial(get_cfg, "no-ui", default=False),
         ),
     ],
     quiet: Annotated[
@@ -507,7 +510,7 @@ def cli(
             "--quiet",
             "-q",
             help="Dead silence. No console output at all.",
-            default_factory=partial(get_cfg, "quiet", False),
+            default_factory=partial(get_cfg, "quiet", default=False),
         ),
     ],
     json_logs: Annotated[
@@ -516,7 +519,7 @@ def cli(
             "--json",
             "-j",
             help="Output logs in JSON Lines format (for machines).",
-            default_factory=partial(get_cfg, "json", False),
+            default_factory=partial(get_cfg, "json", default=False),
         ),
     ],
     verify: Annotated[
@@ -525,7 +528,7 @@ def cli(
             "--verify/--no-verify",
             "-V/-N",
             help="Verify the downloaded file checksum. Use --no-verify to skip check.",
-            default_factory=partial(get_cfg, "verify", True),
+            default_factory=partial(get_cfg, "verify", default=True),
         ),
     ],
     browser: Annotated[
@@ -534,10 +537,10 @@ def cli(
             "-B",
             "--browser",
             help="Browser TLS fingerprint to impersonate (e.g., chrome120, safari153).",
-            default_factory=partial(get_cfg, "browser", "chrome120"),
+            default_factory=partial(get_cfg, "browser", default="chrome120"),
         ),
     ],
-    version: Annotated[
+    _version: Annotated[
         bool | None,
         typer.Option("--version", "-v", callback=version_callback, is_eager=True),
     ] = None,

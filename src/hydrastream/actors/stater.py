@@ -63,7 +63,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
     _prev_global_bytes: int = 0
 
     @override
-    async def _handle_msg(self, msg: StateKeeperMsg) -> None:  # noqa
+    async def _handle_msg(self, msg: StateKeeperMsg) -> None:  # noqa: C901, PLR0912, PLR0915
         match msg:
             case LinkAddedCmd(link_data=data):
                 trace = JobTrace(file_obj=data)
@@ -179,7 +179,7 @@ class StateKeeperActor(BaseActor[StateKeeperMsg]):
                 assert_never(unreachable)
 
     @override
-    async def _on_stop(self) -> None:  # noqa
+    async def _on_stop(self) -> None:  # noqa: C901, PLR0912
         if not self.is_stream:
             for trace in self._traces.values():
                 if isinstance(trace.file_obj, File):
