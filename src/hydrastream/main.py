@@ -28,6 +28,7 @@ from hydrastream.exceptions import (
     ValidationError,
 )
 from hydrastream.facade import HydraDaemon
+from hydrastream.hydrastream_core import rust_ping
 from hydrastream.interfaces import MonitorBackend
 
 ON_TEST_HOOK: bool = False
@@ -269,6 +270,7 @@ async def async_main(  # noqa: PLR0912, C901
     )
     ui = create_monitor(ui_config)
     ui.start()
+    ui.log(rust_ping(), status=LogStatus.WARNING)
 
     try:
         config = HydraConfig(

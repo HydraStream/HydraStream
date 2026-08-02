@@ -27,3 +27,18 @@ musor/
 typings
 deadlock_report.json
 pyrightconfig.json
+
+
+# --- Rust & Maturin ---
+# Временные файлы сборки Cargo (могут весить гигабайты)
+**/target/
+
+# Скомпилированные бинарные модули Python (so/pyd) внутри пакета
+# Мы игнорируем только бинарники, оставляя исходный Python-код и .pyi файлы
+src/hydrastream/*.so
+src/hydrastream/*.pyd
+
+# Опционально: если Cargo создает Cargo.lock внутри rust_core,
+# для библиотек его обычно рекомендуют игнорировать (в отличие от uv.lock для приложений).
+# Но внутри подпапки можно оставить, если хотите зафиксировать версии Rust-зависимостей.
+# src/rust_core/Cargo.lock

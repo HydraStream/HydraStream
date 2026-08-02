@@ -1,0 +1,11 @@
+[package]
+name = "hydrastream_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "hydrastream_core"
+crate-type = ["cdylib"] # Важно: собираем динамическую библиотеку C-API
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["extension-module"] }

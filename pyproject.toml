@@ -43,30 +43,50 @@ classifiers =[
 readme = "README.md"
 
 # Минимальная версия Python.
-# Крайне важно для нас, так как архитектура завязана на DOD и оптимизированные dataclasses из 3.11+
+# Крайне важно для нас, так как архитектура завязана на DOD и оптимизированные dataclasses из 3.12+
 requires-python = ">=3.12"
 
 # Продовые зависимости (то, что скачается у пользователя при установке).
-dependencies =[
-    # Для алгоритма AIMD и rate-лимитов
-    "curl-cffi>=0.15.0",              # Асинхронный HTTP-клиент с поддержкой HTTP/2 (>=0.15.0 fixes CVE-2026-33752 SSRF via redirects)
-    "orjson>=3.11.7",                    # Ультра-быстрый парсер JSON (написан на Rust)
-    "pydantic>=2.13.3",
-    "pydantic-settings>=2.14.0",
-    "pygments>=2.20.0",                  # Transitive via rich; pinned to avoid CVE-2026-4539 (ReDoS in AdlLexer)
-    "rich>=14.3.2",                      # Отрисовка красивых прогресс-баров в консоли
-    "typer>=0.24.1",                     # Для создания CLI-интерфейса (парсинг аргументов)
-    "uvloop>=0.22.1 ; sys_platform != 'win32'", # Сверхбыстрый event-loop для asyncio (не ставим на Windows)
+dependencies = [
+    # Для алгоритма AIMD и rate-лимитов (fixes CVE-2026-33752 SSRF via redirects)
+    "curl-cffi >= 0.16.0",
+
+    # Ультра-быстрый парсер JSON (написан на Rust)
+    "orjson >= 3.11.9",
+    "pydantic >= 2.13.4",
+    "pydantic-settings >= 2.14.2",
+
+    # Transitive via rich; pinned to avoid CVE-2026-4539 (ReDoS in AdlLexer)
+    "pygments >= 2.20.0",
+
+    # Отрисовка красивых прогресс-баров в консоли
+    "rich >= 15.0.0",
+
+    # Для создания CLI-интерфейса (парсинг аргументов)
+    "typer >= 0.27",
+
+    "uvloop >= 0.22.1 ; sys_platform != 'win32'",
     "pywin32 ; sys_platform == 'win32'",
+    "maturin >= 1.14.1",
 ]
+
 
 # ==============================================================================
 # СИСТЕМА СБОРКИ
 # ==============================================================================
 [build-system]
-# Используем uv (написан на Rust) вместо медленного setuptools для сборки пакета
-requires =["uv_build>=0.10.4,<0.12.0"]
-build-backend = "uv_build"
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+# Указываем путь к Cargo.toml нашего Rust-модуля
+manifest-path = "src/rust_core/Cargo.toml"
+# Указываем maturin, где искать Python пакеты для включения в wheel
+python-source = "src"
+module-name = "hydrastream.hydrastream_core"
+# Опционально: автоматически генерировать .pyi файлы типов для автокомплита в IDE
+binding = "pyo3"
+stub-generation = true
 
 # ==============================================================================
 # ЗАВИСИМОСТИ ДЛЯ РАЗРАБОТКИ (НЕ идут в прод пользователю)
@@ -75,18 +95,18 @@ build-backend = "uv_build"
 dev =[
     "bandit>=1.9.4",       # Поиск уязвимостей в безопасности кода
     "hypothesis>=6.151.10",
-    "icecream>=2.1.10",    # Удобный дебаг-принт (ic() вместо print())
-    "pip-licenses>=5.5.1", # Проверка лицензий зависимостей
-    "pre-commit>=4.5.1",   # Хуки перед коммитом (чтобы говнокод не улетел в гит)
-    "pydantic>=2.13.3",
-    "pyright>=1.1.408",    # Строгий статический анализатор типов от Microsoft
-    "pytest>=9.0.3",       # Фреймворк для тестов (>=9.0.3 fixes CVE-2025-71176: /tmp/pytest-of-{user} symlink attack)
-    "pytest-asyncio>=1.3.0", # Плагин pytest для тестирования async-функций
-    "pytest-cov>=7.0.0",   # Замер покрытия кода тестами (coverage)
+    "icecream>=2.2",    # Удобный дебаг-принт (ic() вместо print())
+    "pip-licenses>=5.5.5", # Проверка лицензий зависимостей
+    "pre-commit>=4.6.1",   # Хуки перед коммитом (чтобы говнокод не улетел в гит)
+    "pydantic>=2.13.4",
+    "pyright>=1.1.411",    # Строгий статический анализатор типов от Microsoft
+    "pytest>=9.1.1",       # Фреймворк для тестов (>=9.0.3 fixes CVE-2025-71176: /tmp/pytest-of-{user} symlink attack)
+    "pytest-asyncio>=1.4.0", # Плагин pytest для тестирования async-функций
+    "pytest-cov>=7.1.0",   # Замер покрытия кода тестами (coverage)
     "pytest-httpserver>=1.1.5",
     "pytest-mock>=3.15.1",
     "pytest-timeout>=2.4.0",
-    "ruff>=0.15.1",        # Ультра-быстрый линтер и форматтер на Rust (заменяет flake8, black, isort)
+    "ruff>=0.16.1",        # Ультра-быстрый линтер и форматтер на Rust (заменяет flake8, black, isort)
     "viztracer>=1.1.1",
 ]
 
@@ -138,6 +158,7 @@ ignore = [
     "RUF",  # (Или "RUF022") — запрещает линтеру требовать замену кодов на текстовые имена
     "D",       # pydocstyle: требует docstring у каждой функции и класса
     "DOC",     # pydoclint: полностью отключает новые проверки аргументов в docstrings (DOC201, DOC501 и др.)
+    "PYI021",
 
     # --- Подавление типов ---
     "PGH003",  # blanket-type-ignore: разрешает использовать чистый '# type: ignore'
