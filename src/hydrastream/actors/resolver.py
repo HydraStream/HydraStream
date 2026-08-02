@@ -2,7 +2,6 @@
 # Licensed under the MIT License.
 
 import asyncio
-import random
 from abc import ABC, abstractmethod
 from typing import assert_never, final, override
 
@@ -26,7 +25,7 @@ from hydrastream.messages.io import LinkData
 from hydrastream.messages.state import ProgressDeltaCmd, RegisterFileCmd, StateKeeperMsg
 from hydrastream.network import safe_request, stream_chunk
 from hydrastream.providers import ProviderRouter
-from hydrastream.utils import extract_filename, redact_url
+from hydrastream.utils import extract_filename, lognorm_delay, redact_url
 
 
 class BaseResolverKwargs(BaseActorKwargs):
@@ -163,7 +162,7 @@ class BaseMetadataResolver(BaseActor[LinkData], ABC):
         delay: float = 2.0,
     ) -> None:
         await self.inbox.send_data(data)
-        delay = random.lognormvariate(delay, 0.25)
+        delay = lognorm_delay(target_seconds=delay, max_delay=delay * 1.5)
 
         await asyncio.sleep(delay)
 

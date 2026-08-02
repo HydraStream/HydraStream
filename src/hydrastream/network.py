@@ -4,8 +4,6 @@
 import asyncio
 import contextlib
 import email.utils
-import math
-import random
 import time
 from collections.abc import AsyncGenerator
 from typing import Unpack
@@ -16,21 +14,7 @@ from curl_cffi.requests.session import HttpMethod, RequestParams
 
 from hydrastream.exceptions import LogStatus
 from hydrastream.interfaces import MonitorBackend, NetworkBackend, NetworkStream
-from hydrastream.utils import redact_url
-
-
-def get_network_delay(mode_seconds: float, scatter: float = 0.25) -> float:
-    """
-    Генерирует естественную задержку через логнормальное распределение.
-
-    :param mode_seconds: Самая частая (пиковая) задержка, которую мы хотим видеть.
-    :param scatter: Разброс/длина правого "хвоста"
-    (чем больше, тем длиннее случайные паузы).
-    """
-    # Математическая конвертация привычных секунд в параметры для логарифма
-    mu = math.log(mode_seconds) + (scatter**2)
-
-    return random.lognormvariate(mu, scatter)
+from hydrastream.utils import lognorm_delay, redact_url
 
 
 def _evaluate_failure(
@@ -54,7 +38,9 @@ def _evaluate_failure(
         server_delay = _get_retry_after(response)
 
         delay = (
-            server_delay if server_delay is not None else get_network_delay(2**attempt)
+            server_delay
+            if server_delay is not None
+            else lognorm_delay(target_seconds=2**attempt, max_delay=2**attempt * 1.5)
         )
         ui.log(
             f"Attempt {attempt} failed ({response.status_code}) for {safe_url}. "
@@ -72,7 +58,7 @@ def _evaluate_failure(
             if isinstance(exc, CurlError):
                 err_name = f"CurlError({exc.code})"
 
-            delay = get_network_delay(2**attempt)
+            delay = lognorm_delay(target_seconds=2**attempt, max_delay=2**attempt * 1.5)
             ui.log(
                 f"Network issue ({err_name}) on {safe_url}. "
                 f"Retrying in {delay:.2f}s...",

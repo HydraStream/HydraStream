@@ -478,12 +478,17 @@ def cli_fuzz_strategy(draw: st.DrawFn) -> dict[str, Any]:
 
     if not cli_paths and not file_paths:
         cli_paths = [draw(filenames_strategy())]
+    browser_strategy = st.sampled_from(list(get_args(BrowserTypeLiteral)))
+
+    # 2. Фильтруем старые проблемные форматы Safari (где больше одного '_')
+    # Это автоматически уберет поломанные 'safari18_4_ios', 'safari17_2_ios' и т.д.
+    valid_browser_strategy = browser_strategy.filter(
+        lambda b: not (b.startswith("safari") and b.count("_") > 1)
+    )
 
     params = {
         "threads": draw(st.one_of(st.none(), st.integers(1, 128))),
-        "browser": draw(
-            st.one_of(st.none(), st.sampled_from(list(get_args(BrowserTypeLiteral))))
-        ),
+        "browser": draw(st.one_of(st.none(), valid_browser_strategy)),
         "buffer": draw(st.one_of(st.none(), st.integers(50, 100))),
         "limit": draw(st.one_of(st.none(), st.floats(0.1, 100.0))),
         "min-chunk-mb": draw(st.one_of(st.none(), st.integers(1, 20))),
@@ -549,7 +554,7 @@ def build_args_list(
 
 @given(data=cli_fuzz_strategy())
 @settings(
-    max_examples=20,
+    max_examples=500,
     deadline=None,
     phases=[Phase.reuse, Phase.generate],  # Phase.explicit
     suppress_health_check=[HealthCheck.function_scoped_fixture],

@@ -1,7 +1,9 @@
 # Copyright (c) 2026 Valentin Zhukovetski
 # Licensed under the MIT License.
 
+import math
 import mimetypes
+import random
 import re
 from email.utils import unquote
 from pathlib import Path
@@ -76,3 +78,32 @@ def extract_filename(url: str, headers: Headers) -> str:
             filename += ".bin"
 
     return filename
+
+
+def lognorm_delay(target_seconds: float, max_delay: float | None = None) -> float:
+    """Генерирует задержку со случайным коэффициентом разброса от 10% до 30%.
+
+    :param target_seconds: Желаемое среднее время ожидания (в секундах).
+    :param max_delay: Максимально допустимая задержка в секундах.
+    :return: Случайное число секунд (float) > 0.
+    """
+    if target_seconds <= 0:
+        return 0.0
+
+    # Генерируем случайный разброс от 10% до 30% при каждом вызове функции
+    variance_fraction = random.uniform(0.1, 0.3)  # noqa: S311
+
+    # Переводим физический разброс в параметр sigma
+    sigma = math.sqrt(math.log(1 + variance_fraction**2))
+
+    # Рассчитываем mu так, чтобы среднее значение равнялось target_seconds
+    mu = math.log(target_seconds) - (sigma**2) / 2
+
+    # Генерируем случайное логнормальное число
+    delay = random.lognormvariate(mu, sigma)
+
+    # Применяем ограничение сверху
+    if max_delay is not None:
+        delay = min(delay, max_delay)
+
+    return delay

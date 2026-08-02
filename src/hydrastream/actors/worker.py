@@ -3,7 +3,6 @@
 
 import asyncio
 import os
-import random
 import sys
 import traceback
 from abc import ABC, abstractmethod
@@ -54,6 +53,7 @@ from hydrastream.messages.traffic import (
     WakeUpPill,
 )
 from hydrastream.network import stream_chunk
+from hydrastream.utils import lognorm_delay
 
 
 class BaseWorkerKwargs(BaseActorKwargs):
@@ -243,7 +243,7 @@ class StreamDownloadWorker(BaseDownloadWorker):
             sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),
             data=chunk,
         )
-        delay = random.lognormvariate(delay, 0.25)
+        delay = lognorm_delay(target_seconds=delay, max_delay=delay * 1.5)
         await asyncio.sleep(delay)
 
     @override
@@ -374,7 +374,7 @@ class DiskDownloadWorker(BaseDownloadWorker):
             sort_key=self._get_sort_key(chunk.file.meta.id, chunk.current_pos),
             data=chunk,
         )
-        delay = random.lognormvariate(delay, 0.25)
+        delay = lognorm_delay(target_seconds=delay, max_delay=delay * 1.5)
         await asyncio.sleep(delay)
 
     @override
