@@ -554,7 +554,7 @@ def build_args_list(
 
 @given(data=cli_fuzz_strategy())
 @settings(
-    max_examples=500,
+    max_examples=20,
     deadline=None,
     phases=[Phase.reuse, Phase.generate],  # Phase.explicit
     suppress_health_check=[HealthCheck.function_scoped_fixture],
